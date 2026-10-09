@@ -1,4 +1,4 @@
-# QUIC endpoints
+# QUIC datagram endpoints
 
 Add a manual endpoint such as `quic://node.example.com:24752` in **Agents → Manage**,
 then enable QUIC and the required IPv4/IPv6 direct methods on the Edge. Addresses
@@ -34,11 +34,8 @@ run every second. Peer Noise admission shares the existing eight-slot limit.
 A stable stateless-reset key is derived from the durable Agent identity using
 HKDF-SHA256 with a protocol-specific label.
 
-Packet Links use [RFC 9221 QUIC datagrams](https://quic-go.net/docs/quic/datagrams/).
-TCP byte connections perform the same Noise/candidate admission, then switch
-to one reliable bidirectional QUIC stream. Unidirectional streams are disabled.
-The stream receive window starts at 256 KiB and is bounded to 4 MiB, including
-the connection-wide window. QUIC keepalives run every five seconds. Lost packet
+All peer messages use [RFC 9221 QUIC datagrams](https://quic-go.net/docs/quic/datagrams/).
+Bidirectional and unidirectional QUIC streams are disabled. Lost business-data
 datagrams are not retransmitted; the existing peer handshake retries and Link
 selection retries still apply to their respective control messages. QUIC supplies
 congestion control and protects its packets with TLS keys. The inner Noise
@@ -68,8 +65,8 @@ errors are discarded before allocating an assembly.
 QUIC uses bounded datagram fragmentation for overlay packets that exceed its
 underlay packet budget. The underlay must carry QUIC's minimum 1200-byte UDP
 payload. Large overlay packets require more fragments and are more likely to be
-lost if any individual datagram drops. TCP bytes use reliable streams and do not
-enter this datagram fragmentation path. See [stream forwarding](stream-operation.md).
+lost if any individual datagram drops. TCP inside the overlay can retransmit
+its own lost data.
 
 ## Sharing the native UDP socket
 

@@ -10,7 +10,6 @@ import (
 	"regexp"
 
 	"github.com/eWloYW8/GraphWAN/internal/model"
-	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
 type Config struct {
@@ -79,28 +78,4 @@ type BatchDevice interface {
 	BatchSize() int
 	ReadBatch(buffers [][]byte, sizes []int) (int, error)
 	WriteBatch(packets [][]byte) error
-}
-
-// TCPPacketWriter accepts access-stack packet buffers synchronously, preserving
-// their segmentation/checksum metadata without copying or retaining ownership.
-type TCPPacketWriter interface {
-	WriteTCPPacket(*stack.PacketBuffer) error
-}
-
-// OffloadReader preserves native TCP GSO packets for the access stack, while
-// returning separate datagrams for UDP. segmentSizes contains the maximum IP
-// segment length (including headers), or zero for an ordinary packet. Only one
-// of Read, ReadBatch and ReadOffloadBatch may consume a device at a time.
-// A reader may replace a TCP buffer with a borrowed view valid until its next
-// read. Consumers must synchronously finish admission and take ownership then.
-type OffloadReader interface {
-	ReadOffloadBatch(buffers [][]byte, sizes, segmentSizes []int) (int, error)
-}
-
-// OwnedOffloadReader reads native TCP directly into access-stack storage.
-// Each non-nil owner is transferred to the caller, including on read errors;
-// it must be injected or released before the next read. Datagrams have no owner
-// and use the caller's ordinary buffers. Admission still uses segmentSizes.
-type OwnedOffloadReader interface {
-	ReadOwnedOffloadBatch(buffers [][]byte, sizes, segmentSizes []int, owners []*stack.PacketBuffer) (int, error)
 }

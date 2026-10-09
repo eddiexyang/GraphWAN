@@ -123,10 +123,9 @@ func quicConfig() *quic.Config {
 	return &quic.Config{Versions: []quic.Version{quic.Version1}, EnableDatagrams: true,
 		HandshakeIdleTimeout: 5 * time.Second, MaxIdleTimeout: 15 * time.Second,
 		InitialPacketSize: 1200, DisablePathMTUDiscovery: true,
-		MaxIncomingStreams: 1, MaxIncomingUniStreams: -1,
-		InitialStreamReceiveWindow: 256 * 1024, MaxStreamReceiveWindow: 4 * 1024 * 1024,
-		InitialConnectionReceiveWindow: 256 * 1024, MaxConnectionReceiveWindow: 4 * 1024 * 1024,
-		KeepAlivePeriod: 5 * time.Second,
+		MaxIncomingStreams: -1, MaxIncomingUniStreams: -1,
+		InitialStreamReceiveWindow: 16 * 1024, MaxStreamReceiveWindow: 16 * 1024,
+		InitialConnectionReceiveWindow: 32 * 1024, MaxConnectionReceiveWindow: 32 * 1024,
 	}
 }
 
@@ -240,8 +239,8 @@ func (h *QUICHub) DialAt(ctx context.Context, endpoint model.Endpoint, family in
 	return nil, err
 }
 
-// QUIC preserves unreliable whole messages over RFC 9221 datagrams. Dedicated
-// byte connections switch to Reliable after admission. Large datagrams are fragmented;
+// QUIC preserves unreliable whole messages over RFC 9221 datagrams. Streams are
+// disabled. A frame larger than the conservative path budget is fragmented;
 // incomplete messages expire instead of acquiring retransmission semantics.
 type QUIC struct {
 	conn             *quic.Conn

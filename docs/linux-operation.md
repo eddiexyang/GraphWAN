@@ -72,10 +72,9 @@ logging, managed updates and OpenWrt persistent-storage requirements.
   50 minutes; old sessions retire after an authenticated replacement is healthy
   and both endpoints have completed the common selection.
   Encryption enforces a one-hour/`2^32`-message hard limit independently.
-- Datagram packet queues are bounded. Congested Links drop datagrams instead of
-  allocating unbounded memory. TCP terminates at access boundaries and uses
-  [byte streams with backpressure](stream-operation.md); native UDP adds no
-  packet retransmission.
+- Packet queues are bounded. Congested Links drop packets instead of allocating
+  unbounded memory. Inner TCP can retransmit; the raw UDP data transport does not
+  add packet retransmission.
 - The controller is used only for management, configuration and telemetry.
   Its absence does not cancel the runtime, peer reconnection or cached startup.
 

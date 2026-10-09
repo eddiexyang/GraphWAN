@@ -61,10 +61,6 @@ func (c *bufferedConn) WriteBuffers(parts net.Buffers) (int64, error) {
 	return parts.WriteTo(c.Conn)
 }
 
-func (c *bufferedConn) UseKernelWriteBacklog() error {
-	return transport.UseKernelTCPBacklog(c.Conn)
-}
-
 func (m *Mesh) startHTTP() {
 	m.webListener = &connIngress{address: m.listener.Addr(), pending: make(chan net.Conn), done: make(chan struct{})}
 	m.webServer = &http.Server{Handler: http.HandlerFunc(m.acceptWebSocket), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 10 * time.Second, MaxHeaderBytes: 8192}

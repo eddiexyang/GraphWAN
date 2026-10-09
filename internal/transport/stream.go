@@ -46,13 +46,6 @@ func (s *Stream) LocalAddr() net.Addr  { return s.conn.LocalAddr() }
 func (s *Stream) RemoteAddr() net.Addr { return s.conn.RemoteAddr() }
 func (s *Stream) Close() error         { return s.conn.Close() }
 
-func (s *Stream) UseKernelWriteBacklog() error {
-	if wrapper, ok := s.conn.(interface{ UseKernelWriteBacklog() error }); ok {
-		return wrapper.UseKernelWriteBacklog()
-	}
-	return UseKernelTCPBacklog(s.conn)
-}
-
 // SendBatch preserves the existing per-message wire framing while amortizing
 // socket writes and cancellation bookkeeping over immediately available packets.
 func (s *Stream) Send(ctx context.Context, data []byte) error {
@@ -172,47 +165,6 @@ func (s *Stream) ReceiveOwnedBatch(ctx context.Context) ([]*packetbuf.Buffer, er
 	return s.receive(ctx, 32)
 }
 
-// ReceiveBorrowedBatch is for synchronous byte-stream consumers only. Views
-// remain valid until the next receive operation, including between partial
-// application Reads. Never enqueue or retain them across another receive.
-func (s *Stream) ReceiveBorrowedBatch(ctx context.Context) (out [][]byte, err error) {
-	s.readMu.Lock()
-	defer s.readMu.Unlock()
-	cleanup, err := deadline(ctx, s.conn.SetReadDeadline)
-	if err != nil {
-		return nil, err
-	}
-	defer cleanup()
-	defer func() {
-		if err != nil {
-			s.conn.Close()
-		}
-	}()
-	out = make([][]byte, 0, 32)
-	for len(out) < 32 {
-		if len(out) > 0 && s.reader.Buffered() < 4 {
-			break
-		}
-		prefix, readErr := s.reader.Peek(4)
-		if readErr != nil {
-			return nil, ctxError(ctx, readErr)
-		}
-		size := int(binary.BigEndian.Uint32(prefix))
-		if size == 0 || size > MaxMessage {
-			return nil, fmt.Errorf("invalid transport frame size %d", size)
-		}
-		if len(out) > 0 && s.reader.Buffered() < 4+size {
-			break
-		}
-		frame, readErr := s.reader.Peek(4 + size)
-		if readErr != nil {
-			return nil, ctxError(ctx, readErr)
-		}
-		out = append(out, frame[4:])
-		s.reader.Discard(4 + size)
-	}
-	return out, nil
-}
 func (s *Stream) receive(ctx context.Context, limit int) (out []*packetbuf.Buffer, err error) {
 	s.readMu.Lock()
 	defer s.readMu.Unlock()

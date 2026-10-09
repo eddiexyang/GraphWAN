@@ -23,6 +23,56 @@ type countedWriteConn struct {
 	writes atomic.Int32
 }
 
+type framingSink struct{ net.Conn }
+
+func (framingSink) Write(b []byte) (int, error)      { return len(b), nil }
+func (framingSink) SetWriteDeadline(time.Time) error { return nil }
+
+type gatherFramingSink struct{ framingSink }
+
+func (gatherFramingSink) WriteBuffers(parts net.Buffers) (int64, error) {
+	var size int64
+	for _, part := range parts {
+		size += int64(len(part))
+	}
+	return size, nil
+}
+
+// Measure transport framing CPU/copies only, excluding crypto and network I/O.
+func BenchmarkTransportFraming(b *testing.B) {
+	messages := make([][]byte, 32)
+	var framed []byte
+	for i := range messages {
+		messages[i] = bytes.Repeat([]byte{byte(i)}, 1280)
+		framed = binary.BigEndian.AppendUint32(framed, uint32(len(messages[i])))
+		framed = append(framed, messages[i]...)
+	}
+	for _, mode := range []string{"copy", "gather", "producer-framed"} {
+		b.Run(mode, func(b *testing.B) {
+			var conn net.Conn = framingSink{}
+			if mode == "gather" {
+				conn = gatherFramingSink{}
+			}
+			sender := NewStream(conn)
+			ctx := context.Background()
+			b.ReportAllocs()
+			b.SetBytes(32 * 1280)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				var err error
+				if mode == "producer-framed" {
+					err = sender.SendFramedBatch(ctx, framed)
+				} else {
+					err = sender.SendBatch(ctx, messages)
+				}
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func (c *countedWriteConn) Write(data []byte) (int, error) {
 	c.writes.Add(1)
 	return c.Conn.Write(data)

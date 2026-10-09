@@ -41,14 +41,5 @@ func TestTCPBacklogBothEnds(t *testing.T) {
 		if err != nil || optionErr != nil || value != TCPNotSentLowWater {
 			t.Fatalf("value=%d err=%v/%v", value, err, optionErr)
 		}
-		if err := NewStream(conn).UseKernelWriteBacklog(); err != nil {
-			t.Fatal(err)
-		}
-		err = raw.Control(func(fd uintptr) {
-			value, optionErr = unix.GetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_NOTSENT_LOWAT)
-		})
-		if err != nil || optionErr != nil || value != 0 {
-			t.Fatalf("byte stream did not inherit kernel default: value=%d err=%v/%v", value, err, optionErr)
-		}
 	}
 }

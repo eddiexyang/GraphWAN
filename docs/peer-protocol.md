@@ -3,10 +3,6 @@
 This documents the packet/channel components shared by the Agent adapters.
 See [NAT limits](nat-operation.md) for traversal constraints.
 
-TCP application traffic uses the authenticated byte-stream extension described
-in [stream forwarding](stream-operation.md). The overlay packet format below
-serves UDP and ICMP; TCP IP payloads are rejected at both packet ingress paths.
-
 ## Admission and handshake
 
 A logical Edge authorizes a Network, local Node, remote Node, transport and pair
@@ -66,7 +62,7 @@ handshake message at 250 ms intervals. Duplicate messages replay the previously
 serialized response; they never generate a new handshake state or nonce. After
 a responder finishes, its receive loop continues answering duplicate Finish
 messages with the original Ready, handling loss of the final confirmation.
-Datagram data messages do not gain retransmission from this handshake mechanism.
+Data messages do not gain retransmission from this handshake mechanism.
 
 Before Link heartbeats/data, the initiator sends an encrypted introduction:
 one zero byte followed by JSON, at most 256 bytes including that prefix. Required
@@ -87,12 +83,6 @@ global-address candidate identities and introductions are unchanged.
 The optional `path_exchange: true` capability enables the address exchange and
 duplicate retirement messages below. Older peers ignore this field; no new
 message types are sent until the remote advertises or demonstrates support.
-
-An introduction with `stream: true` selects a dedicated reliable byte connection
-after the same candidate and endpoint admission. `stream_mux: true` additionally
-selects a bidirectional yamux carrier; it must accompany `stream: true`. Stream
-connections bypass packet Link registration and its dropping queues. Peers must
-be upgraded together; legacy packet peers cannot carry stream records.
 
 ## Encrypted messages
 
@@ -173,13 +163,11 @@ See [NAT operation](nat-operation.md) for limits, expiry and verified coverage.
 
 QUIC shares this UDP socket while preserving native UDP wire compatibility. It
 uses QUIC v1 / TLS 1.3 / ALPN `graphwan.quic.v1`, then the same Noise admission.
-Packet Link messages use unreliable RFC 9221 DATAGRAM frames, with a versioned 13-byte
+Peer messages use unreliable RFC 9221 DATAGRAM frames, with a versioned 13-byte
 fragment header and 1024-byte fragment payloads. Missing fragments cause message
 loss; they do not add data retransmission. Fragment assembly is bounded by size,
 count and expiry. See [QUIC operation](quic-operation.md) for the exact fragment
-format, connection-ID namespace, socket dispatch and MTU constraints. After a
-stream introduction, a dedicated QUIC connection switches to one reliable
-bidirectional stream carrying the same length-framed, Noise-encrypted records.
+format, connection-ID namespace, socket dispatch and MTU constraints.
 
 WS/WSS use one nonempty binary message per peer message, bounded to 16 KiB.
 Text messages are rejected and compression is disabled. They negotiate
@@ -204,7 +192,7 @@ Destination IDs, routing epoch, flow hash and sequence field. The peer session
 layer supplies cryptographic replay protection. The complete overlay header and
 IP packet are encrypted together on each hop.
 
-Datagram TUN-originated packets must use that Node's configured virtual source address.
+TUN-originated packets must use that Node's configured virtual source address.
 Peer-originated packets must arrive from an authenticated, configured neighbor;
 header IDs and inner IP addresses must agree with the Network's address directory.
 Unknown Networks, unknown destinations, oversized/invalid IP packets, reflected
@@ -215,7 +203,7 @@ at their destination are delivered unchanged to the TUN callback.
 Transit also decrements the inner IPv4 TTL (updating its header checksum) or
 IPv6 Hop Limit. An exhausted inner hop limit drops the packet and sends ICMP
 Time Exceeded from the transit Node's virtual address through the normal return
-route. UDP/ICMP traceroute therefore shows intermediate GraphWAN Nodes. Native
+route. TCP/UDP/ICMP traceroute therefore shows intermediate GraphWAN Nodes. Native
 source injection and destination delivery do not consume a hop; WireGuard leaf
 ingress consumes one at its attaching Agent when forwarding onward. External
 subnet delivery leaves the gateway host's IP forwarding hop to its OS.
@@ -225,8 +213,9 @@ This follows [IPv4 router TTL rules](https://www.rfc-editor.org/rfc/rfc1812)
 and [ICMPv6 Time Exceeded](https://www.rfc-editor.org/rfc/rfc4443).
 Upgrade all forwarding Agents to expose every intermediate hop; older Agents
 still preserve the inner TTL. No framing or configuration change is required.
-TCP traceroute retains the access proxy's behavior: TCP is terminated locally
-and carried as byte streams, so its IP TTL does not traverse the graph.
+TCP headers, sequence numbers, options and payload traverse the same packet
+path. Peer tunnels are admitted and selected during convergence; new application
+TCP tuples reuse those tunnels without a new peer handshake or candidate probe.
 
 Intermediate Nodes are trusted hop forwarders and see plaintext. Source/address
 checks enforce admission but do not provide cryptographic end-to-end origin
@@ -357,9 +346,8 @@ senders on the same Link when both are enabled; the follower briefly pauses
 between Accept and Commit. Packets already in flight may still arrive on the
 previous connection. Queued packets carry a local activation generation and are
 dropped if their Link is deactivated, including if that Link is later reactivated.
-Datagram forwarding remains best effort: negotiation does not guarantee zero loss
-or ordering across a switch. TCP byte streams have their own reliable connections
-and remain pinned; they never migrate through this packet selection mechanism.
+Overlay forwarding remains best effort: negotiation does not guarantee zero loss
+or ordering across a switch, and upper-layer reliable transports recover loss.
 
 Unconfirmed phases retry no more often than every 100 ms; the idle mesh scheduler
 runs every 250 ms. Each retry is newly encrypted with a fresh session nonce.

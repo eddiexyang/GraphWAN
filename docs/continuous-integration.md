@@ -1,93 +1,55 @@
 # Release CI and local development checks
 
-The only workflow is [Release](../.github/workflows/release.yml). Ordinary branch
-pushes and pull requests do not run CI. Pushing a SemVer tag such as `v1.2.3` or
-`v1.2.3-rc.1` starts a build and automatically publishes a GitHub Release. The `v`
-prefix is optional; build metadata such as `v1.2.3+build.1` is supported. Tags
-are limited to 80 characters. Prerelease identifiers produce a prerelease.
-
-```sh
-git tag v1.2.3
-git push origin v1.2.3
-```
-
-## Release build
-
-One Ubuntu job installs the pinned Go, Node.js and pnpm versions, builds the
-frontend from the lockfile, and embeds it into every binary. It cross-compiles
-with CGO disabled for every architecture advertised by the pinned Go toolchain
-on the seven supported operating systems. Go 1.26.8 currently supplies 33 targets:
-
-| System | Architectures |
-| --- | --- |
-| Linux | 386, amd64, arm, arm64, loong64, mips, mipsle, mips64, mips64le, ppc64, ppc64le, riscv64, s390x |
-| Windows | 386, amd64, arm64 |
-| macOS (`darwin`) | amd64, arm64 |
-| FreeBSD | 386, amd64, arm, arm64 |
-| OpenBSD | 386, amd64, arm, arm64, ppc64, riscv64 |
-| NetBSD | 386, amd64, arm, arm64 |
-| DragonFly | amd64 |
-
-The binary's `version` command and filenames use the exact tag. CPU baselines
-remain in `scripts/cross-build.py` (including amd64 v1, ARMv7 and soft-float MIPS).
-Cross-compilation does not establish native runtime support on every target;
-platform restrictions remain documented in the operation guides.
-The legacy Bolt import used by Raft's migration helper is redirected through a
-small bbolt adapter in `internal/boltcompat`, allowing MIPS, RISC-V and LoongArch
-builds. GraphWAN's live Raft store continues to use the same bbolt implementation
-and file format.
-
-Each target produces one standalone binary, named
-`graphwan-<tag>-<os>-<arch>` with `.exe` appended for Windows. CI uploads these
-33 executables directly: no compressed packages, documentation, deployment
-examples, manifests or checksum files. The build manifest remains internal;
-release preparation checks every binary's size and SHA-256 against it before
-uploading. All targets must build successfully. No tests, browser automation or
-live deployments run in CI.
+The [Release workflow](../.github/workflows/release.yml) runs on pushes to
+`master`. It builds Linux amd64 and arm64 binaries and a multi-platform controller
+image through [Docker Bake](../docker-bake.hcl). The controller image contains the
+built web assets and both Agent binaries. GitHub Releases use `sha-COMMIT` tags;
+the image is tagged with the source commit and the release records its digest.
 
 Publication uses the repository's `GITHUB_TOKEN` with `contents: write` and
-automatically generated release notes. Assets are uploaded to a draft before
-publication. A failed upload can be retried by rerunning the workflow; an already
-published release is left intact. No extra release secret is required. Toolchains
-are pinned in `.go-version`, `.node-version` and `web/package.json`.
+`packages: write`. Binaries are uploaded to a draft release before publication.
+An already published release is left intact. This workflow builds and publishes;
+run the tests below before authorizing a release push.
 
-## Local core tests
+## Local verification
 
-Go tests cover:
-
-- Topology validation and deterministic weighted routing.
-- Disabled edges, revoked Agents and loop-free forwarding tables.
-- Packet framing, malformed input and hop limits.
-- Four cipher suites, authenticated handshakes, tampering and replay rejection.
-- Durable configuration, transactional rollback and conflicting edits.
-- Bidirectional cluster channels, leader changes, forwarded writes and reconnects
-  over in-memory connections with only one permitted dialing direction.
-- Idle probe failure detection, report suppression and observed endpoint lease
-  renewal, using in-memory state and explicit timestamps.
-- TCP access termination and three-Agent stream forwarding over TCP, QUIC,
-  WS/WSS and gRPC; directional EOF, source tuple preservation, reverse opens,
-  IPv6, WireGuard plaintext access, policy revocation and stream telemetry.
-- Bounded stream setup, IPv6 fragment classification, cancellation and shutdown
-  while an access handshake is incomplete.
-
-Unit tests use in-memory state and private temporary files. TCP stream integration
-tests use loopback peer listeners with simulated TUN and userspace application
-TCP stacks. They require no administrator privileges or operating-system TUN
-devices. Normal runs transfer multiple MiB; `-short` uses smaller payloads and
-waits for peer admission before testing the stream.
-
-The TCP stack is pinned to the upstream Go-build commit
-`f57b8fc79db4`, including the [ARM64 race CAS fix](https://github.com/google/gvisor/commit/1b2946c4fa59c1a64643bce962140b5686062601).
-This dependency requires Go 1.26.3; the pinned CI toolchain remains Go 1.26.8.
+The Go suites cover topology and weighted routing, packet validation and
+framing, all four ciphers, authenticated admission and replay rejection,
+persistence and control reconciliation, peer convergence, and endpoint discovery.
+Tests use private temporary files, in-memory transports and loopback sockets.
+They require no administrator privileges or operating-system TUN interfaces.
 
 ```sh
-go test ./...
-go test -race ./internal/agent ./internal/forwarding ./internal/peer ./internal/packet ./internal/streamproxy
-go build -o bin/graphwan ./cmd/graphwan
-pnpm --dir web install --frozen-lockfile
-pnpm --dir web build
+go test -mod=readonly -race ./...
+go test -mod=readonly ./internal/transport -run '^$' -bench BenchmarkTransportFraming -benchmem
 ```
 
-Commit rebuilt files in `internal/webui/dist` when frontend sources change.
-Cross-platform binaries can be built on demand with `scripts/cross-build.py`;
-packaging instructions are in [deployment](deployment.md).
+The packet forwarding regression starts three real Agent dataplanes with
+in-memory TUNs. Only the middle Agent advertises a reachable entrance. It checks
+bidirectional TCP headers, options, sequence numbers and payload over both TCP
+and UDP peer transports, preserving the normal transit IP hop decrement. A
+counting TCP proxy verifies that new application tuples reuse the physical
+connections established during convergence.
+
+Framing compatibility tests decode optimized batches through the original
+single-message receiver for every cipher. They check immutable caller buffers,
+independent authenticated records, cancellation and malformed-input rejection.
+The transport benchmark compares copying, gather writes and producer-framed
+records with an in-memory sink. Its timings measure framing CPU/copy overhead;
+they exclude encryption, kernel I/O and network latency, and are not an
+end-to-end throughput measurement.
+
+## Packet encapsulation and deployment
+
+TCP/IP packets use the established peer Links with their original wire framing.
+The implementation reserves existing transport length prefixes alongside the
+encrypted records, avoiding another framing copy. Transparent admission wrappers
+preserve gather writes. Cryptographic records, authentication, candidate
+convergence, transport policy and application connection lifetimes remain intact.
+
+The earlier TCP access-proxy build rejects TCP on the packet path. Coordinate
+Agent upgrades across a Network when replacing that build with packet forwarding;
+mixed versions can interrupt TCP even while the control plane and UDP remain
+available. Preserve Agent identity/state and publish verified binaries before
+starting the rollout. Verify new connections, existing tunnel reuse and the
+required service endpoints on the deployed network.

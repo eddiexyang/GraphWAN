@@ -82,7 +82,6 @@ type Channel struct {
 	sendMu         sync.Mutex
 	sendBuffer     []byte
 	unreliable     bool
-	byteStream     bool
 	repeatRequest  []byte
 	repeatResponse []byte
 	ignore         [][]byte
@@ -286,7 +285,7 @@ func (c *Channel) SendBatch(ctx context.Context, payloads [][]byte) error {
 		SendFramedBatch(context.Context, []byte) error
 	})
 	headroom := 0
-	if canFrame && !c.byteStream {
+	if canFrame {
 		headroom = 4 // Existing stream transport length prefix.
 	}
 	needed := 0
@@ -357,18 +356,6 @@ func (c *Channel) ReceiveBatch(ctx context.Context) ([][]byte, error) {
 		return [][]byte{raw}, nil
 	}
 	return c.decodeBatches(ctx, batch.ReceiveBatch)
-}
-
-// ReceiveBorrowedBatch keeps transport storage valid until the next receive.
-// Byte streams consume every cached record before requesting another batch;
-// datagram forwarding continues to use independently owned buffers.
-func (c *Channel) ReceiveBorrowedBatch(ctx context.Context) ([][]byte, error) {
-	if batch, ok := c.conn.(interface {
-		ReceiveBorrowedBatch(context.Context) ([][]byte, error)
-	}); ok {
-		return c.decodeBatches(ctx, batch.ReceiveBorrowedBatch)
-	}
-	return c.ReceiveBatch(ctx)
 }
 
 func (c *Channel) decodeBatches(ctx context.Context, receive func(context.Context) ([][]byte, error)) ([][]byte, error) {

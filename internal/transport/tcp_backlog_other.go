@@ -6,5 +6,3 @@ import "net"
 
 // Other platforms retain bounded user-space queues and native TCP buffering.
 func ConfigureTCP(net.Conn) error { return nil }
-
-func UseKernelTCPBacklog(net.Conn) error { return nil }
