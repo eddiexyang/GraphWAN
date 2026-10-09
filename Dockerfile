@@ -20,7 +20,12 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
     -trimpath -buildvcs=false -ldflags="-s -w -X main.version=$VERSION" \
     -o /out/graphwan ./cmd/graphwan
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM scratch AS binaries
+ARG TARGETARCH
+ARG VERSION=dev
+COPY --from=build /out/graphwan /graphwan-${VERSION}-linux-${TARGETARCH}
+
+FROM gcr.io/distroless/static-debian12:nonroot AS controller
 COPY --from=build /out/graphwan /usr/local/bin/graphwan
 ENTRYPOINT ["/usr/local/bin/graphwan"]
 CMD ["server", "--listen=0.0.0.0:8443", "--data-dir=/data"]

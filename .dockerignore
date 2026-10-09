@@ -5,3 +5,4 @@
 internal/webui/dist
 .build
 bin
+release
