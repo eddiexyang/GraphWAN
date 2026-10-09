@@ -1,15 +1,9 @@
 # Release CI and local development checks
 
-The only workflow is [Release](../.github/workflows/release.yml). Ordinary branch
-pushes and pull requests do not run CI. Pushing a SemVer tag such as `v1.2.3` or
-`v1.2.3-rc.1` starts a build and automatically publishes a GitHub Release. The `v`
-prefix is optional; build metadata such as `v1.2.3+build.1` is supported. Tags
-are limited to 80 characters. Prerelease identifiers produce a prerelease.
-
-```sh
-git tag v1.2.3
-git push origin v1.2.3
-```
+The [Release](../.github/workflows/release.yml) workflow runs on every push to
+`main`. It publishes standalone binaries and a controller image for that exact
+commit. Other branch pushes, pull requests and tag pushes do not publish.
+GitHub prereleases are named `main-<full-commit-sha>` and point to the built commit.
 
 ## Release build
 
@@ -28,7 +22,7 @@ on the seven supported operating systems. Go 1.26.8 currently supplies 33 target
 | NetBSD | 386, amd64, arm, arm64 |
 | DragonFly | amd64 |
 
-The binary's `version` command and filenames use the exact tag. CPU baselines
+The binary's `version` command and filenames use `main-<full-commit-sha>`. CPU baselines
 remain in `scripts/cross-build.py` (including amd64 v1, ARMv7 and soft-float MIPS).
 Cross-compilation does not establish native runtime support on every target;
 platform restrictions remain documented in the operation guides.
@@ -39,11 +33,24 @@ and file format.
 
 Each target produces one standalone binary, named
 `graphwan-<tag>-<os>-<arch>` with `.exe` appended for Windows. CI uploads these
-33 executables directly: no compressed packages, documentation, deployment
-examples, manifests or checksum files. The build manifest remains internal;
+33 executables directly, together with `controller-image.txt` containing the
+published image reference. The build manifest remains internal;
 release preparation checks every binary's size and SHA-256 against it before
-uploading. All targets must build successfully. No tests, browser automation or
-live deployments run in CI.
+uploading. All targets must build successfully. CI also packages the same Linux
+amd64 and arm64 binaries into a controller image using `Dockerfile`. The amd64
+image must pass a version check and an HTTPS health check before publication.
+It runs as a non-root user with a read-only root filesystem and a writable data
+directory. Browser automation and live deployments do not run in CI.
+
+Controller images are published to `ghcr.io/<owner>/<repository>:<full-commit-sha>`
+with the repository name lowercased. Deployments must use the immutable
+`ghcr.io/<owner>/<repository>@sha256:...` reference from `controller-image.txt`
+or the workflow summary. The digest comes from BuildKit publication metadata;
+it is never derived from the commit SHA or the executable checksum.
+The image includes its executable and CA trust store; only `/data` needs persistent
+storage. Kubernetes deployments use the image's entrypoint and pass controller
+flags as `args`. Image publication uses `GITHUB_TOKEN` with `packages: write`.
+Configure package visibility or image-pull credentials before deployment.
 
 Publication uses the repository's `GITHUB_TOKEN` with `contents: write` and
 automatically generated release notes. Assets are uploaded to a draft before
