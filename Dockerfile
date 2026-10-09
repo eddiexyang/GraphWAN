@@ -27,6 +27,8 @@ COPY --from=build /out/graphwan /graphwan-${VERSION}-linux-${TARGETARCH}
 
 FROM gcr.io/distroless/static-debian12:nonroot AS controller
 COPY --from=build /out/graphwan /usr/local/bin/graphwan
+COPY --from=agent-amd64 /out/graphwan /usr/local/share/graphwan/agents/linux-amd64
+COPY --from=agent-arm64 /out/graphwan /usr/local/share/graphwan/agents/linux-arm64
 ENTRYPOINT ["/usr/local/bin/graphwan"]
 CMD ["server", "--listen=0.0.0.0:8443", "--data-dir=/data"]
 EXPOSE 8443

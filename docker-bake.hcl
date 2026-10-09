@@ -25,8 +25,24 @@ target "common" {
 target "controller" {
   inherits = ["common", "docker-metadata-action"]
   target = "controller"
+  contexts = {
+    agent-amd64 = "target:agent-amd64"
+    agent-arm64 = "target:agent-arm64"
+  }
   output = ["type=registry"]
   cache-to = ["type=gha,scope=graphwan,mode=max"]
+}
+
+target "agent-amd64" {
+  inherits = ["common"]
+  platforms = ["linux/amd64"]
+  target = "build"
+}
+
+target "agent-arm64" {
+  inherits = ["common"]
+  platforms = ["linux/arm64"]
+  target = "build"
 }
 
 target "binaries" {
