@@ -67,5 +67,5 @@ jobs:
               --title "$RELEASE_TAG" --generate-notes --prerelease \
               --notes "Controller image digest: $IMAGE_DIGEST"
           fi
-          gh release upload "$RELEASE_TAG" "$RELEASE_DIR"/* --clobber
+          gh release upload "$RELEASE_TAG" "$RELEASE_DIR"/graphwan-* --clobber
           gh release edit "$RELEASE_TAG" --draft=false --prerelease
