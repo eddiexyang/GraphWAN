@@ -21,6 +21,7 @@ import (
 	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
 	"github.com/eWloYW8/GraphWAN/internal/peer"
 	"github.com/eWloYW8/GraphWAN/internal/secure"
+	"github.com/eWloYW8/GraphWAN/internal/streamproxy"
 	"github.com/eWloYW8/GraphWAN/internal/transport"
 	"github.com/eWloYW8/GraphWAN/internal/wgaccess"
 	"google.golang.org/grpc"
@@ -38,6 +39,9 @@ type policy struct {
 	endpoints []model.Endpoint
 }
 type Mesh struct {
+	streamHandler  StreamHandler
+	streamSlots    chan struct{}
+	streams        map[*peer.Stream]streamPolicy
 	extensionMu    sync.Mutex
 	extensionNext  time.Time
 	extensionSlots chan struct{}
@@ -90,6 +94,8 @@ func New(parent context.Context, identity ed25519.PrivateKey, host string, port 
 		m.receiveBatch = batches[0]
 	}
 	m.extensionSlots = make(chan struct{}, 4)
+	m.streamSlots = make(chan struct{}, streamproxy.MaxConnections)
+	m.streams = map[*peer.Stream]streamPolicy{}
 	m.dns = newEndpointDNS()
 	m.grpcAdmissions = map[grpcConnectionKey]*grpcAdmission{}
 	m.quic = quicHub
@@ -125,6 +131,10 @@ func (m *Mesh) Close() error {
 	}
 	m.closed = true
 	m.cancel()
+	streams := make([]*peer.Stream, 0, len(m.streams))
+	for s := range m.streams {
+		streams = append(streams, s)
+	}
 	groups := m.groups
 	m.groups = map[key]*group{}
 	punches := m.punches
@@ -134,6 +144,9 @@ func (m *Mesh) Close() error {
 		pending = append(pending, conn)
 	}
 	m.mu.Unlock()
+	for _, s := range streams {
+		s.Close()
+	}
 	m.listener.Close()
 	m.webListener.Close()
 	m.webServer.Close()
@@ -219,6 +232,13 @@ func (m *Mesh) Apply(snapshot model.Snapshot) error {
 		}
 	}
 	m.groups = next
+	var staleStreams []*peer.Stream
+	for s, p := range m.streams {
+		cfg := p.group.policy.Load()
+		if next[key{cfg.network, cfg.peer.Node.ID}] != p.group || !candidateConfigured(cfg, p.candidate, true) {
+			staleStreams = append(staleStreams, s)
+		}
+	}
 	stalePunches := []*transport.PunchMux{}
 	for k, session := range m.punches {
 		if !m.allowsTCPPunchLocked(session.Identity()) {
@@ -229,6 +249,9 @@ func (m *Mesh) Apply(snapshot model.Snapshot) error {
 		}
 	}
 	m.mu.Unlock()
+	for _, s := range staleStreams {
+		s.Close()
+	}
 	for _, l := range retiredLinks {
 		l.Close()
 	}
@@ -283,8 +306,10 @@ func (m *Mesh) SendOwnedBatch(ctx context.Context, network, remote model.ID, fra
 func (m *Mesh) Report() []model.LinkStatus {
 	m.mu.Lock()
 	groups := make([]*group, 0, len(m.groups))
+	traffic := map[*group]map[string]streamBytes{}
 	for _, g := range m.groups {
 		groups = append(groups, g)
+		traffic[g] = m.streamTrafficLocked(g)
 	}
 	m.mu.Unlock()
 	result := []model.LinkStatus{}
@@ -292,7 +317,13 @@ func (m *Mesh) Report() []model.LinkStatus {
 		result = append(result, m.wireguard.Report()...)
 	}
 	for _, g := range groups {
-		result = append(result, g.edge.Report()...)
+		statuses := g.edge.Report()
+		for i := range statuses {
+			bytes := traffic[g][statuses[i].LinkID]
+			statuses[i].RXBytes += bytes.rx
+			statuses[i].TXBytes += bytes.tx
+		}
+		result = append(result, statuses...)
 	}
 	slices.SortFunc(result, func(a, b model.LinkStatus) int {
 		if a.LinkID < b.LinkID {
@@ -422,6 +453,10 @@ func (m *Mesh) accept(conn transport.Conn, kind model.Transport) {
 			channel.Close()
 			return
 		}
+		if introduction.Stream {
+			m.acceptStream(ctx, channel, selected, *candidate, introduction.StreamMux)
+			return
+		}
 		selected.register(channel, *candidate, introduction.PathExchange)
 	}()
 }
@@ -441,6 +476,9 @@ func addressFamily(address net.Addr) int {
 }
 
 type group struct {
+	streamBytes       map[link.Path]streamBytes
+	carriers          map[*streamCarrier]bool
+	carrierDials      map[string]bool
 	extensionInflight int
 	extensionStart    time.Time
 	mesh              *Mesh

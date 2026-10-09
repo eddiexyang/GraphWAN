@@ -24,6 +24,8 @@ type introduction struct {
 	Endpoint     string `json:"endpoint"`
 	Scope        string `json:"scope,omitempty"`
 	PathExchange bool   `json:"path_exchange,omitempty"`
+	Stream       bool   `json:"stream,omitempty"`
+	StreamMux    bool   `json:"stream_mux,omitempty"`
 }
 
 func receiveIntroduction(ctx context.Context, channel *peer.Channel) (introduction, error) {
@@ -178,48 +180,62 @@ func (g *group) schedule() {
 	}
 }
 func (g *group) dial(ctx context.Context, candidate link.Candidate) error {
-	parsed, err := url.Parse(candidate.Endpoint.URL)
+	channel, err := g.connect(ctx, candidate, false)
 	if err != nil {
 		return err
+	}
+	g.register(channel, candidate, false)
+	if reliableTransport(candidate.Endpoint.Transport) {
+		g.ensureCarrier(ctx, candidate)
+	}
+	return nil
+}
+
+// connect shares candidate resolution and Noise admission between packet Links
+// and dedicated byte streams. Each stream has an independent transport lifetime.
+func (g *group) connect(ctx context.Context, candidate link.Candidate, stream bool, multiplex ...bool) (*peer.Channel, error) {
+	parsed, err := url.Parse(candidate.Endpoint.URL)
+	if err != nil {
+		return nil, err
 	}
 	target, err := candidate.DialTarget()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	address, err := transport.EndpointDialAddress(candidate.Endpoint, candidate.Family, target)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var raw transport.Conn
 	if candidate.Endpoint.Transport == model.TCP && candidate.Method == link.Punch {
 		conn, err := g.mesh.dialTCPPunch(ctx, candidate, g.policy.Load().peer.PublicKey)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		raw = conn
 	} else if candidate.Endpoint.Transport == model.TCP {
 		dialer := net.Dialer{}
 		conn, err := transport.DialTCP(ctx, &dialer, "tcp"+strconv.Itoa(candidate.Family), address)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		raw = transport.NewStream(conn)
 	} else if candidate.Endpoint.Transport == model.WS || candidate.Endpoint.Transport == model.WSS {
 		conn, err := transport.DialWebSocketAt(ctx, candidate.Endpoint, candidate.Family, g.policy.Load().peer.PublicKey, nil, target)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		raw = conn
 	} else if candidate.Endpoint.Transport == model.GRPC {
 		conn, err := transport.DialGRPCAt(ctx, candidate.Endpoint, candidate.Family, g.policy.Load().peer.PublicKey, nil, target)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		raw = conn
 	} else if candidate.Endpoint.Transport == model.QUIC {
 		conn, err := g.mesh.quic.DialAt(ctx, candidate.Endpoint, candidate.Family, g.policy.Load().peer.PublicKey, target)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		raw = conn
 	} else {
@@ -227,36 +243,36 @@ func (g *group) dial(ctx context.Context, candidate link.Candidate) error {
 			target, err = netip.ParseAddr(parsed.Hostname())
 		}
 		if err != nil || !target.IsValid() {
-			return errors.New("unresolved UDP candidate")
+			return nil, errors.New("unresolved UDP candidate")
 		}
 		port, err := strconv.ParseUint(parsed.Port(), 10, 16)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if candidate.Port != 0 {
 			port = uint64(candidate.Port)
 		}
 		conn, err := g.mesh.udp.Dial(netip.AddrPortFrom(target, uint16(port)))
 		if err != nil {
-			return err
+			return nil, err
 		}
 		raw = conn
 	}
 	channel, err := peer.Dial(ctx, raw, g.mesh.secure(g.policy.Load(), candidate.Endpoint.Transport))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	intro := introduction{Candidate: candidate.ID, Endpoint: endpointFingerprint(candidate.Endpoint), Scope: link.ScopeIdentity(candidate.Scope), PathExchange: true}
+	intro := introduction{Candidate: candidate.ID, Endpoint: endpointFingerprint(candidate.Endpoint), Scope: link.ScopeIdentity(candidate.Scope), PathExchange: !stream, Stream: stream}
+	intro.StreamMux = len(multiplex) > 0 && multiplex[0]
 	if candidate.Target.IsValid() {
 		intro.Target = candidate.Target.String()
 	}
 	encoded, _ := json.Marshal(intro)
 	if err := channel.Send(ctx, append([]byte{0}, encoded...)); err != nil {
 		channel.Close()
-		return err
+		return nil, err
 	}
-	g.register(channel, candidate, false)
-	return nil
+	return channel, nil
 }
 
 // Retire only older sessions with a healthy replacement for the same candidate,

@@ -1,8 +1,9 @@
 # GraphWAN architecture
 
-GraphWAN is a centrally configured, peer-forwarded overlay. The controller never
-forwards user packets. `proposal.md` is the accepted product scope; this document
-records concrete implementation decisions, not a reduction of that scope.
+GraphWAN is a centrally configured, peer-forwarded stream mesh. TCP applications
+use byte streams across the graph; TUN and WireGuard provide IP access adapters.
+UDP and ICMP use a separate datagram forwarding path. The controller distributes
+configuration and never relays application traffic.
 
 ## Domain and ownership
 
@@ -81,10 +82,18 @@ Telemetry and desired state use separate models and storage lifetimes.
 - React/pnpm frontend: observe/edit topology, inspector forms and live telemetry;
   production assets embedded into the Go server.
 
-Stream transports frame complete overlay packets. UDP preserves datagram
-boundaries. Queues, frame sizes, dial concurrency and reconnect frequency are
-bounded. MTU defaults to 1280 and remains an explicit network setting. Platform
-TUN adapters own interface addresses/routes and clean up only their own resources.
+`internal/streamproxy` terminates TCP with a userspace stack at each access
+boundary. The graph carries authenticated application bytes with socket
+backpressure and directional EOF. Transit Nodes join streams without injecting
+TCP packets into their TUNs. Streams follow the compiled weighted/live routes at
+open and remain pinned until close; Link selection applies to the datagram path.
+Reverse opens can use an authenticated multiplexed carrier on a one-way reachable
+path. See [stream forwarding](stream-operation.md) for admission and lifecycle.
+
+Datagram carriers frame complete UDP/ICMP overlay packets and preserve packet
+boundaries. Queues, frame sizes, connection counts, dial concurrency and reconnect
+frequency are bounded. MTU defaults to 1280 and applies to IP access. Platform TUN
+adapters own interface addresses/routes and clean up only their own resources.
 
 ## Verification
 

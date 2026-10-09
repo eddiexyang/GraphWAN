@@ -1,7 +1,10 @@
 # GraphWAN
 
-A centrally managed overlay network with administrator-defined graph topology,
-weighted multi-hop routing and peer-to-peer data transport.
+A centrally managed stream-forwarding mesh with administrator-defined graph
+topology, weighted multi-hop routing and peer-to-peer data transport. TCP is
+terminated at the TUN/WireGuard access boundaries and relayed as application
+bytes across the graph. UDP and ICMP retain a separate datagram path. See
+[stream forwarding](docs/stream-operation.md) for transport and upgrade requirements.
 
 ## Run the controller
 
@@ -90,7 +93,7 @@ Platform setup and limitations: [Linux](docs/linux-operation.md),
 
 ## Development
 
-Requires Go 1.26 or newer. CI pins Go 1.26.8 and Node.js 24.21.0 in
+Requires Go 1.26.3 or newer. CI pins Go 1.26.8 and Node.js 24.21.0 in
 `.go-version` and `.node-version`; use those versions to reproduce its builds.
 Frontend development uses pnpm 10.33.3. Production assets are checked in so a Go-only checkout
 builds a complete binary. Rebuild assets whenever frontend sources change.

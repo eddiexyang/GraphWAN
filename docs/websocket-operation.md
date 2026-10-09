@@ -1,7 +1,7 @@
 # WS and WSS peer endpoints
 
-WS/WSS carry the same authenticated peer protocol, overlay packets, heartbeats
-and active-Link selection as TCP/UDP. They are available only through manual
+WS/WSS carry authenticated application byte streams and separate datagram Links
+with heartbeats and active-Link selection. They are available only through manual
 endpoints. Automatic interface discovery never guesses HTTP URLs or paths.
 
 In **Agents → Manage**, add an endpoint such as
@@ -67,5 +67,10 @@ a maximum of 16 KiB. Text and oversized messages terminate the connection.
 Compression is disabled. Negotiated subprotocols are `graphwan.ws.v1` and
 `graphwan.wss.v1`, respectively; the encrypted handshake binds the same transport.
 Noise and session rekey apply to both WS and WSS.
+Dedicated TCP byte streams use the same binary messages and Noise admission;
+their records contain bytes and directional close messages. Configure proxy
+idle timeouts for the intended application lifetime; packet Link heartbeats do
+not travel on these independent connections. Reverse-open carriers have their
+own keepalives. See [stream forwarding](stream-operation.md).
 Peer admission limits cover slow TCP/TLS prefaces and incomplete HTTP headers;
 an incomplete upgrade cannot escape the eight-slot classifier limit.

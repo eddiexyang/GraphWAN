@@ -63,7 +63,7 @@ to the Agent's actual dial to the frontend, not the proxy's backend connection.
 [api/peer.proto](../api/peer.proto) defines `graphwan.v1.Peer/Connect` using
 `google.protobuf.BytesValue` in both directions. Each value contains exactly one
 complete peer protocol message, including the Noise handshake or encrypted Link
-traffic. Values must contain 1–16,384 bytes. The protobuf envelope is limited to
+traffic or dedicated TCP byte-stream records. Values must contain 1–16,384 bytes. The protobuf envelope is limited to
 16,388 bytes before decoding, and compression is not enabled. HTTP/2/gRPC framing
 uses the [standard gRPC protocol](https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md).
 The server acknowledges admission with `graphwan-protocol: graphwan-peer-v1`;
@@ -91,3 +91,9 @@ context cancellation, including when flow control blocks a writer. Canceling an
 operation closes that RPC. The dial timeout only bounds establishment and cannot
 expire an already established Link. A failed Link reconnects with fresh Noise
 keys through the common bounded Mesh scheduler.
+
+Dedicated TCP streams use the same service and Noise admission with `stream: true`
+in their candidate introduction. Socket/RPC flow control supplies backpressure;
+directional EOF and authenticated EOF confirmation preserve responses before
+RPC cancellation. Proxy idle timeouts must cover application idle periods;
+packet Link heartbeats use separate connections. See [stream forwarding](stream-operation.md).

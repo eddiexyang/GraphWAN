@@ -23,6 +23,7 @@ var (
 	ErrPeer        = errors.New("packet arrived from an unconfigured neighbor")
 	ErrUnreachable = errors.New("no route to destination")
 	ErrMTU         = errors.New("packet exceeds network MTU")
+	ErrTCPPacket   = errors.New("TCP requires byte stream forwarding")
 )
 
 type Send func(context.Context, model.ID, model.ID, []byte) error
@@ -225,6 +226,9 @@ func (r *Router) encapsulateSource(ctx context.Context, n *network, raw []byte, 
 	if err != nil {
 		return nil, "", err
 	}
+	if packet.IsTCP(raw) {
+		return nil, "", ErrTCPPacket
+	}
 	if client != nil {
 		if info.Source != client.address {
 			return nil, "", ErrSource
@@ -329,6 +333,9 @@ func (r *Router) fromPeer(ctx context.Context, peerID model.ID, frame []byte, de
 	info, err := packet.InspectAddresses(p.Payload)
 	if err != nil {
 		return err
+	}
+	if packet.IsTCP(p.Payload) {
+		return ErrTCPPacket
 	}
 	if info.Source != source.address && n.owner(info.Source) != source {
 		return ErrSource

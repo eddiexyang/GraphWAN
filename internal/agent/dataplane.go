@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"sync"
 	"sync/atomic"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/eWloYW8/GraphWAN/internal/model"
 	"github.com/eWloYW8/GraphWAN/internal/packet"
 	"github.com/eWloYW8/GraphWAN/internal/tunnel"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
 type DataPlaneOptions struct {
@@ -32,6 +34,7 @@ type runtimeState struct {
 	router   *forwarding.Router
 	mesh     *mesh.Mesh
 	devices  map[model.ID]*runtimeTunnel
+	tcp      map[model.ID]*runtimeTCP
 }
 
 type DataPlane struct {
@@ -88,8 +91,9 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 	if previous != nil && (previous.snapshot.AgentID != snapshot.AgentID || previous.snapshot.Revision > snapshot.Revision) {
 		return errors.New("runtime identity change or revision rollback")
 	}
-	next := &runtimeState{snapshot: snapshot.Clone(), devices: map[model.ID]*runtimeTunnel{}}
+	next := &runtimeState{snapshot: snapshot.Clone(), devices: map[model.ID]*runtimeTunnel{}, tcp: map[model.ID]*runtimeTCP{}}
 	prepared := []tunnel.Device{}
+	var preparedTCP []*runtimeTCP
 	type tunnelUpdate struct {
 		network       model.ID
 		device        *runtimeTunnel
@@ -103,6 +107,9 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 	gatewayChanged := false
 	defer func() {
 		if !committed {
+			for _, tcp := range preparedTCP {
+				tcp.engine.Close()
+			}
 			if gatewayChanged {
 				if err := r.gateway.Apply(context.Background(), snapshot.AgentID, gatewayEntries(previous)); err != nil {
 					r.options.Logger.Error("gateway rollback failed", "error", err)
@@ -161,6 +168,7 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 			return fmt.Errorf("listen for peers: %w", err)
 		}
 		next.mesh.EnableWireGuard(r.receiveWireGuard)
+		next.mesh.EnableStreams(r.acceptTCP)
 		newMesh = true
 	}
 	forwardingSnapshot := carryLiveRoutes(snapshot, r.lastRoutes)
@@ -169,6 +177,26 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 		return err
 	}
 	next.router = router
+	for _, network := range snapshot.Networks {
+		fingerprint := tcpFingerprint(network)
+		_, offload := next.devices[network.ID].Device.(tunnel.TCPPacketWriter)
+		for _, peer := range network.Peers {
+			if peer.Node.WireGuard != nil {
+				offload = false
+				break
+			}
+		}
+		if previous != nil && previous.tcp[network.ID] != nil && previous.tcp[network.ID].fingerprint == fingerprint && previous.tcp[network.ID].offload == offload {
+			next.tcp[network.ID] = previous.tcp[network.ID]
+			continue
+		}
+		tcp, err := r.newTCP(network.ID, fingerprint, network.MTU, offload)
+		if err != nil {
+			return fmt.Errorf("network %s: prepare TCP access stack: %w", network.Name, err)
+		}
+		next.tcp[network.ID] = tcp
+		preparedTCP = append(preparedTCP, tcp)
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -189,6 +217,9 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 		return err
 	}
 	r.state.Store(next)
+	for _, network := range snapshot.Networks {
+		next.tcp[network.ID].engine.SetMTU(network.MTU)
+	}
 	select {
 	case r.discoveryWake <- struct{}{}:
 	default:
@@ -208,6 +239,11 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 		for id, device := range previous.devices {
 			if next.devices[id] != device {
 				device.Close()
+			}
+		}
+		for id, tcp := range previous.tcp {
+			if next.tcp[id] != tcp {
+				tcp.engine.Close()
 			}
 		}
 	}
@@ -239,6 +275,9 @@ func (r *DataPlane) Close() error {
 			device.Close()
 		}
 		state.mesh.Close()
+		for _, tcp := range state.tcp {
+			tcp.engine.Close()
+		}
 	}
 	r.wg.Wait()
 	return gatewayErr
@@ -265,7 +304,7 @@ func (r *DataPlane) readTunnel(network model.ID, device *runtimeTunnel) {
 		}
 		// Invalid, unroutable or congested packets are dropped independently; a bad
 		// packet cannot terminate the interface forwarding loop.
-		state.router.FromTunnel(r.ctx, network, buffer[:n])
+		r.accessPacket(state, r.ctx, network, buffer[:n], false)
 	}
 }
 func (r *DataPlane) receive(ctx context.Context, remote model.ID, frame []byte) error {
@@ -300,12 +339,33 @@ func (r *DataPlane) deliver(ctx context.Context, network model.ID, raw []byte) e
 func (r *DataPlane) readTunnelBatch(network model.ID, device *runtimeTunnel, batch tunnel.BatchDevice) {
 	buffers := make([][]byte, batch.BatchSize())
 	sizes := make([]int, len(buffers))
+	segmentSizes := make([]int, len(buffers))
 	packets := make([][]byte, len(buffers))
+	owners := make([]*stack.PacketBuffer, len(buffers))
+	releaseOwners := func() {
+		for i, owner := range owners {
+			if owner != nil {
+				owner.DecRef()
+				owners[i] = nil
+			}
+		}
+	}
+	defer releaseOwners()
+	read := func() (int, error) { return batch.ReadBatch(buffers, sizes) }
 	for i := range buffers {
 		buffers[i] = make([]byte, packet.MaxPayload+1)
 	}
+	if offload, ok := device.Device.(tunnel.OffloadReader); ok {
+		// A single kernel TCP GSO packet can hold up to 64 KiB. UDP still
+		// fills the ordinary MTU-sized buffers with independent segments.
+		buffers[0] = make([]byte, 65535)
+		read = func() (int, error) { return offload.ReadOffloadBatch(buffers, sizes, segmentSizes) }
+	}
+	if owned, ok := device.Device.(tunnel.OwnedOffloadReader); ok {
+		read = func() (int, error) { return owned.ReadOwnedOffloadBatch(buffers, sizes, segmentSizes, owners) }
+	}
 	for {
-		n, err := batch.ReadBatch(buffers, sizes)
+		n, err := read()
 		if err == nil && n == 0 {
 			err = io.ErrNoProgress
 		}
@@ -315,13 +375,51 @@ func (r *DataPlane) readTunnelBatch(network model.ID, device *runtimeTunnel, bat
 		}
 		state := r.state.Load()
 		if state == nil || state.devices[network] != device {
+			releaseOwners()
 			continue
 		}
 		for i := range n {
 			packets[i] = buffers[i][:sizes[i]]
 		}
-		state.router.FromTunnelBatch(r.ctx, network, packets[:n])
+		// TCP is consumed locally; preserve batching for consecutive datagrams.
+		start := 0
+		for i, raw := range packets[:n] {
+			if !packet.IsTCP(raw) && !packet.HasExtensionFragment(raw) {
+				continue
+			}
+			if start < i {
+				state.router.FromTunnelBatch(r.ctx, network, packets[start:i])
+			}
+			if segmentSizes[i] > 0 {
+				if state.router.TCPIngressGSO(network, raw, segmentSizes[i]) == nil && state.tcp[network] != nil {
+					if owners[i] != nil {
+						state.tcp[network].engine.InjectOwned(owners[i])
+						owners[i] = nil
+					} else {
+						state.tcp[network].engine.Inject(raw)
+					}
+				}
+			} else if owners[i] != nil && packet.IsTCP(raw) && !packet.HasExtensionFragment(raw) {
+				if state.router.TCPIngress(network, raw, false) == nil && state.tcp[network] != nil {
+					state.tcp[network].engine.InjectOwned(owners[i])
+					owners[i] = nil
+				}
+			} else {
+				r.accessPacket(state, r.ctx, network, raw, false)
+			}
+			start = i + 1
+		}
+		if start < n {
+			state.router.FromTunnelBatch(r.ctx, network, packets[start:n])
+		}
 		clear(packets[:n])
+		releaseOwners()
+		if n > 1 {
+			// A nonblocking TUN can supply consecutive bursts indefinitely.
+			// Let notified packet writers drain before another input quantum,
+			// especially when the Agent has only one runnable processor.
+			runtime.Gosched()
+		}
 	}
 }
 func (r *DataPlane) receiveBatch(ctx context.Context, remote model.ID, frames [][]byte) error {
@@ -361,6 +459,6 @@ func (r *DataPlane) deliverBatch(ctx context.Context, network model.ID, packets 
 func (r *DataPlane) receiveWireGuard(network model.ID, raw []byte) {
 	state := r.state.Load()
 	if state != nil {
-		_ = state.router.FromWireGuard(r.ctx, network, raw)
+		_ = r.accessPacket(state, r.ctx, network, raw, true)
 	}
 }

@@ -53,7 +53,7 @@ are pinned in `.go-version`, `.node-version` and `web/package.json`.
 
 ## Local core tests
 
-Ten Go test files contain 20 test functions covering:
+Go tests cover:
 
 - Topology validation and deterministic weighted routing.
 - Disabled edges, revoked Agents and loop-free forwarding tables.
@@ -64,13 +64,25 @@ Ten Go test files contain 20 test functions covering:
   over in-memory connections with only one permitted dialing direction.
 - Idle probe failure detection, report suppression and observed endpoint lease
   renewal, using in-memory state and explicit timestamps.
+- TCP access termination and three-Agent stream forwarding over TCP, QUIC,
+  WS/WSS and gRPC; directional EOF, source tuple preservation, reverse opens,
+  IPv6, WireGuard plaintext access, policy revocation and stream telemetry.
+- Bounded stream setup, IPv6 fragment classification, cancellation and shutdown
+  while an access handshake is incomplete.
 
-They run locally without starting a controller or Agent, opening network ports,
-creating TUN devices or requiring administrator privileges. Store tests use
-private temporary files.
+Unit tests use in-memory state and private temporary files. TCP stream integration
+tests use loopback peer listeners with simulated TUN and userspace application
+TCP stacks. They require no administrator privileges or operating-system TUN
+devices. Normal runs transfer multiple MiB; `-short` uses smaller payloads and
+waits for peer admission before testing the stream.
+
+The TCP stack is pinned to the upstream Go-build commit
+`f57b8fc79db4`, including the [ARM64 race CAS fix](https://github.com/google/gvisor/commit/1b2946c4fa59c1a64643bce962140b5686062601).
+This dependency requires Go 1.26.3; the pinned CI toolchain remains Go 1.26.8.
 
 ```sh
 go test ./...
+go test -race ./internal/agent ./internal/forwarding ./internal/peer ./internal/packet ./internal/streamproxy
 go build -o bin/graphwan ./cmd/graphwan
 pnpm --dir web install --frozen-lockfile
 pnpm --dir web build
