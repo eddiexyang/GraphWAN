@@ -212,6 +212,22 @@ local sources and exhausted hop limits are rejected. Transit forwarding follows
 the compiled weighted route and decrements the overlay hop limit. Packets arriving
 at their destination are delivered unchanged to the TUN callback.
 
+Transit also decrements the inner IPv4 TTL (updating its header checksum) or
+IPv6 Hop Limit. An exhausted inner hop limit drops the packet and sends ICMP
+Time Exceeded from the transit Node's virtual address through the normal return
+route. UDP/ICMP traceroute therefore shows intermediate GraphWAN Nodes. Native
+source injection and destination delivery do not consume a hop; WireGuard leaf
+ingress consumes one at its attaching Agent when forwarding onward. External
+subnet delivery leaves the gateway host's IP forwarding hop to its OS.
+Error replies quote the original packet, fit within 576 bytes for IPv4 or 1280
+bytes for IPv6, and suppress errors to ICMP errors and noninitial fragments.
+This follows [IPv4 router TTL rules](https://www.rfc-editor.org/rfc/rfc1812)
+and [ICMPv6 Time Exceeded](https://www.rfc-editor.org/rfc/rfc4443).
+Upgrade all forwarding Agents to expose every intermediate hop; older Agents
+still preserve the inner TTL. No framing or configuration change is required.
+TCP traceroute retains the access proxy's behavior: TCP is terminated locally
+and carried as byte streams, so its IP TTL does not traverse the graph.
+
 Intermediate Nodes are trusted hop forwarders and see plaintext. Source/address
 checks enforce admission but do not provide cryptographic end-to-end origin
 attestation against a compromised transit Node. Configuration replacement swaps

@@ -250,6 +250,9 @@ func (r *Router) encapsulateSource(ctx context.Context, n *network, raw []byte, 
 	if !ok {
 		return nil, "", ErrUnreachable
 	}
+	if client != nil && packet.IPHopLimit(raw) <= 1 {
+		return nil, "", r.timeExceeded(ctx, n, raw)
+	}
 	buffer := packetbuf.GetHeadroom(packet.HeaderSize+len(raw), 1)
 	frame := buffer.Data
 	copy(frame, n.header[:])
@@ -260,6 +263,9 @@ func (r *Router) encapsulateSource(ctx context.Context, n *network, raw []byte, 
 	copy(frame[40:56], destination.wire[:])
 	binary.BigEndian.PutUint64(frame[64:72], info.Flow)
 	copy(frame[packet.HeaderSize:], raw)
+	if client != nil {
+		packet.DecrementIPHopLimit(frame[packet.HeaderSize:])
+	}
 	return buffer, nextHop, nil
 }
 
@@ -356,13 +362,29 @@ func (r *Router) fromPeer(ctx context.Context, peerID model.ID, frame []byte, de
 	if nextHop == peerID {
 		return fmt.Errorf("route would return packet to ingress neighbor")
 	}
-	// Keep the caller's authenticated frame immutable. Transit changes only
-	// the hop limit; copying its canonical wire header avoids decoding/reencoding.
+	if packet.IPHopLimit(p.Payload) <= 1 {
+		return r.timeExceeded(ctx, n, p.Payload)
+	}
+	// Keep the caller's authenticated frame immutable, including its IP header.
 	buffer := packetbuf.Get(len(frame))
 	defer buffer.Release()
 	copy(buffer.Data, frame)
 	buffer.Data[3]--
+	packet.DecrementIPHopLimit(buffer.Data[packet.HeaderSize:])
 	return r.send(ctx, n.id, nextHop, buffer.Data)
+}
+
+func (r *Router) timeExceeded(ctx context.Context, n *network, raw []byte) error {
+	reply := packet.TimeExceeded(raw, n.self.Address)
+	if reply == nil {
+		return nil
+	}
+	buffer, hop, err := r.encapsulate(ctx, n, reply)
+	if err != nil || buffer == nil {
+		return err
+	}
+	defer buffer.Release()
+	return r.send(ctx, n.id, hop, buffer.Data)
 }
 
 // owner performs longest-prefix matching without allocations. Overlay hosts take
