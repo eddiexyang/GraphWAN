@@ -325,9 +325,13 @@ all reachable Servers; browser login sessions are local.
 Enrollment responses and Agent configuration snapshots include `servers` as a
 Server directory `{cluster_id, revision, ca, servers}`. Agents persist it, reject
 CA/cluster changes and revision rollback, and try alternative entrances when a
-connection fails. Only first registration uses bootstrap flags; registered Agents
-can start without `--server`, `--server-transport`, or `--ca` once trust has been
-cached. Legacy registrations keep their saved origin until the first directory
+connection fails. Explicit `--server` and `--server-transport` select a preferred
+entrance at startup, including for registered Agents. The configured address uses
+the cached CA, Agent certificate and admitted Server TLS names; failed attempts
+fall back to directory entrances. Changing the address preserves registration
+and cached network configuration. Registered Agents can start without `--server`,
+`--server-transport`, or `--ca` once trust has been cached.
+Legacy registrations keep their saved origin until the first directory
 is received (supply the old CA file for this migration). Directory TLS verifies a
 CA-issued stable per-Server name, allowing discovered addresses to change without
 re-enrollment. Outer WSS uses the same name and CA.

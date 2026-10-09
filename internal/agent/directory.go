@@ -99,6 +99,58 @@ func targets(reg Registration) []controlTarget {
 	}
 	return out
 }
+
+// targets combines an explicit runtime entrance with the cached directory.
+// Address changes retain the existing CA and stable controller TLS identities;
+// directory discovery and its validation continue to own persistent state.
+func (c *Client) targets(reg Registration) []controlTarget {
+	cached := targets(reg)
+	if c.configuredServer == "" {
+		return cached
+	}
+	kind := c.options.ServerTransport
+	if kind == "" {
+		kind = "tcp"
+	}
+	preferred := []controlTarget{}
+	for _, target := range cached {
+		transport := target.transport
+		if transport == "" {
+			transport = "tcp"
+		}
+		if target.origin == c.configuredServer && transport == kind {
+			preferred = append(preferred, target)
+		}
+	}
+	if len(preferred) == 0 {
+		if reg.Directory == nil {
+			preferred = append(preferred, controlTarget{key: c.configuredServer, origin: c.configuredServer, transport: kind})
+		} else {
+			// The new entrance may belong to any admitted Server. Each attempt
+			// still verifies that Server's existing TLS name; revoked identities
+			// cannot be selected through an explicit address.
+			for _, server := range reg.Directory.Servers {
+				if !server.Revoked {
+					preferred = append(preferred, controlTarget{
+						key:    string(server.ID) + "/configured/" + kind + "/" + c.configuredServer,
+						origin: c.configuredServer, transport: kind, tlsName: server.TLSName(),
+					})
+				}
+			}
+		}
+	}
+	seen := make(map[string]bool, len(preferred))
+	for _, target := range preferred {
+		seen[target.key] = true
+	}
+	for _, target := range cached {
+		if !seen[target.key] {
+			preferred = append(preferred, target)
+		}
+	}
+	return preferred
+}
+
 func (c *Cache) lastServer() (string, error) {
 	var last string
 	err := c.db.View(func(tx *bolt.Tx) error { last = string(tx.Bucket(agentBucket).Get([]byte("last-server"))); return nil })

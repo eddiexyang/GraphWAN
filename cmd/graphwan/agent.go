@@ -40,12 +40,12 @@ func runAgentContext(parent context.Context, args []string) error {
 		}
 	}
 	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
-	server := fs.String("server", "", "controller HTTPS origin (first enrollment only)")
+	server := fs.String("server", "", "preferred controller HTTPS origin; cached directory provides failover")
 	defaultTransport := os.Getenv("GRAPHWAN_SERVER_TRANSPORT")
 	if defaultTransport == "" {
 		defaultTransport = "tcp"
 	}
-	serverTransport := fs.String("server-transport", defaultTransport, "first enrollment carrier: tcp, websocket, grpc or wss")
+	serverTransport := fs.String("server-transport", defaultTransport, "preferred controller carrier: tcp, websocket, grpc or wss")
 	data := fs.String("data-dir", "./graphwan-agent-data", "private persistent agent directory")
 	name := fs.String("name", "", "agent display name for first enrollment")
 	ca := fs.String("ca", "", "PEM CA certificate to trust for controller HTTPS")

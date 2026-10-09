@@ -50,6 +50,7 @@ type Client struct {
 	cache               *Cache
 	reconcile           *Reconciler
 	options             Options
+	configuredServer    string
 	server              string
 	lastTarget          string
 	failedTargets       map[string]bool
@@ -78,9 +79,14 @@ func NewClient(cache *Cache, runtime Runtime, options Options) (*Client, error) 
 	if err != nil {
 		return nil, err
 	}
+	configured := options.Server != ""
 	if existing != nil {
-		options.Server = existing.Server
-		options.ServerTransport = existing.Transport
+		if !configured {
+			options.Server = existing.Server
+			options.ServerTransport = existing.Transport
+		} else if options.ServerTransport == "" {
+			options.ServerTransport = existing.Transport
+		}
 		if _, err := cache.TLSCertificate(*existing); err != nil {
 			return nil, err
 		}
@@ -112,7 +118,14 @@ func NewClient(cache *Cache, runtime Runtime, options Options) (*Client, error) 
 	transport.DialContext = controltransport.DialContext(options.ServerTransport, options.Roots)
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	last, _ := cache.lastServer()
-	return &Client{lastTarget: last, failedTargets: map[string]bool{}, cache: cache, reconcile: NewReconciler(cache, runtime), options: options, server: server, http: client, transport: transport, endpointsChanged: make(chan struct{}, 1)}, nil
+	configuredServer := ""
+	if configured {
+		configuredServer = server
+		// An explicit startup entrance takes precedence over the last entrance
+		// saved by an earlier process. Successful connections retain normal affinity.
+		last = ""
+	}
+	return &Client{configuredServer: configuredServer, lastTarget: last, failedTargets: map[string]bool{}, cache: cache, reconcile: NewReconciler(cache, runtime), options: options, server: server, http: client, transport: transport, endpointsChanged: make(chan struct{}, 1)}, nil
 }
 func (c *Client) Close() { c.transport.CloseIdleConnections() }
 func (c *Client) Report() model.AgentReport {
@@ -278,7 +291,7 @@ func (c *Client) Run(ctx context.Context) error {
 			delay = 250 * time.Millisecond
 		}
 		wait := delay/2 + time.Duration(rand.Int64N(int64(delay/2)+1))
-		if saved, e := c.cache.Registration(); e == nil && saved != nil && len(c.failedTargets) < len(targets(*saved)) {
+		if saved, e := c.cache.Registration(); e == nil && saved != nil && len(c.failedTargets) < len(c.targets(*saved)) {
 			wait = 50 * time.Millisecond
 		}
 		timer := time.NewTimer(wait)
@@ -501,7 +514,7 @@ func (c *Client) selectTarget() (controlTarget, error) {
 	if reg == nil {
 		return controlTarget{}, errors.New("missing registration")
 	}
-	list := targets(*reg)
+	list := c.targets(*reg)
 	if len(list) == 0 {
 		return controlTarget{}, errors.New("no controller endpoints in local directory")
 	}
