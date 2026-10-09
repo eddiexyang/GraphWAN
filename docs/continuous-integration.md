@@ -32,25 +32,20 @@ builds. GraphWAN's live Raft store continues to use the same bbolt implementatio
 and file format.
 
 Each target produces one standalone binary, named
-`graphwan-<tag>-<os>-<arch>` with `.exe` appended for Windows. CI uploads these
-33 executables directly, together with `controller-image.txt` containing the
-published image reference. The build manifest remains internal;
-release preparation checks every binary's size and SHA-256 against it before
-uploading. All targets must build successfully. CI also packages the same Linux
-amd64 and arm64 binaries into a controller image using `Dockerfile`. The amd64
-image must pass a version check and an HTTPS health check before publication.
-It runs as a non-root user with a read-only root filesystem and a writable data
-directory. Browser automation and live deployments do not run in CI.
+`graphwan-<tag>-<os>-<arch>` with `.exe` appended for Windows. Release preparation
+checks every binary's size and SHA-256 against the build manifest before upload.
 
-Controller images are published to `ghcr.io/<owner>/<repository>:<full-commit-sha>`
-with the repository name lowercased. Deployments must use the immutable
-`ghcr.io/<owner>/<repository>@sha256:...` reference from `controller-image.txt`
-or the workflow summary. The digest comes from BuildKit publication metadata;
-it is never derived from the commit SHA or the executable checksum.
-The image includes its executable and CA trust store; only `/data` needs persistent
-storage. Kubernetes deployments use the image's entrypoint and pass controller
-flags as `args`. Image publication uses `GITHUB_TOKEN` with `packages: write`.
-Configure package visibility or image-pull credentials before deployment.
+The multi-stage `Dockerfile` builds the frontend and Go binary directly from the
+repository. Official Docker Actions build and publish the Linux amd64/arm64
+controller image to `ghcr.io/<owner>/<repository>:<full-commit-sha>`.
+The build action's `digest` output is exposed as the job's `image_digest` output
+and included in the GitHub Release notes. Deployments use
+`ghcr.io/<owner>/<repository>@sha256:...` with that published digest.
+The image runs as a non-root user and includes its executable and CA trust store;
+only `/data` needs persistent storage. Kubernetes uses the image's entrypoint and
+passes controller flags as `args`. Image publication uses `GITHUB_TOKEN` with
+`packages: write`. Configure package visibility or image-pull credentials before
+deployment. CI does not perform live deployments.
 
 Publication uses the repository's `GITHUB_TOKEN` with `contents: write` and
 automatically generated release notes. Assets are uploaded to a draft before

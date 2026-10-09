@@ -1,0 +1,7 @@
+.git
+.github
+**/node_modules
+**/*.tsbuildinfo
+internal/webui/dist
+.build
+bin

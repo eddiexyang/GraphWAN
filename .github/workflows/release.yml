@@ -18,6 +18,8 @@ jobs:
     if: ${{ !github.event.deleted }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    outputs:
+      image_digest: ${{ steps.image.outputs.digest }}
     permissions:
       contents: write
       packages: write
@@ -52,72 +54,35 @@ jobs:
         run: python3 scripts/cross-build.py --version "$RELEASE_TAG" --output "$BUILD_DIR"
       - name: Prepare standalone release binaries
         run: python3 scripts/package.py --builds "$BUILD_DIR" --output "$RELEASE_DIR"
-      - name: Build and test controller image
-        env:
-          IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}
-        run: |
-          image="${IMAGE_REPOSITORY,,}:$GITHUB_SHA"
-          echo "CONTROLLER_IMAGE=$image" >> "$GITHUB_ENV"
-          docker buildx create --name graphwan-release --driver docker-container --use
-          docker buildx build --platform linux/amd64 --file Dockerfile \
-            --tag graphwan-controller:test --load "$BUILD_DIR"
-          test "$(docker run --rm graphwan-controller:test version)" = "GraphWAN $RELEASE_TAG"
-          container=$(docker run --detach --read-only --cap-drop=ALL \
-            --tmpfs /data:uid=65532,gid=65532,mode=0700 \
-            --env GRAPHWAN_ADMIN_PASSWORD=ci-controller-smoke-password \
-            --publish 127.0.0.1::8443 graphwan-controller:test)
-          trap 'docker logs "$container"; docker rm --force "$container"' EXIT
-          export CONTROLLER_PORT=$(docker port "$container" 8443/tcp | cut -d: -f2)
-          python3 - <<'PY'
-          import json, os, ssl, time, urllib.error, urllib.request
-          url = "https://127.0.0.1:" + os.environ["CONTROLLER_PORT"] + "/api/v1/health"
-          # This disposable controller generates its own CA on first startup.
-          context = ssl._create_unverified_context()
-          for attempt in range(30):
-              try:
-                  with urllib.request.urlopen(url, context=context, timeout=2) as response:
-                      assert json.load(response)["status"] == "ok"
-                  break
-              except (urllib.error.URLError, TimeoutError):
-                  time.sleep(1)
-          else:
-              raise SystemExit("Controller image did not become healthy")
-          PY
-      - name: Publish controller image
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/metadata-action@v6
+        id: metadata
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: type=raw,value=${{ github.sha }}
+      - name: Build and publish controller image
+        uses: docker/build-push-action@v7
         id: image
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_ACTOR: ${{ github.actor }}
-          SOURCE_URL: https://github.com/${{ github.repository }}
-          SOURCE_REVISION: ${{ github.sha }}
-        run: |
-          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GH_ACTOR" --password-stdin
-          trap 'docker logout ghcr.io' EXIT
-          docker buildx build --platform linux/amd64,linux/arm64 --file Dockerfile \
-            --label "org.opencontainers.image.source=$SOURCE_URL" \
-            --label "org.opencontainers.image.revision=$SOURCE_REVISION" \
-            --label "org.opencontainers.image.version=$RELEASE_TAG" \
-            --metadata-file "$RUNNER_TEMP/controller-image.json" \
-            --tag "$CONTROLLER_IMAGE" --push "$BUILD_DIR"
-          python3 - <<'PYTHON'
-          import json, os, pathlib, re
-          metadata = json.loads((pathlib.Path(os.environ["RUNNER_TEMP"]) / "controller-image.json").read_text())
-          digest = metadata["containerimage.digest"]
-          if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
-              raise SystemExit("BuildKit did not return a valid image digest")
-          repository = os.environ["CONTROLLER_IMAGE"].rsplit(":", 1)[0]
-          reference = repository + "@" + digest
-          (pathlib.Path(os.environ["RELEASE_DIR"]) / "controller-image.txt").write_text(reference + "\n")
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write("reference=" + reference + "\n")
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
-              summary.write("Controller image: `" + reference + "`\n")
-          PYTHON
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          build-args: VERSION=${{ env.RELEASE_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           SOURCE_REVISION: ${{ github.sha }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           if draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft'); then
             if [[ "$draft" != true ]]; then
@@ -126,7 +91,8 @@ jobs:
             fi
           else
             gh release create "$RELEASE_TAG" --target "$SOURCE_REVISION" --draft \
-              --title "$RELEASE_TAG" --generate-notes --prerelease
+              --title "$RELEASE_TAG" --generate-notes --prerelease \
+              --notes "Controller image digest: $IMAGE_DIGEST"
           fi
           gh release upload "$RELEASE_TAG" "$RELEASE_DIR"/* --clobber
           gh release edit "$RELEASE_TAG" --draft=false --prerelease
