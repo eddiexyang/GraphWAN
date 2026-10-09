@@ -1,9 +1,9 @@
 # Release CI and local development checks
 
 The [Release](../.github/workflows/release.yml) workflow runs on every push to
-`main`. It publishes standalone binaries and a controller image for that exact
+`master`. It publishes standalone binaries and a controller image for that exact
 commit. Other branch pushes, pull requests and tag pushes do not publish.
-GitHub prereleases are named `main-<full-commit-sha>` and point to the built commit.
+GitHub prereleases are named `sha-<full-commit-sha>` and point to the built commit.
 
 ## Release build
 
@@ -22,7 +22,7 @@ on the seven supported operating systems. Go 1.26.8 currently supplies 33 target
 | NetBSD | 386, amd64, arm, arm64 |
 | DragonFly | amd64 |
 
-The binary's `version` command and filenames use `main-<full-commit-sha>`. CPU baselines
+The binary's `version` command and filenames use `sha-<full-commit-sha>`. CPU baselines
 remain in `scripts/cross-build.py` (including amd64 v1, ARMv7 and soft-float MIPS).
 Cross-compilation does not establish native runtime support on every target;
 platform restrictions remain documented in the operation guides.
