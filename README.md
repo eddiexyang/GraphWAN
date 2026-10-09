@@ -104,5 +104,5 @@ pnpm --dir web install --frozen-lockfile
 pnpm --dir web build
 ```
 
-Pushes to `master` publish one standalone binary per target and a controller image.
-Use the published image digest for deployments. See [release CI and local checks](docs/continuous-integration.md).
+Version tags such as `v1.2.3` trigger cross-platform builds and a GitHub Release
+with one standalone binary per target. See [release CI and local checks](docs/continuous-integration.md).

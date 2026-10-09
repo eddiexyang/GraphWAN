@@ -1,33 +1,49 @@
 # Release CI and local development checks
 
-The [Release](../.github/workflows/release.yml) workflow runs on every push to
-`master`. It publishes standalone binaries and a controller image for that exact
-commit. Other branch pushes, pull requests and tag pushes do not publish.
-GitHub prereleases are named `sha-<full-commit-sha>` and point to the built commit.
+The only workflow is [Release](../.github/workflows/release.yml). Ordinary branch
+pushes and pull requests do not run CI. Pushing a SemVer tag such as `v1.2.3` or
+`v1.2.3-rc.1` starts a build and automatically publishes a GitHub Release. The `v`
+prefix is optional; build metadata such as `v1.2.3+build.1` is supported. Tags
+are limited to 80 characters. Prerelease identifiers produce a prerelease.
+
+```sh
+git tag v1.2.3
+git push origin v1.2.3
+```
 
 ## Release build
 
 One Ubuntu job installs the pinned Go, Node.js and pnpm versions, builds the
-frontend from the lockfile, and embeds it into the Linux amd64 and arm64
-(aarch64) binaries. Two direct `go build` steps compile with CGO disabled and
-the amd64 v1 / arm64 v8.0 CPU baselines. CI builds no other operating systems or
-architectures and uses no Python build or packaging scripts.
+frontend from the lockfile, and embeds it into every binary. It cross-compiles
+with CGO disabled for every architecture advertised by the pinned Go toolchain
+on the seven supported operating systems. Go 1.26.8 currently supplies 33 targets:
 
-The binary's `version` command and filenames use `sha-<full-commit-sha>`.
-The two release assets are `graphwan-<tag>-linux-amd64` and
-`graphwan-<tag>-linux-arm64`.
+| System | Architectures |
+| --- | --- |
+| Linux | 386, amd64, arm, arm64, loong64, mips, mipsle, mips64, mips64le, ppc64, ppc64le, riscv64, s390x |
+| Windows | 386, amd64, arm64 |
+| macOS (`darwin`) | amd64, arm64 |
+| FreeBSD | 386, amd64, arm, arm64 |
+| OpenBSD | 386, amd64, arm, arm64, ppc64, riscv64 |
+| NetBSD | 386, amd64, arm, arm64 |
+| DragonFly | amd64 |
 
-The multi-stage `Dockerfile` builds the frontend and Go binary directly from the
-repository. Official Docker Actions build and publish the Linux amd64/arm64
-controller image to `ghcr.io/<owner>/<repository>:<full-commit-sha>`.
-The build action's `digest` output is exposed as the job's `image_digest` output
-and included in the GitHub Release notes. Deployments use
-`ghcr.io/<owner>/<repository>@sha256:...` with that published digest.
-The image runs as a non-root user and includes its executable and CA trust store;
-only `/data` needs persistent storage. Kubernetes uses the image's entrypoint and
-passes controller flags as `args`. Image publication uses `GITHUB_TOKEN` with
-`packages: write`. Configure package visibility or image-pull credentials before
-deployment. CI does not perform live deployments.
+The binary's `version` command and filenames use the exact tag. CPU baselines
+remain in `scripts/cross-build.py` (including amd64 v1, ARMv7 and soft-float MIPS).
+Cross-compilation does not establish native runtime support on every target;
+platform restrictions remain documented in the operation guides.
+The legacy Bolt import used by Raft's migration helper is redirected through a
+small bbolt adapter in `internal/boltcompat`, allowing MIPS, RISC-V and LoongArch
+builds. GraphWAN's live Raft store continues to use the same bbolt implementation
+and file format.
+
+Each target produces one standalone binary, named
+`graphwan-<tag>-<os>-<arch>` with `.exe` appended for Windows. CI uploads these
+33 executables directly: no compressed packages, documentation, deployment
+examples, manifests or checksum files. The build manifest remains internal;
+release preparation checks every binary's size and SHA-256 against it before
+uploading. All targets must build successfully. No tests, browser automation or
+live deployments run in CI.
 
 Publication uses the repository's `GITHUB_TOKEN` with `contents: write` and
 automatically generated release notes. Assets are uploaded to a draft before

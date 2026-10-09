@@ -32,9 +32,9 @@ the compiled binary; no archives, documents, manifests or checksum files are
 included. Unix files have executable permissions. This script prepares local
 files and does not publish releases.
 
-The [release workflow](../.github/workflows/release.yml) builds and publishes
-Linux amd64 and arm64 binaries automatically on pushes to `master`.
-See [release CI](continuous-integration.md) for release naming and contents.
+The [release workflow](../.github/workflows/release.yml) builds and publishes these
+binaries automatically when a version tag is pushed. See [release CI](continuous-integration.md)
+for tag formats, architecture coverage and release contents.
 
 Download the matching binary and rename it to `graphwan` or `graphwan.exe`.
 On Unix, run `chmod +x graphwan` after downloading. Documentation, service examples
