@@ -12,7 +12,6 @@ COPY go.mod go.sum ./
 COPY internal/boltcompat/ ./internal/boltcompat/
 RUN go mod download
 COPY . .
-COPY --from=frontend /src/internal/webui/dist/ ./internal/webui/dist/
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
@@ -26,9 +25,12 @@ ARG VERSION=dev
 COPY --from=build /out/graphwan /graphwan-${VERSION}-linux-${TARGETARCH}
 
 FROM gcr.io/distroless/static-debian12:nonroot AS controller
+ARG VERSION=dev
+WORKDIR /usr/local/share/graphwan
 COPY --from=build /out/graphwan /usr/local/bin/graphwan
-COPY --from=agent-amd64 /out/graphwan /usr/local/share/graphwan/agents/linux-amd64
-COPY --from=agent-arm64 /out/graphwan /usr/local/share/graphwan/agents/linux-arm64
+COPY --from=frontend /src/internal/webui/dist/ ./
+COPY --from=agent-amd64 /out/graphwan ./assets/agent/${VERSION}/linux-amd64
+COPY --from=agent-arm64 /out/graphwan ./assets/agent/${VERSION}/linux-arm64
 ENTRYPOINT ["/usr/local/bin/graphwan"]
 CMD ["server", "--listen=0.0.0.0:8443", "--data-dir=/data"]
 EXPOSE 8443

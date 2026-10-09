@@ -1,18 +1,16 @@
-// Package webui serves the production React application embedded in the binary.
+// Package webui serves production static files from the server working directory.
 package webui
 
 import (
-	"embed"
 	"io/fs"
 	"net/http"
+	"os"
 	"strings"
+	"time"
 )
 
-//go:embed dist
-var assets embed.FS
-
 func Handler() http.Handler {
-	root, _ := fs.Sub(assets, "dist")
+	root := os.DirFS(".")
 	files := http.FileServer(http.FS(root))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Static assets do not bypass API authentication, and missing asset/API
@@ -21,15 +19,18 @@ func Handler() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		if r.URL.Path != "/" {
-			info, err := fs.Stat(root, strings.TrimPrefix(r.URL.Path, "/"))
-			if err != nil || info.IsDir() {
-				http.NotFound(w, r)
-				return
-			}
-			if strings.HasPrefix(r.URL.Path, "/assets/") {
-				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-			}
+		name := strings.TrimPrefix(r.URL.Path, "/")
+		if name == "" {
+			name = "index.html"
+		}
+		info, err := fs.Stat(root, name)
+		if err != nil || !info.Mode().IsRegular() {
+			http.NotFound(w, r)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(20 * time.Minute))
 		}
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 		files.ServeHTTP(w, r)

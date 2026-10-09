@@ -55,7 +55,7 @@ func NewServer(listener net.Listener, handler http.Handler, config *tls.Config) 
 				return
 			}
 			s.grpc.ServeHTTP(w, r)
-		case r.TLS != nil:
+		case r.TLS != nil || strings.HasPrefix(r.URL.Path, "/assets/"):
 			handler.ServeHTTP(w, r)
 		default:
 			http.Error(w, "HTTPS required", http.StatusUpgradeRequired)
@@ -138,7 +138,7 @@ func (s *Server) Serve() error {
 			target := s.plain
 			if prefix[0] == 22 {
 				target = s.secure
-			} else if prefix[0] != 'G' && prefix[0] != 'P' {
+			} else if prefix[0] != 'G' && prefix[0] != 'P' && prefix[0] != 'H' {
 				c.Close()
 				return
 			}
