@@ -1,6 +1,7 @@
 package linkstate
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 	"time"
@@ -204,6 +205,30 @@ func TestRestartContinuesAboveOwnSequence(t *testing.T) {
 		if o.Origin == nodeA && o.Sequence <= before {
 			t.Fatalf("B still holds A's pre-restart sequence %d <= %d", o.Sequence, before)
 		}
+	}
+}
+
+// An origin's current advertisement can return through the flood when a
+// neighbour receives it first along a longer path; the echo must not trigger
+// another origination, or every origin re-advertises on each tick.
+func TestOwnAdvertisementEchoIsIgnored(t *testing.T) {
+	l := newLab(t)
+	l.run(time.Second)
+	a := l.engines[nodeA]
+	network := l.state.Networks[0].ID
+	var echo []byte
+	for _, o := range l.engines[nodeB].View().Networks[0].Database {
+		if o.Origin == nodeA {
+			echo, _ = json.Marshal(LSA{Network: network, Origin: nodeA, Revision: o.Revision, Sequence: o.Sequence, Up: o.Up})
+		}
+	}
+	before := a.View().Networks[0].Sequence
+	if err := a.Receive(network, nodeB, echo); err != nil {
+		t.Fatal(err)
+	}
+	l.run(time.Second)
+	if after := a.View().Networks[0].Sequence; after != before {
+		t.Fatalf("echo of the current advertisement re-originated it: %d -> %d", before, after)
 	}
 }
 

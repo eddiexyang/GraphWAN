@@ -158,7 +158,8 @@ func (e *Engine) Receive(networkID, peer model.ID, raw []byte) error {
 	}
 	if lsa.Origin == n.config.Self.ID {
 		// Our own advertisement from before a restart: continue above it.
-		if lsa.Sequence >= n.sequence {
+		// The current one returns through the flood and is ignored.
+		if lsa.Sequence > n.sequence {
 			n.sequence = lsa.Sequence
 			n.dirty = true
 		}
