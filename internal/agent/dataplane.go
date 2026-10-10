@@ -16,6 +16,7 @@ import (
 
 	"github.com/eWloYW8/GraphWAN/internal/forwarding"
 	"github.com/eWloYW8/GraphWAN/internal/gateway"
+	"github.com/eWloYW8/GraphWAN/internal/linkstate"
 	"github.com/eWloYW8/GraphWAN/internal/mesh"
 	"github.com/eWloYW8/GraphWAN/internal/model"
 	"github.com/eWloYW8/GraphWAN/internal/packet"
@@ -50,6 +51,7 @@ type DataPlane struct {
 	lastRoutes    *model.RouteUpdate
 	discoveryWake chan struct{}
 	repairWake    chan struct{}
+	linkState     *linkstate.Engine
 }
 
 func NewDataPlane(parent context.Context, identity ed25519.PrivateKey, options DataPlaneOptions) (*DataPlane, error) {
@@ -67,8 +69,10 @@ func NewDataPlane(parent context.Context, identity ed25519.PrivateKey, options D
 	}
 	ctx, cancel := context.WithCancel(parent)
 	runtime := &DataPlane{identity: append(ed25519.PrivateKey{}, identity...), options: options, ctx: ctx, cancel: cancel, discoveryWake: make(chan struct{}, 1), repairWake: make(chan struct{}, 1)}
-	runtime.wg.Add(1)
+	runtime.linkState = runtime.newLinkState()
+	runtime.wg.Add(2)
 	go runtime.repairLoop()
+	go func() { defer runtime.wg.Done(); runtime.linkState.Run(ctx) }()
 	if options.Endpoints != nil {
 		runtime.wg.Add(1)
 		go runtime.discover()
@@ -169,6 +173,7 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 		}
 		next.mesh.EnableWireGuard(r.receiveWireGuard)
 		next.mesh.EnableStreams(r.acceptTCP)
+		next.mesh.EnableLinkState(r.linkStateHandler())
 		newMesh = true
 	}
 	forwardingSnapshot := carryLiveRoutes(snapshot, r.lastRoutes)
@@ -218,6 +223,9 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 		return err
 	}
 	r.state.Store(next)
+	if linkstate.Active(snapshot) {
+		r.linkState.Configure(snapshot)
+	}
 	for _, network := range snapshot.Networks {
 		next.tcp[network.ID].engine.SetMTU(network.MTU)
 	}

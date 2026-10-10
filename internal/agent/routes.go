@@ -113,6 +113,9 @@ func (r *Reconciler) applyRoutes(update model.RouteUpdate) error {
 }
 
 func (r *Reconciler) AcceptRoutes(update model.RouteUpdate) error {
+	if local, ok := r.runtime.(interface{ LocalRouting() bool }); ok && local.LocalRouting() {
+		return nil // Routes converge from link-state advertisements instead.
+	}
 	r.applyMu.Lock()
 	defer r.applyMu.Unlock()
 	r.mu.Lock()

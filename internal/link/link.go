@@ -29,6 +29,10 @@ const (
 	// a Link without the capability closes on any message kind it does not know.
 	streamHelloMessage = 11
 	streamMessage      = 12
+	// Link-state advertisements follow the same in-band confirmation.
+	linkStateHelloMessage = 13
+	linkStateMessage      = 14
+	linkStateQueue        = 256
 	// Leave room for multiple kernel GSO bursts while writers process bounded
 	// batches. The queue is still finite; control messages use a separate queue.
 	queueSize = 512
@@ -68,6 +72,16 @@ type Options struct {
 	// side enables streams when that announcement arrives.
 	Streams     StreamHandler
 	StreamHello bool
+	// LinkState carries link-state advertisements; LinkStateHello is set by
+	// the accepting side, as for streams. Any transport may carry them.
+	LinkState      LinkStateHandler
+	LinkStateHello bool
+}
+
+// LinkStateHandler receives advertisements; payload is only valid during the call.
+type LinkStateHandler interface {
+	LinkStateReady(*Link)
+	ReceiveLinkState(*Link, []byte)
 }
 
 // StreamHandler owns stream state for every Link of one Edge. Frames returned by
@@ -135,6 +149,9 @@ type Link struct {
 	rx, tx, dropped atomic.Uint64
 	streamsReady    atomic.Bool
 	streamWake      chan struct{}
+	linkStateReady  atomic.Bool
+	linkStateOut    chan []byte
+	linkStateLost   atomic.Uint64
 }
 
 func New(parent context.Context, channel Channel, info Info, options Options) (*Link, error) {
@@ -158,6 +175,7 @@ func New(parent context.Context, channel Channel, info Info, options Options) (*
 	l.pathEnabled = options.PathExchange
 	l.retirements = make(chan Retirement, 8)
 	l.streamWake = make(chan struct{}, 1)
+	l.linkStateOut = make(chan []byte, linkStateQueue)
 	if _, ok := channel.(interface {
 		ReceiveOwnedBatch(context.Context) ([]*packetbuf.Buffer, error)
 	}); ok && options.OwnedPackets {
@@ -169,12 +187,19 @@ func New(parent context.Context, channel Channel, info Info, options Options) (*
 		l.control <- []byte{streamHelloMessage, 1}
 		l.streamsReady.Store(true)
 	}
+	if options.LinkState != nil && options.LinkStateHello {
+		l.control <- []byte{linkStateHelloMessage, 1}
+		l.linkStateReady.Store(true)
+	}
 	l.wg.Add(3)
 	go l.readLoop()
 	go l.writeLoop()
 	go l.healthLoop()
 	if l.streamsReady.Load() {
 		options.Streams.StreamsReady(l)
+	}
+	if l.linkStateReady.Load() {
+		options.LinkState.LinkStateReady(l)
 	}
 	go func() {
 		l.wg.Wait()
@@ -204,6 +229,26 @@ func (l *Link) setActive(active bool) {
 }
 func (l *Link) ID() string         { return l.channel.ID() }
 func (l *Link) StreamsReady() bool { return l.streamsReady.Load() }
+
+func (l *Link) LinkStateReady() bool { return l.linkStateReady.Load() }
+
+// LinkStateLost counts advertisements dropped by a full send queue; the
+// origin's periodic refresh repairs them.
+func (l *Link) LinkStateLost() uint64 { return l.linkStateLost.Load() }
+
+// SendLinkState queues one advertisement without blocking.
+func (l *Link) SendLinkState(payload []byte) bool {
+	if !l.linkStateReady.Load() || len(payload)+1 > packet.MaxFrame {
+		return false
+	}
+	select {
+	case l.linkStateOut <- append([]byte{linkStateMessage}, payload...):
+		return true
+	default:
+		l.linkStateLost.Add(1)
+		return false
+	}
+}
 
 // WakeStreams asks the writer to pull stream frames. It never blocks.
 func (l *Link) WakeStreams() {
@@ -452,6 +497,18 @@ func (l *Link) readLoop() {
 			if !l.streamsReady.Swap(true) {
 				l.options.Streams.StreamsReady(l)
 			}
+		case linkStateHelloMessage:
+			if len(raw) != 2 || l.options.LinkState == nil || l.options.LinkStateHello {
+				return
+			}
+			if !l.linkStateReady.Swap(true) {
+				l.options.LinkState.LinkStateReady(l)
+			}
+		case linkStateMessage:
+			if !l.linkStateReady.Load() || len(raw) < 2 {
+				return
+			}
+			l.options.LinkState.ReceiveLinkState(l, raw[1:])
 		case streamMessage:
 			if !l.streamsReady.Load() {
 				return
@@ -526,6 +583,13 @@ func (l *Link) writeLoop() {
 			count = 1
 		default:
 		}
+		if count == 0 {
+			select {
+			case messages[0] = <-l.linkStateOut:
+				count = 1
+			default:
+			}
+		}
 		if count == 0 && preferStreams {
 			select {
 			case <-l.streamWake:
@@ -538,6 +602,8 @@ func (l *Link) writeLoop() {
 			case <-l.ctx.Done():
 				return
 			case messages[0] = <-l.control:
+				count = 1
+			case messages[0] = <-l.linkStateOut:
 				count = 1
 			case <-l.streamWake:
 				count = l.pullStreams(messages[:limit])

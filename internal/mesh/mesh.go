@@ -39,6 +39,7 @@ type policy struct {
 }
 type Mesh struct {
 	streamHandler  StreamHandler
+	linkState      *LinkStateHandler
 	extensionMu    sync.Mutex
 	extensionNext  time.Time
 	extensionSlots chan struct{}
@@ -423,8 +424,10 @@ func (m *Mesh) accept(conn transport.Conn, kind model.Transport) {
 			channel.Close()
 			return
 		}
+		// The acceptor confirms each offered capability in band.
 		streams := introduction.TCPStreams && m.streamsEnabled() && streamTransport(kind)
-		selected.register(channel, *candidate, introduction.PathExchange, streams, streams)
+		linkState := introduction.LinkState && m.linkStateEnabled()
+		selected.register(channel, *candidate, introduction.PathExchange, linkCaps{streams, true, linkState, true})
 	}()
 }
 func addressFamily(address net.Addr) int {
@@ -498,9 +501,13 @@ func (g *group) close() {
 	g.wg.Wait()
 }
 
-// register enables streams when this side offered them (dialer) or accepted an
-// offer (acceptor, which announces support with hello).
-func (g *group) register(channel *peer.Channel, candidate link.Candidate, pathExchange, streams, hello bool) {
+// linkCaps lists capabilities this side offered (dialer) or accepted from an
+// offer (acceptor, which announces each with a hello message).
+type linkCaps struct {
+	streams, streamHello, linkState, linkStateHello bool
+}
+
+func (g *group) register(channel *peer.Channel, candidate link.Candidate, pathExchange bool, caps linkCaps) {
 	g.mu.Lock()
 	if g.ctx.Err() != nil {
 		g.mu.Unlock()
@@ -516,9 +523,12 @@ func (g *group) register(channel *peer.Channel, candidate link.Candidate, pathEx
 	options := g.mesh.linkOptions
 	options.OwnedPackets = true
 	options.PathExchange = pathExchange
-	if streams {
-		options.Streams, options.StreamHello = g.mux, hello
+	if caps.streams {
+		options.Streams, options.StreamHello = g.mux, caps.streamHello
 		channel.UseKernelWriteBacklog()
+	}
+	if caps.linkState {
+		options.LinkState, options.LinkStateHello = g, caps.linkStateHello
 	}
 	l, err := link.New(g.ctx, channel, link.Info{NetworkID: cfg.network, EdgeID: cfg.peer.Edge.ID, PeerID: cfg.peer.Node.ID, CandidateID: candidate.ID, Transport: candidate.Endpoint.Transport}, options)
 	if err != nil {
