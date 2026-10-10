@@ -94,7 +94,9 @@ func countingPacketProxy(t *testing.T, upstream string) (string, *atomic.Int32) 
 }
 
 func TestTCPPacketsReuseConvergedTunnels(t *testing.T) {
-	for _, carrier := range []model.Transport{model.TCP, model.UDP} {
+	// Edges whose Links carry streams terminate TCP into byte streams
+	// (tcp_test.go). Packets stay unchanged on Edges without streams.
+	for _, carrier := range []model.Transport{model.UDP} {
 		t.Run(string(carrier), func(t *testing.T) { testTCPPacketsReuseConvergedTunnels(t, carrier) })
 	}
 }

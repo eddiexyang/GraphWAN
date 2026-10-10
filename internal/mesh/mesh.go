@@ -38,6 +38,7 @@ type policy struct {
 	endpoints []model.Endpoint
 }
 type Mesh struct {
+	streamHandler  StreamHandler
 	extensionMu    sync.Mutex
 	extensionNext  time.Time
 	extensionSlots chan struct{}
@@ -422,7 +423,8 @@ func (m *Mesh) accept(conn transport.Conn, kind model.Transport) {
 			channel.Close()
 			return
 		}
-		selected.register(channel, *candidate, introduction.PathExchange)
+		streams := introduction.TCPStreams && m.streamsEnabled() && streamTransport(kind)
+		selected.register(channel, *candidate, introduction.PathExchange, streams, streams)
 	}()
 }
 func addressFamily(address net.Addr) int {
@@ -441,6 +443,7 @@ func addressFamily(address net.Addr) int {
 }
 
 type group struct {
+	mux               *mux
 	extensionInflight int
 	extensionStart    time.Time
 	mesh              *Mesh
@@ -474,11 +477,14 @@ func (m *Mesh) newGroup(cfg *policy) *group {
 	g.suppressed = map[string]string{}
 	g.retiring = map[string]*retirement{}
 	g.keepers = map[link.Path]string{}
+	// IDs differ in parity so both Agents can open streams without coordination.
+	g.mux = newMux(g, cfg.self < cfg.peer.Node.ID, func(s *muxStream) { m.acceptMuxStream(g, s) })
 	g.wg.Add(1)
 	go g.schedule()
 	return g
 }
 func (g *group) close() {
+	g.mux.close()
 	g.cancel()
 	g.mu.Lock()
 	links := make([]*link.Link, 0, len(g.links))
@@ -491,7 +497,10 @@ func (g *group) close() {
 	}
 	g.wg.Wait()
 }
-func (g *group) register(channel *peer.Channel, candidate link.Candidate, pathExchange bool) {
+
+// register enables streams when this side offered them (dialer) or accepted an
+// offer (acceptor, which announces support with hello).
+func (g *group) register(channel *peer.Channel, candidate link.Candidate, pathExchange, streams, hello bool) {
 	g.mu.Lock()
 	if g.ctx.Err() != nil {
 		g.mu.Unlock()
@@ -507,6 +516,9 @@ func (g *group) register(channel *peer.Channel, candidate link.Candidate, pathEx
 	options := g.mesh.linkOptions
 	options.OwnedPackets = true
 	options.PathExchange = pathExchange
+	if streams {
+		options.Streams, options.StreamHello = g.mux, hello
+	}
 	l, err := link.New(g.ctx, channel, link.Info{NetworkID: cfg.network, EdgeID: cfg.peer.Edge.ID, PeerID: cfg.peer.Node.ID, CandidateID: candidate.ID, Transport: candidate.Endpoint.Transport}, options)
 	if err != nil {
 		g.mu.Unlock()
