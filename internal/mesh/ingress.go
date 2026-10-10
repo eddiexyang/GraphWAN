@@ -55,6 +55,10 @@ func (c *ingressConn) Close() error {
 
 func (c *bufferedConn) Read(raw []byte) (int, error) { return c.reader.Read(raw) }
 
+func (c *bufferedConn) UseKernelWriteBacklog() error {
+	return transport.UseKernelTCPBacklog(c.Conn)
+}
+
 // Only the read side has buffered admission bytes. Gather writes can use the
 // underlying connection without flattening ciphertext or bypassing its writer.
 func (c *bufferedConn) WriteBuffers(parts net.Buffers) (int64, error) {

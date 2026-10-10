@@ -75,7 +75,10 @@ func TestTCPPacketsAndTransitIntercept(t *testing.T) {
 		t.Fatal(err)
 	}
 	var sentTo []model.ID
-	router, err := forwarding.New(snapshot, func(_ context.Context, _ model.ID, next model.ID, _ []byte) error { sentTo = append(sentTo, next); return nil }, func(context.Context, model.ID, []byte) error { return nil })
+	router, err := forwarding.New(snapshot, func(_ context.Context, _ model.ID, next model.ID, _ []byte) error {
+		sentTo = append(sentTo, next)
+		return nil
+	}, func(context.Context, model.ID, []byte) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}

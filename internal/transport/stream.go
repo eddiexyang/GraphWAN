@@ -48,6 +48,13 @@ func (s *Stream) Close() error         { return s.conn.Close() }
 
 // SendBatch preserves the existing per-message wire framing while amortizing
 // socket writes and cancellation bookkeeping over immediately available packets.
+func (s *Stream) UseKernelWriteBacklog() error {
+	if wrapper, ok := s.conn.(interface{ UseKernelWriteBacklog() error }); ok {
+		return wrapper.UseKernelWriteBacklog()
+	}
+	return UseKernelTCPBacklog(s.conn)
+}
+
 func (s *Stream) Send(ctx context.Context, data []byte) error {
 	return s.SendBatch(ctx, [][]byte{data})
 }

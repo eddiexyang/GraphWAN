@@ -518,6 +518,7 @@ func (g *group) register(channel *peer.Channel, candidate link.Candidate, pathEx
 	options.PathExchange = pathExchange
 	if streams {
 		options.Streams, options.StreamHello = g.mux, hello
+		channel.UseKernelWriteBacklog()
 	}
 	l, err := link.New(g.ctx, channel, link.Info{NetworkID: cfg.network, EdgeID: cfg.peer.Edge.ID, PeerID: cfg.peer.Node.ID, CandidateID: candidate.ID, Transport: candidate.Endpoint.Transport}, options)
 	if err != nil {

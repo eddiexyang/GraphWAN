@@ -87,10 +87,19 @@ type Channel struct {
 	ignore         [][]byte
 }
 
-func (c *Channel) ID() string           { return c.session.ID() }
-func (c *Channel) NeedsRekey() bool     { return c.session.NeedsRekey() }
-func (c *Channel) Created() time.Time   { return c.session.Created() }
-func (c *Channel) Close() error         { return c.conn.Close() }
+func (c *Channel) ID() string         { return c.session.ID() }
+func (c *Channel) NeedsRekey() bool   { return c.session.NeedsRekey() }
+func (c *Channel) Created() time.Time { return c.session.Created() }
+func (c *Channel) Close() error       { return c.conn.Close() }
+
+// UseKernelWriteBacklog removes the packet carrier's unsent-byte bound when
+// byte streams share this connection.
+func (c *Channel) UseKernelWriteBacklog() error {
+	if native, ok := c.conn.(interface{ UseKernelWriteBacklog() error }); ok {
+		return native.UseKernelWriteBacklog()
+	}
+	return nil
+}
 func (c *Channel) LocalAddr() net.Addr  { return c.conn.LocalAddr() }
 func (c *Channel) RemoteAddr() net.Addr { return c.conn.RemoteAddr() }
 
