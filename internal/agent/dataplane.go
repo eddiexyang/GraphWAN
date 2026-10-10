@@ -176,6 +176,7 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 	if err != nil {
 		return err
 	}
+	router.SetTCPIntercept(r.interceptTCP)
 	next.router = router
 	for _, network := range snapshot.Networks {
 		fingerprint := tcpFingerprint(network)
@@ -381,33 +382,35 @@ func (r *DataPlane) readTunnelBatch(network model.ID, device *runtimeTunnel, bat
 		for i := range n {
 			packets[i] = buffers[i][:sizes[i]]
 		}
-		// TCP is consumed locally; preserve batching for consecutive datagrams.
+		// TCP goes to the local stack when its next Edge carries streams; other
+		// TCP is forwarded as packets. Consecutive datagrams stay batched.
 		start := 0
 		for i, raw := range packets[:n] {
-			if !packet.IsTCP(raw) && !packet.HasExtensionFragment(raw) {
+			if !packet.IsTCP(raw) {
 				continue
 			}
 			if start < i {
 				state.router.FromTunnelBatch(r.ctx, network, packets[start:i])
 			}
+			start = i + 1
+			admitted := state.router.TCPIngress(network, raw, false) == nil
 			if segmentSizes[i] > 0 {
-				if state.router.TCPIngressGSO(network, raw, segmentSizes[i]) == nil && state.tcp[network] != nil {
-					if owners[i] != nil {
-						state.tcp[network].engine.InjectOwned(owners[i])
-						owners[i] = nil
-					} else {
-						state.tcp[network].engine.Inject(raw)
-					}
-				}
-			} else if owners[i] != nil && packet.IsTCP(raw) && !packet.HasExtensionFragment(raw) {
-				if state.router.TCPIngress(network, raw, false) == nil && state.tcp[network] != nil {
+				admitted = state.router.TCPIngressGSO(network, raw, segmentSizes[i]) == nil
+			}
+			if !admitted {
+				continue
+			}
+			if r.captureTCP(state, network, raw, "") {
+				if owners[i] != nil {
 					state.tcp[network].engine.InjectOwned(owners[i])
 					owners[i] = nil
+				} else {
+					state.tcp[network].engine.Inject(raw)
 				}
-			} else {
-				r.accessPacket(state, r.ctx, network, raw, false)
+				continue
 			}
-			start = i + 1
+			// Owned reads may keep the kernel's partial checksum.
+			r.forwardTCP(state, network, raw, segmentSizes[i], segmentSizes[i] == 0 && owners[i] == nil)
 		}
 		if start < n {
 			state.router.FromTunnelBatch(r.ctx, network, packets[start:n])

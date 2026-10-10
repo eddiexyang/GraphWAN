@@ -25,6 +25,10 @@ const (
 	pathMessage    = 8
 	retireMessage  = 9
 	retiredMessage = 10
+	// Stream messages are sent only after the accepting side confirms support:
+	// a Link without the capability closes on any message kind it does not know.
+	streamHelloMessage = 11
+	streamMessage      = 12
 	// Leave room for multiple kernel GSO bursts while writers process bounded
 	// batches. The queue is still finite; control messages use a separate queue.
 	queueSize = 512
@@ -59,6 +63,19 @@ type Options struct {
 	// OwnedPackets opts into explicit packet ownership. Consumers must release
 	// every buffer received from ReadOwnedBatch; the legacy Packets API is unused.
 	OwnedPackets bool
+	// Streams carries byte streams on this Link when both sides support them.
+	// The accepting side sets StreamHello and announces support; the dialing
+	// side enables streams when that announcement arrives.
+	Streams     StreamHandler
+	StreamHello bool
+}
+
+// StreamHandler owns stream state for every Link of one Edge. Frames returned by
+// PullStream start with the stream message kind and must not be modified later.
+type StreamHandler interface {
+	StreamsReady(*Link)
+	ReceiveStream(*Link, []byte) bool
+	PullStream(*Link, [][]byte) int
 }
 
 func (o Options) defaults() Options {
@@ -116,6 +133,8 @@ type Link struct {
 	rtt             time.Duration
 	sent, lost      uint64
 	rx, tx, dropped atomic.Uint64
+	streamsReady    atomic.Bool
+	streamWake      chan struct{}
 }
 
 func New(parent context.Context, channel Channel, info Info, options Options) (*Link, error) {
@@ -138,16 +157,25 @@ func New(parent context.Context, channel Channel, info Info, options Options) (*
 	l := &Link{channel: channel, info: info, options: options, ctx: ctx, cancel: cancel, done: make(chan struct{}), dataReady: make(chan struct{}, 1), selection: make(chan Selection, 8), control: make(chan []byte, 8), packets: make(chan []byte, queueSize), pending: map[uint64]time.Time{}}
 	l.pathEnabled = options.PathExchange
 	l.retirements = make(chan Retirement, 8)
+	l.streamWake = make(chan struct{}, 1)
 	if _, ok := channel.(interface {
 		ReceiveOwnedBatch(context.Context) ([]*packetbuf.Buffer, error)
 	}); ok && options.OwnedPackets {
 		l.ownedPackets = packetbuf.NewQueue(queueSize)
 	}
 	l.dataGeneration.Store(1)
+	if options.Streams != nil && options.StreamHello && l.tcpBacked() {
+		// The queue is empty here, so the announcement precedes every stream frame.
+		l.control <- []byte{streamHelloMessage, 1}
+		l.streamsReady.Store(true)
+	}
 	l.wg.Add(3)
 	go l.readLoop()
 	go l.writeLoop()
 	go l.healthLoop()
+	if l.streamsReady.Load() {
+		options.Streams.StreamsReady(l)
+	}
 	go func() {
 		l.wg.Wait()
 		close(l.packets)
@@ -174,7 +202,16 @@ func (l *Link) setActive(active bool) {
 		l.dataGeneration.Add(1)
 	}
 }
-func (l *Link) ID() string             { return l.channel.ID() }
+func (l *Link) ID() string         { return l.channel.ID() }
+func (l *Link) StreamsReady() bool { return l.streamsReady.Load() }
+
+// WakeStreams asks the writer to pull stream frames. It never blocks.
+func (l *Link) WakeStreams() {
+	select {
+	case l.streamWake <- struct{}{}:
+	default:
+	}
+}
 func (l *Link) Info() Info             { return l.info }
 func (l *Link) Packets() <-chan []byte { return l.packets }
 func (l *Link) Done() <-chan struct{}  { return l.done }
@@ -408,6 +445,21 @@ func (l *Link) readLoop() {
 					l.dropped.Add(1)
 				}
 			}
+		case streamHelloMessage:
+			if len(raw) != 2 || l.options.Streams == nil || l.options.StreamHello || !l.tcpBacked() {
+				return
+			}
+			if !l.streamsReady.Swap(true) {
+				l.options.Streams.StreamsReady(l)
+			}
+		case streamMessage:
+			if !l.streamsReady.Load() {
+				return
+			}
+			l.rx.Add(uint64(len(raw) - 1))
+			if !l.options.Streams.ReceiveStream(l, raw[1:]) {
+				return
+			}
 		case pingMessage:
 			if len(raw) != 9 {
 				return
@@ -450,6 +502,12 @@ func (l *Link) writeLoop() {
 	})
 	var messages [packetbuf.BatchSize][]byte
 	var owners [packetbuf.BatchSize]*packetbuf.Buffer
+	limit := 1
+	if batching {
+		limit = len(messages)
+	}
+	// Alternate stream frames and packets when both are waiting.
+	preferStreams := false
 	defer l.wg.Done()
 	defer func() {
 		l.stop()
@@ -468,18 +526,23 @@ func (l *Link) writeLoop() {
 			count = 1
 		default:
 		}
+		if count == 0 && preferStreams {
+			select {
+			case <-l.streamWake:
+				count = l.pullStreams(messages[:limit])
+			default:
+			}
+		}
 		if count == 0 {
 			select {
 			case <-l.ctx.Done():
 				return
 			case messages[0] = <-l.control:
 				count = 1
+			case <-l.streamWake:
+				count = l.pullStreams(messages[:limit])
 			case <-l.dataReady:
 				l.queueMu.Lock()
-				limit := 1
-				if batching {
-					limit = len(messages)
-				}
 				for l.dataCount > 0 && count < limit {
 					data := l.takeData()
 					if data.generation%2 == 0 || data.generation != l.dataGeneration.Load() {
@@ -499,6 +562,7 @@ func (l *Link) writeLoop() {
 		if count == 0 {
 			continue
 		}
+		preferStreams = len(messages[0]) == 0 || messages[0][0] != streamMessage
 		ctx, cancel := context.WithTimeout(l.ctx, l.options.WriteTimeout)
 		var err error
 		if batching {
@@ -511,7 +575,7 @@ func (l *Link) writeLoop() {
 			return
 		}
 		for i, raw := range messages[:count] {
-			if raw[0] == dataMessage {
+			if raw[0] == dataMessage || raw[0] == streamMessage {
 				l.tx.Add(uint64(len(raw) - 1))
 			}
 			messages[i] = nil
@@ -519,6 +583,19 @@ func (l *Link) writeLoop() {
 			owners[i] = nil
 		}
 	}
+}
+
+// pullStreams re-arms the wake signal when the handler may hold more frames,
+// so packets and control messages still get their turn between batches.
+func (l *Link) pullStreams(dst [][]byte) int {
+	if !l.streamsReady.Load() {
+		return 0
+	}
+	count := l.options.Streams.PullStream(l, dst)
+	if count == len(dst) {
+		l.WakeStreams()
+	}
+	return count
 }
 func (l *Link) healthLoop() {
 	defer l.wg.Done()

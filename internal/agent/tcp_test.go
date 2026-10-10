@@ -305,36 +305,38 @@ func streamAgents(t *testing.T, carrier model.Transport, configure ...func(*mode
 			t.Fatal(err)
 		}
 	}
-	if testing.Short() {
-		// Race instrumentation greatly expands stack/crypto work. Start the
-		// concurrency run after background peer admission has settled.
-		deadline := time.Now().Add(30 * time.Second)
-		for {
-			ready := true
-			for _, agent := range agents {
-				for _, network := range agent.state.Load().snapshot.Networks {
-					for _, peer := range network.Peers {
-						if peer.Node.WireGuard != nil {
-							continue
+	// Each Edge chooses streams or packets when a connection starts. Start
+	// after every Edge has a healthy Link and, where offered, stream support.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		ready := true
+		for _, agent := range agents {
+			current := agent.state.Load()
+			for _, network := range current.snapshot.Networks {
+				for _, peer := range network.Peers {
+					if peer.Node.WireGuard != nil {
+						continue
+					}
+					found := false
+					for _, status := range agent.Report() {
+						if status.EdgeID == peer.Edge.ID && status.Healthy {
+							found = true
 						}
-						found := false
-						for _, status := range agent.Report() {
-							if status.EdgeID == peer.Edge.ID && status.Healthy {
-								found = true
-							}
-						}
-						ready = ready && found
+					}
+					ready = ready && found
+					if streamCarrier(carrier) {
+						ready = ready && current.mesh.StreamsAvailable(network.ID, peer.Node.ID)
 					}
 				}
 			}
-			if ready {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatal("peer links did not become healthy")
-			}
-			time.Sleep(25 * time.Millisecond)
 		}
+		if ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("peer links did not become ready")
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 	return agents, devices, state
 }
@@ -406,7 +408,7 @@ func TestTCPStreamsAcrossGraph(t *testing.T) {
 			if devices[0].batches.Load() == 0 || devices[2].batches.Load() == 0 {
 				t.Fatal("TCP access bypassed the TUN batch interface")
 			}
-			if devices[2].gsos.Load() == 0 {
+			if streamCarrier(carrier) && devices[2].gsos.Load() == 0 {
 				t.Fatal("native access TCP bypassed host segmentation offload")
 			}
 			if devices[0].readGSOs.Load() == 0 {
@@ -416,23 +418,54 @@ func TestTCPStreamsAcrossGraph(t *testing.T) {
 	}
 }
 
-func TestUDPOnlyTCPDoesNotFallBackToPackets(t *testing.T) {
-	_, devices, state := streamAgents(t, model.UDP)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+// streamCarrier reports transports whose Links carry streams; QUIC Links
+// carry datagrams, and UDP is unreliable.
+func streamCarrier(carrier model.Transport) bool {
+	return carrier == model.TCP || carrier == model.WS || carrier == model.WSS || carrier == model.GRPC
+}
+
+// Edges without stream support forward TCP as packets, end to end.
+func TestTCPPacketsOnEdgesWithoutStreams(t *testing.T) {
+	agents, devices, state := streamAgents(t, model.UDP)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	target := state.Networks[0].Nodes[2].Address
+	listener, err := gonet.ListenTCP(devices[2].stack, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(target.As4()), Port: 8080}, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	payload := bytes.Repeat([]byte("TCP packets over UDP Links\n"), 8*1024)
+	received := make(chan []byte, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			received <- nil
+			return
+		}
+		defer conn.Close()
+		raw, _ := io.ReadAll(conn)
+		received <- raw
+	}()
 	conn, err := gonet.DialContextTCP(ctx, devices[0].stack, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(target.As4()), Port: 8080}, ipv4.ProtocolNumber)
-	if conn != nil {
-		conn.Close()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err == nil {
-		t.Fatal("TCP accepted on UDP-only graph")
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatal(err)
 	}
-	if ctx.Err() != nil {
-		t.Fatal("UDP-only TCP was left hanging instead of refused")
+	conn.Close()
+	if raw := <-received; !bytes.Equal(raw, payload) {
+		t.Fatal("TCP bytes changed over UDP Links")
 	}
-	if devices[1].writes.Load() != 0 || devices[2].writes.Load() != 0 {
-		t.Fatal("raw TCP tunneled through UDP graph")
+	network := state.Networks[0].ID
+	for i, agent := range agents {
+		agent.state.Load().tcp[network].flows.mu.Lock()
+		owned := len(agent.state.Load().tcp[network].flows.flows)
+		agent.state.Load().tcp[network].flows.mu.Unlock()
+		if owned != 0 {
+			t.Fatalf("agent %d terminated TCP on Edges without streams", i)
+		}
 	}
 }
 
@@ -497,13 +530,13 @@ func transferApplication(t *testing.T, source, destination *kernelTUN, target ne
 	}
 }
 
-func TestTCPReverseOpenCarrier(t *testing.T) {
+func TestTCPStreamsOnOneWayReachableEdge(t *testing.T) {
 	for _, carrier := range []model.Transport{model.TCP, model.QUIC, model.GRPC} {
 		t.Run(string(carrier), func(t *testing.T) {
 			agents, devices, state := streamAgents(t, carrier, func(s *model.State) { s.Agents[2].Endpoints = nil })
 			transferApplication(t, devices[0], devices[2], state.Networks[0].Nodes[2].Address)
 			if devices[1].writes.Load() != 0 {
-				t.Fatal("reverse stream used transit TUN")
+				t.Fatal("stream used transit TUN")
 			}
 			var tx uint64
 			for _, l := range agents[0].Report() {

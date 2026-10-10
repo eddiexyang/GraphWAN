@@ -44,6 +44,18 @@ type Engine struct {
 	closed      bool
 	slots       chan struct{}
 	wg          sync.WaitGroup
+	flowHook    atomic.Pointer[func(from, to netip.AddrPort, open bool)]
+}
+
+// SetFlowHook reports when an accepted connection starts and ends its relay.
+func (e *Engine) SetFlowHook(hook func(from, to netip.AddrPort, open bool)) {
+	e.flowHook.Store(&hook)
+}
+
+func (e *Engine) flow(from, to netip.AddrPort, open bool) {
+	if hook := e.flowHook.Load(); hook != nil {
+		(*hook)(from, to, open)
+	}
 }
 
 // gVisor normalizes RXChecksumValidated from link capabilities during the
@@ -199,6 +211,8 @@ func (e *Engine) forward(request *tcp.ForwarderRequest) {
 	defer func() { <-e.slots }()
 	id := request.ID()
 	from, to := netip.AddrPortFrom(addr(id.RemoteAddress), id.RemotePort), netip.AddrPortFrom(addr(id.LocalAddress), id.LocalPort)
+	e.flow(from, to, true)
+	defer e.flow(from, to, false)
 	ctx, cancel := context.WithTimeout(e.ctx, ConnectTimeout)
 	remote, err := e.open(ctx, from, to)
 	cancel()

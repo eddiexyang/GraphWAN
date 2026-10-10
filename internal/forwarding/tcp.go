@@ -56,13 +56,39 @@ func (r *Router) tcpIngress(networkID model.ID, raw []byte, segmentSize int, wir
 
 func wireID(id model.ID) (out [16]byte) { hex.Decode(out[:], []byte(id)); return }
 
+// NextHop returns the neighbor that carries traffic to destination, or local
+// when this Agent delivers it (its own addresses and attached WireGuard leaves).
+func (r *Router) NextHop(networkID model.ID, destination netip.Addr) (next model.ID, local bool, err error) {
+	n := r.state.Load().networks[networkID]
+	if n == nil {
+		return "", false, ErrNetwork
+	}
+	dest := n.owner(destination)
+	if dest == nil {
+		return "", false, ErrDestination
+	}
+	if dest.id == n.self.ID {
+		return "", true, nil
+	}
+	next, ok := n.routes[dest.id]
+	if !ok {
+		return "", false, ErrUnreachable
+	}
+	if n.wireguard[dest.address] != nil && next == dest.id {
+		return "", true, nil
+	}
+	return next, false, nil
+}
+
 func (r *Router) TCPRequest(networkID model.ID, from, to netip.AddrPort) (streamproxy.Request, error) {
 	n := r.state.Load().networks[networkID]
 	if n == nil {
 		return streamproxy.Request{}, ErrNetwork
 	}
+	// Access packets were admitted by TCPIngress and transit packets by the
+	// peer path, so the source only needs an owner here.
 	source, dest := n.owner(from.Addr()), n.owner(to.Addr())
-	if source == nil || source.id != n.self.ID && n.wireguard[from.Addr()] == nil {
+	if source == nil {
 		return streamproxy.Request{}, ErrSource
 	}
 	if dest == nil {
@@ -92,9 +118,6 @@ func (r *Router) TCPRoute(request streamproxy.Request, ingress model.ID) (next m
 	if dest == nil || n.owner(request.To.Addr()) != dest {
 		return "", false, ErrDestination
 	}
-	if ingress == "" && source.id != n.self.ID && n.wireguard[request.From.Addr()] == nil {
-		return "", false, ErrSource
-	}
 	if dest.id == n.self.ID {
 		return "", true, nil
 	}
@@ -114,8 +137,9 @@ func (r *Router) TCPRoute(request streamproxy.Request, ingress model.ID) (next m
 	return next, false, nil
 }
 
-// TCPOutput delivers only access-side packets. TCP segments never enter a graph
-// Link's lossy packet queue; the stream endpoints preserve the original tuple.
+// TCPOutput sends packets of the local TCP stack. Its connections keep the
+// original tuple, so packets toward other nodes leave as transit packets of
+// their source's owner, on Edges that do not carry streams.
 func (r *Router) TCPOutput(ctx context.Context, networkID model.ID, raw []byte) error {
 	n := r.state.Load().networks[networkID]
 	if n == nil {
@@ -132,14 +156,29 @@ func (r *Router) TCPOutput(ctx context.Context, networkID model.ID, raw []byte) 
 	if dest.id == n.self.ID {
 		return r.deliver(ctx, networkID, raw)
 	}
-	if n.wireguard[info.Destination] == nil {
-		return ErrDestination
+	if n.wireguard[info.Destination] != nil {
+		frame, err := (packet.Packet{Header: packet.Header{Network: networkID, Source: n.self.ID, Destination: dest.id, HopLimit: packet.DefaultHopLimit}, Payload: raw}).MarshalBinary()
+		if err != nil {
+			return err
+		}
+		return r.send(ctx, networkID, dest.id, frame)
 	}
-	frame, err := (packet.Packet{Header: packet.Header{Network: networkID, Source: n.self.ID, Destination: dest.id, HopLimit: packet.DefaultHopLimit}, Payload: raw}).MarshalBinary()
+	source := n.owner(info.Source)
+	if source == nil {
+		return ErrSource
+	}
+	if len(raw) > n.mtu {
+		return ErrMTU
+	}
+	next, ok := n.routes[dest.id]
+	if !ok {
+		return ErrUnreachable
+	}
+	frame, err := (packet.Packet{Header: packet.Header{Network: networkID, Source: source.id, Destination: dest.id, HopLimit: packet.DefaultHopLimit}, Payload: raw}).MarshalBinary()
 	if err != nil {
 		return err
 	}
-	return r.send(ctx, networkID, dest.id, frame)
+	return r.send(ctx, networkID, next, frame)
 }
 
 // TCPOutputLocal applies the same destination ownership check for packet-buffer

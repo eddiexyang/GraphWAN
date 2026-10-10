@@ -23,8 +23,11 @@ var (
 	ErrPeer        = errors.New("packet arrived from an unconfigured neighbor")
 	ErrUnreachable = errors.New("no route to destination")
 	ErrMTU         = errors.New("packet exceeds network MTU")
-	ErrTCPPacket   = errors.New("TCP requires byte stream forwarding")
 )
+
+// TCPIntercept may take a transit TCP packet before it is sent to next. It must
+// copy raw if it keeps it, and return true only when it consumed the packet.
+type TCPIntercept func(network model.ID, raw []byte, next model.ID) bool
 
 type Send func(context.Context, model.ID, model.ID, []byte) error
 type Deliver func(context.Context, model.ID, []byte) error
@@ -74,6 +77,16 @@ type Router struct {
 	deliverBatch   func(context.Context, model.ID, [][]byte) error
 	sendBatch      func(context.Context, model.ID, model.ID, [][]byte) error
 	sendOwnedBatch func(context.Context, model.ID, model.ID, []*packetbuf.Buffer) error
+	tcpIntercept   atomic.Pointer[TCPIntercept]
+}
+
+// SetTCPIntercept installs or removes (nil) the transit TCP hook.
+func (r *Router) SetTCPIntercept(intercept TCPIntercept) {
+	if intercept == nil {
+		r.tcpIntercept.Store(nil)
+		return
+	}
+	r.tcpIntercept.Store(&intercept)
 }
 
 func New(snapshot model.Snapshot, send Send, deliver Deliver, batches ...BatchOptions) (*Router, error) {
@@ -226,9 +239,6 @@ func (r *Router) encapsulateSource(ctx context.Context, n *network, raw []byte, 
 	if err != nil {
 		return nil, "", err
 	}
-	if packet.IsTCP(raw) {
-		return nil, "", ErrTCPPacket
-	}
 	if client != nil {
 		if info.Source != client.address {
 			return nil, "", ErrSource
@@ -334,9 +344,6 @@ func (r *Router) fromPeer(ctx context.Context, peerID model.ID, frame []byte, de
 	if err != nil {
 		return err
 	}
-	if packet.IsTCP(p.Payload) {
-		return ErrTCPPacket
-	}
 	if info.Source != source.address && n.owner(info.Source) != source {
 		return ErrSource
 	}
@@ -355,6 +362,9 @@ func (r *Router) fromPeer(ctx context.Context, peerID model.ID, frame []byte, de
 	}
 	if nextHop == peerID {
 		return fmt.Errorf("route would return packet to ingress neighbor")
+	}
+	if intercept := r.tcpIntercept.Load(); intercept != nil && packet.IsTCP(p.Payload) && (*intercept)(n.id, p.Payload, nextHop) {
+		return nil
 	}
 	// Keep the caller's authenticated frame immutable. Transit changes only
 	// the hop limit; copying its canonical wire header avoids decoding/reencoding.
