@@ -495,67 +495,169 @@ func (s *muxStream) ackFrameLocked() []byte {
 	return raw
 }
 
-func (s *muxStream) Write(p []byte) (int, error) {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	m := s.m
+// frameBuilder lays out data frames in one allocation as bytes arrive, as
+// peer.Stream's record builder does. Frames stay referenced until acknowledged.
+type frameBuilder struct {
+	id     uint64
+	offset uint64
+	limit  int
+	bytes  int
+	chunk  []byte
+	used   int
+	frames []muxFrame
+	starts []int
+}
+
+func newFrameBuilder(id, offset uint64, limit int) *frameBuilder {
+	count := (limit + muxMaxData - 1) / muxMaxData
+	return &frameBuilder{id: id, offset: offset, limit: limit, chunk: make([]byte, limit+count*muxDataHeader), frames: make([]muxFrame, 0, count), starts: make([]int, 0, count)}
+}
+
+func (b *frameBuilder) Write(data []byte) (int, error) {
 	written := 0
-	for len(p) > 0 {
+	for len(data) > 0 && b.bytes < b.limit {
+		last := len(b.frames) - 1
+		if last < 0 || b.used-b.starts[last]-muxDataHeader == muxMaxData {
+			raw := b.chunk[b.used : b.used+muxDataHeader]
+			frameHeader(raw, muxData, b.id)
+			binary.BigEndian.PutUint64(raw[10:18], b.offset+uint64(b.bytes))
+			b.frames = append(b.frames, muxFrame{})
+			b.starts = append(b.starts, b.used)
+			b.used += muxDataHeader
+			last++
+		}
+		n := min(len(data), b.limit-b.bytes, muxMaxData-(b.used-b.starts[last]-muxDataHeader))
+		copy(b.chunk[b.used:], data[:n])
+		b.used += n
+		b.bytes += n
+		written += n
+		data = data[n:]
+	}
+	if len(data) > 0 {
+		return written, io.ErrShortWrite
+	}
+	return written, nil
+}
+
+func (b *frameBuilder) finish() []muxFrame {
+	offset := b.offset
+	for i, start := range b.starts {
+		end := b.used
+		if i+1 < len(b.starts) {
+			end = b.starts[i+1]
+		}
+		offset += uint64(end - start - muxDataHeader)
+		b.frames[i] = muxFrame{end: offset, raw: b.chunk[start:end:end]}
+	}
+	return b.frames
+}
+
+// reserve waits for send credit and returns the next offset and how many
+// bytes may follow it. Callers hold writeMu.
+func (s *muxStream) reserve() (uint64, int, error) {
+	m := s.m
+	for {
 		m.mu.Lock()
 		if s.err != nil {
 			err := s.err
 			m.mu.Unlock()
-			return written, err
+			return 0, 0, err
 		}
 		if s.writeClosed {
 			m.mu.Unlock()
-			return written, io.ErrClosedPipe
+			return 0, 0, io.ErrClosedPipe
 		}
 		available := s.peerLimit - s.sendNext
-		if available == 0 {
-			m.mu.Unlock()
-			select {
-			case <-s.sendWake:
-				continue
-			case <-s.ctx.Done():
-				return written, s.errOr(net.ErrClosed)
-			}
-		}
 		start := s.sendNext
 		m.mu.Unlock()
-		// Writers are serialized, so building frames outside the lock keeps
-		// offsets contiguous while receivers and other streams proceed.
-		size := int(min(uint64(len(p)), available, muxBurst*muxMaxData))
-		frames := make([]muxFrame, 0, (size+muxMaxData-1)/muxMaxData)
-		for consumed := 0; consumed < size; {
-			length := min(size-consumed, muxMaxData)
-			raw := make([]byte, muxDataHeader+length)
-			frameHeader(raw, muxData, s.id)
-			offset := start + uint64(consumed)
-			binary.BigEndian.PutUint64(raw[10:18], offset)
-			copy(raw[muxDataHeader:], p[consumed:consumed+length])
-			frames = append(frames, muxFrame{end: offset + uint64(length), raw: raw})
-			consumed += length
+		if available > 0 {
+			return start, int(min(available, muxBurst*muxMaxData)), nil
 		}
-		m.mu.Lock()
-		if s.err != nil {
-			err := s.err
-			m.mu.Unlock()
+		select {
+		case <-s.sendWake:
+		case <-s.ctx.Done():
+			return 0, 0, s.errOr(net.ErrClosed)
+		}
+	}
+}
+
+// publish queues frames built outside the lock; writers are serialized, so
+// offsets stay contiguous while receivers and other streams proceed.
+func (s *muxStream) publish(b *frameBuilder) error {
+	m := s.m
+	m.mu.Lock()
+	if s.err != nil {
+		err := s.err
+		m.mu.Unlock()
+		return err
+	}
+	s.frames = append(s.frames, b.finish()...)
+	s.sendNext += uint64(b.bytes)
+	m.enqueueLocked(s)
+	l := m.current
+	m.mu.Unlock()
+	if l != nil {
+		l.WakeStreams()
+	}
+	s.tx.Add(uint64(b.bytes))
+	return nil
+}
+
+func (s *muxStream) Write(p []byte) (int, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	written := 0
+	for len(p) > 0 {
+		start, limit, err := s.reserve()
+		if err != nil {
 			return written, err
 		}
-		s.frames = append(s.frames, frames...)
-		s.sendNext += uint64(size)
-		m.enqueueLocked(s)
-		l := m.current
-		m.mu.Unlock()
-		if l != nil {
-			l.WakeStreams()
+		b := newFrameBuilder(s.id, start, min(len(p), limit))
+		b.Write(p[:b.limit])
+		if err := s.publish(b); err != nil {
+			return written, err
 		}
-		s.tx.Add(uint64(size))
-		written += size
-		p = p[size:]
+		written += b.bytes
+		p = p[b.bytes:]
 	}
 	return written, nil
+}
+
+type muxWriterOnly struct{ io.Writer }
+
+// ReadFrom lets the access TCP endpoint deliver bytes straight into frames,
+// as peer.Stream does, saving the relay's intermediate copy.
+func (s *muxStream) ReadFrom(src io.Reader) (int64, error) {
+	reader, ok := src.(interface{ ReadInto(io.Writer) (int, error) })
+	if !ok {
+		return io.CopyBuffer(muxWriterOnly{s}, src, make([]byte, 64*1024))
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	var total int64
+	for {
+		start, limit, err := s.reserve()
+		if err != nil {
+			return total, err
+		}
+		b := newFrameBuilder(s.id, start, limit)
+		n, readErr := reader.ReadInto(b)
+		if n > 0 {
+			if err := s.publish(b); err != nil {
+				return total, err
+			}
+			total += int64(n)
+		}
+		if readErr == io.EOF {
+			return total, nil
+		}
+		if readErr != nil {
+			return total, readErr
+		}
+		if n == 0 {
+			return total, io.ErrNoProgress
+		}
+	}
 }
 
 func (s *muxStream) CloseWrite() error {
