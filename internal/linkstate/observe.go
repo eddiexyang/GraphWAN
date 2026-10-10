@@ -131,29 +131,22 @@ func (e *Engine) counters() map[string]uint64 {
 	}
 }
 
-// Digest summarises the database and routes for the controller, which uses it
-// only to show Agents whose view differs from the others.
-type Digest struct {
-	Revision  uint64                           `json:"revision"`
-	Origins   map[model.ID]map[model.ID]uint64 `json:"origins"` // network -> origin -> sequence
-	RouteHash string                           `json:"route_hash"`
-}
-
-func (e *Engine) Digest() Digest {
+// Report summarises the database and routes for the controller.
+func (e *Engine) Report() model.LinkStateReport {
 	v := e.View()
-	d := Digest{Revision: v.Revision, Origins: map[model.ID]map[model.ID]uint64{}}
+	r := model.LinkStateReport{Revision: v.Revision, Origins: map[model.ID]map[model.ID]uint64{}, Counters: v.Counters}
 	routes := map[model.ID][]model.Route{}
 	for _, n := range v.Networks {
-		d.Origins[n.ID] = map[model.ID]uint64{n.Self: n.Sequence}
+		r.Origins[n.ID] = map[model.ID]uint64{n.Self: n.Sequence}
 		for _, o := range n.Database {
-			d.Origins[n.ID][o.Origin] = o.Sequence
+			r.Origins[n.ID][o.Origin] = o.Sequence
 		}
 		routes[n.ID] = n.Routes
 	}
 	raw, _ := json.Marshal(routes)
 	sum := sha256.Sum256(raw)
-	d.RouteHash = hex.EncodeToString(sum[:8])
-	return d
+	r.RouteHash = hex.EncodeToString(sum[:8])
+	return r
 }
 
 func compare(a, b model.ID) int {

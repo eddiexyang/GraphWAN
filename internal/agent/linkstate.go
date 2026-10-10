@@ -50,5 +50,14 @@ func (r *DataPlane) LocalRouting() bool {
 	return state != nil && linkstate.Active(state.snapshot)
 }
 
-// LinkState returns the engine's state for the status command and telemetry.
+// LinkState returns the engine's state for the status command.
 func (r *DataPlane) LinkState() linkstate.View { return r.linkState.View() }
+
+// LinkStateReport is reported to the controller while routing locally.
+func (r *DataPlane) LinkStateReport() *model.LinkStateReport {
+	if !r.LocalRouting() {
+		return nil
+	}
+	report := r.linkState.Report()
+	return &report
+}

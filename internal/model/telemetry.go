@@ -31,6 +31,16 @@ type AgentReport struct {
 	ConfigError     string         `json:"config_error,omitempty"`
 	RuntimeError    string         `json:"runtime_error,omitempty"`
 	Links           []LinkStatus   `json:"links"`
+	// LinkState summarises the Agent's routing view; the controller only
+	// observes it, for example to show Agents whose view differs.
+	LinkState *LinkStateReport `json:"link_state,omitempty"`
+}
+
+type LinkStateReport struct {
+	Revision  uint64               `json:"revision"`
+	Origins   map[ID]map[ID]uint64 `json:"origins"` // network -> origin -> sequence
+	RouteHash string               `json:"route_hash"`
+	Counters  map[string]uint64    `json:"counters"`
 }
 type AgentStatus struct {
 	AgentID   ID        `json:"agent_id"`

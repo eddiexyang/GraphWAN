@@ -41,8 +41,9 @@ An edge is up locally when the Edge has a healthy Link (the same condition the
 Agent reports to the controller today).
 
 - Originated on every local change (rate-limited to one per 100 ms) and
-  refreshed every 30 s. The sequence is persisted across restarts; on start an
-  Agent continues above the highest sequence of its own LSA it hears back.
+  refreshed every 30 s. The sequence is at least the origination time in
+  nanoseconds, and an Agent that hears an older LSA of its own continues above
+  it, so restarts need no persisted state.
 - Flooded hop by hop on the existing authenticated peer Links as a new Link
   message kind. Like stream support, the capability is offered in the Link
   introduction and confirmed in band, so Agents without it never see the kind.
@@ -82,22 +83,21 @@ connection, under the same per-hop trust as LSAs.
 
 ## Observability
 
-Agent (local CLI `graphwan agent status --lsdb|--routes` and metrics):
+Agent:
 
-- LSDB: origin, sequence, age, revision, reported edges, two-way result.
-- Routes: destination, next hop, cost; the LSA change that last altered them.
-- SPF runs: time, trigger, duration, whether routes changed.
-- Flooding counters: sent, received, duplicate, stale, expired.
-- Config revision; controller connection state, shown apart from data-plane
-  state.
-
-Controller (only while Agents are connected; observation, never decisions):
-
-- Agents report an LSDB digest (origin -> sequence), their route table hash
-  and config revision.
-- The UI flags Agents whose digest or revision differs from the majority and
-  next hops that disagree across Agents (possible loops).
-- Topology view shows data-plane liveness next to control-plane connectivity.
+- Every 5 s the Agent writes its routing view to `<data-dir>/linkstate.json`;
+  `graphwan agent status --data-dir <dir> [--lsdb|--routes|--events|--json]`
+  prints it without a local control port:
+  - LSDB: origin, sequence, age, revision, reported edges;
+  - edges: each end's report (up, down, none) and the two-way result;
+  - routes: destination, next hop, cost;
+  - recent events: LSAs received, originated or expired, route installs;
+  - counters: LSAs sent, received, duplicate, rejected, expired; SPF runs;
+    route apply errors.
+- The Agent report to the controller carries `link_state`: config revision,
+  each origin's sequence per network, a route table hash and the counters.
+  The controller only observes it; a view of Agents whose report differs from
+  the others is the next step in the UI.
 
 Path checks use the existing TTL/ICMP Time Exceeded support (traceroute).
 

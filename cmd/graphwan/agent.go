@@ -35,6 +35,8 @@ func runAgentContext(parent context.Context, args []string) error {
 			return runInstallWintun(parent, args[1:])
 		case "enroll":
 			return runAgentEnroll(args[1:])
+		case "status":
+			return runAgentStatus(args[1:])
 		case "run":
 			args = args[1:]
 		}
@@ -108,6 +110,7 @@ func runAgentContext(parent context.Context, args []string) error {
 		return err
 	}
 	defer runtime.Close()
+	go writeLinkState(ctx, *data, runtime.LinkState)
 	updater, err := managedUpdater(ctx, *data)
 	if err != nil {
 		return err

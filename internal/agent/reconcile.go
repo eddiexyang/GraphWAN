@@ -44,6 +44,11 @@ func (r *Reconciler) Report(version string) model.AgentReport {
 	r.mu.Unlock()
 	report.Resources = r.resources.Sample()
 	report.Links = r.runtime.Report()
+	if ls, ok := r.runtime.(interface {
+		LinkStateReport() *model.LinkStateReport
+	}); ok {
+		report.LinkState = ls.LinkStateReport()
+	}
 	if health, ok := r.runtime.(interface{ Health() error }); ok {
 		if err := health.Health(); err != nil {
 			report.RuntimeError = err.Error()
