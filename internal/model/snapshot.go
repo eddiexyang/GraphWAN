@@ -26,6 +26,17 @@ type NetworkConfig struct {
 	Directory []Destination `json:"directory"`
 	Peers     []Peer        `json:"peers"`
 	Routes    []Route       `json:"routes"`
+	// Topology lists the network's usable edges so Agents can compute routes
+	// from link-state advertisements without the controller.
+	Topology []TopologyEdge `json:"topology,omitempty"`
+}
+
+// TopologyEdge is an enabled edge between two admitted nodes.
+type TopologyEdge struct {
+	ID     ID     `json:"id"`
+	A      ID     `json:"a"`
+	B      ID     `json:"b"`
+	Weight uint32 `json:"weight"`
 }
 
 type Destination struct {
@@ -62,6 +73,7 @@ func (s Snapshot) Clone() Snapshot {
 			n.Directory[j].AdvertisedSubnets = append([]AdvertisedSubnet(nil), n.Directory[j].AdvertisedSubnets...)
 		}
 		n.Routes = append([]Route{}, n.Routes...)
+		n.Topology = append([]TopologyEdge(nil), n.Topology...)
 		n.Peers = append([]Peer{}, n.Peers...)
 		for j := range n.Peers {
 			p := &n.Peers[j]

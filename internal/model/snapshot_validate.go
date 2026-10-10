@@ -184,6 +184,18 @@ func (s Snapshot) Validate(agentID ID) error {
 			}
 			peers[p.Node.ID] = p
 		}
+		if len(n.Topology) > MaxEdges {
+			return fmt.Errorf("compiled topology exceeds limits")
+		}
+		edgeIDs := map[ID]bool{}
+		for _, e := range n.Topology {
+			_, a := directory[e.A]
+			_, b := directory[e.B]
+			if e.ID.Validate() != nil || edgeIDs[e.ID] || !a || !b || e.A == e.B || e.Weight == 0 {
+				return fmt.Errorf("invalid topology edge")
+			}
+			edgeIDs[e.ID] = true
+		}
 		routes := map[ID]bool{}
 		for _, r := range n.Routes {
 			if _, ok := directory[r.Destination]; !ok || r.Destination == n.Self.ID || routes[r.Destination] {
