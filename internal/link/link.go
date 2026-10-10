@@ -100,7 +100,9 @@ func (o Options) defaults() Options {
 		o.Timeout = 5 * time.Second
 	}
 	if o.IdleHeartbeat <= 0 {
-		o.IdleHeartbeat = max(10*time.Second, o.Heartbeat)
+		// Link failure drives route convergence, so an idle Link is probed
+		// often enough to fail within IdleHeartbeat+Timeout (7 s by default).
+		o.IdleHeartbeat = max(2*time.Second, o.Heartbeat)
 	}
 	if o.WriteTimeout <= 0 {
 		o.WriteTimeout = 2 * time.Second

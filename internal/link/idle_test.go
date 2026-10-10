@@ -24,12 +24,13 @@ func TestIdleProbesAndFailureDetection(t *testing.T) {
 		}
 	}
 	l := newLink()
+	idle := int(l.options.IdleHeartbeat / time.Second)
 	for second := 0; second < 60; second++ {
 		now := start.Add(time.Duration(second) * time.Second)
 		if !l.heartbeat(now) {
 			t.Fatal("healthy idle link expired")
 		}
-		if second%10 == 0 {
+		if second%idle == 0 {
 			reply(l, now)
 		} else if len(l.control) != 0 {
 			t.Fatal("redundant idle probe")
@@ -38,8 +39,8 @@ func TestIdleProbesAndFailureDetection(t *testing.T) {
 			t.Fatal("healthy link marked offline between idle probes")
 		}
 	}
-	if l.sent != 6 {
-		t.Fatalf("idle probes = %d, want 6 per minute", l.sent)
+	if l.sent != uint64(60/idle) {
+		t.Fatalf("idle probes = %d, want %d per minute", l.sent, 60/idle)
 	}
 	// User data immediately restores the next active tick; active cadence lasts
 	// through a short lull, then returns to idle cadence.
@@ -49,12 +50,12 @@ func TestIdleProbesAndFailureDetection(t *testing.T) {
 	reply(l, now)
 	l.heartbeat(now.Add(time.Second))
 	reply(l, now.Add(time.Second))
-	for second := 62; second <= 70; second++ {
+	for second := 62; second <= 60+idle; second++ {
 		now = start.Add(time.Duration(second) * time.Second)
 		if !l.heartbeat(now) {
 			t.Fatal("link expired during active-to-idle transition")
 		}
-		if second < 70 {
+		if second < 60+idle {
 			reply(l, now)
 		} else if len(l.control) != 0 {
 			t.Fatal("link did not return to idle cadence")
@@ -64,10 +65,10 @@ func TestIdleProbesAndFailureDetection(t *testing.T) {
 	l = newLink()
 	l.heartbeat(start)
 	reply(l, start)
-	l.heartbeat(start.Add(10 * time.Second))
-	l.heartbeat(start.Add(11 * time.Second))
-	l.recordPong(l.nextPing, start.Add(11*time.Second+time.Millisecond))
-	if !l.heartbeat(start.Add(16*time.Second)) || !l.healthyLocked(start.Add(16*time.Second)) {
+	l.heartbeat(start.Add(time.Duration(idle) * time.Second))
+	l.heartbeat(start.Add(time.Duration(idle+1) * time.Second))
+	l.recordPong(l.nextPing, start.Add(time.Duration(idle+1)*time.Second+time.Millisecond))
+	if !l.heartbeat(start.Add(time.Duration(idle+6)*time.Second)) || !l.healthyLocked(start.Add(time.Duration(idle+6)*time.Second)) {
 		t.Fatal("lost probe caused failure despite a valid retry reply")
 	}
 	// An unrecognized pong cannot prevent failure. A missing idle response
@@ -75,11 +76,11 @@ func TestIdleProbesAndFailureDetection(t *testing.T) {
 	l = newLink()
 	l.heartbeat(start)
 	reply(l, start)
-	for second := 1; second <= 15; second++ {
+	for second := 1; second <= idle+5; second++ {
 		now = start.Add(time.Duration(second) * time.Second)
 		l.recordPong(999, now)
 		alive := l.heartbeat(now)
-		if alive != (second < 15) {
+		if alive != (second < idle+5) {
 			t.Fatalf("liveness at second %d = %v", second, alive)
 		}
 	}
