@@ -51,9 +51,9 @@ Agent reports to the controller today).
 - An LSA expires 120 s after arrival unless refreshed. A restarted or isolated
   origin therefore ages out without any controller.
 - A new adjacency exchanges the full database once.
-- Transit Agents are already trusted hop forwarders in GraphWAN's model; LSAs
-  are authenticated per hop by the peer session, like data. Origin signatures
-  are possible later with each Agent's identity key.
+- LSAs are not signed. Transit Agents are already trusted hop forwarders in
+  GraphWAN's model; LSAs are authenticated per hop by the peer session, like
+  data.
 
 ## Route computation
 
@@ -76,11 +76,9 @@ existing overlay hop limit bounds transient loops.
 Phase 1 keeps configuration delivery as it is: an Agent that cannot reach the
 controller keeps its last topology and keeps forwarding.
 
-Phase 2 (separate change): the controller signs each snapshot revision with a
-dedicated key whose public half every Agent holds; Agents flood the newest
-signed revision to neighbours, so configuration also converges without a
-direct controller connection. Revocations then take effect even for Agents
-that only reach the controller through others.
+Phase 2 (separate change): Agents flood the newest snapshot revision to
+neighbours, so configuration also converges without a direct controller
+connection, under the same per-hop trust as LSAs.
 
 ## Observability
 
@@ -112,7 +110,7 @@ Path checks use the existing TTL/ICMP Time Exceeded support (traceroute).
 | Link failure | p50 50 ms, max 552 ms | p50 4.5 s | p50 1.0 s |
 | Link recovery | p50 113 ms, max 486 ms | p50 0.18 s | p50 0.18 s |
 | Node failure | 1.5-2.4 s | p50 6.2 s | p50 2.3 s |
-| Signed config flood | - | p50 1.3 s, max 1.6 s | - |
+| Config flood | - | p50 1.3 s, max 1.6 s | - |
 
 Failure detection dominates; the protocol itself converges in sub-second for
 link events.
