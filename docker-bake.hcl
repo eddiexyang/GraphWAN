@@ -6,8 +6,12 @@ variable "RELEASE_DIR" {
   default = "release"
 }
 
+variable "AGENT_IMAGE" {
+  default = "graphwan-agent:dev"
+}
+
 group "default" {
-  targets = ["controller", "binaries"]
+  targets = ["controller", "agent", "binaries"]
 }
 
 target "docker-metadata-action" {}
@@ -31,6 +35,13 @@ target "controller" {
   }
   output = ["type=registry"]
   cache-to = ["type=gha,scope=graphwan,mode=max"]
+}
+
+target "agent" {
+  inherits = ["common"]
+  target = "agent"
+  tags = [AGENT_IMAGE]
+  output = ["type=registry"]
 }
 
 target "agent-amd64" {

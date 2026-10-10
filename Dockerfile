@@ -24,7 +24,11 @@ ARG TARGETARCH
 ARG VERSION=dev
 COPY --from=build /out/graphwan /graphwan-${VERSION}-linux-${TARGETARCH}
 
-FROM gcr.io/distroless/static-debian12:nonroot AS controller
+# Both images keep a shell and basic tools for debugging in place.
+FROM debian:trixie-slim AS controller
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 ARG VERSION=dev
 WORKDIR /usr/local/share/graphwan
 COPY --from=build /out/graphwan /usr/local/bin/graphwan
@@ -34,3 +38,12 @@ COPY --from=agent-arm64 /out/graphwan ./assets/agent/${VERSION}/linux-arm64
 ENTRYPOINT ["/usr/local/bin/graphwan"]
 CMD ["server", "--listen=0.0.0.0:8443", "--data-dir=/data"]
 EXPOSE 8443
+
+# The Agent manages TUN devices, routes and gateway firewall rules.
+FROM debian:trixie-slim AS agent
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates iproute2 iptables nftables \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/graphwan /usr/local/bin/graphwan
+ENTRYPOINT ["/usr/local/bin/graphwan"]
+CMD ["agent", "run"]

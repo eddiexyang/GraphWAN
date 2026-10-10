@@ -36,12 +36,15 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
+      - name: Name the Agent image
+        # Registry names must be lowercase.
+        run: echo "AGENT_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}-agent:${GITHUB_SHA}" >> "$GITHUB_ENV"
       - uses: docker/metadata-action@v6
         id: metadata
         with:
           images: ghcr.io/${{ github.repository }}
           tags: type=raw,value=${{ github.sha }}
-      - name: Build binaries and publish controller image
+      - name: Build binaries and publish controller and Agent images
         uses: docker/bake-action@v7
         id: build
         with:
@@ -56,6 +59,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           SOURCE_REVISION: ${{ github.sha }}
           IMAGE_DIGEST: ${{ fromJSON(steps.build.outputs.metadata).controller['containerimage.digest'] }}
+          AGENT_DIGEST: ${{ fromJSON(steps.build.outputs.metadata).agent['containerimage.digest'] }}
         run: |
           if draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft'); then
             if [[ "$draft" != true ]]; then
@@ -65,7 +69,8 @@ jobs:
           else
             gh release create "$RELEASE_TAG" --target "$SOURCE_REVISION" --draft \
               --title "$RELEASE_TAG" --generate-notes --prerelease \
-              --notes "Controller image digest: $IMAGE_DIGEST"
+              --notes "Controller image digest: $IMAGE_DIGEST
+          Agent image: $AGENT_IMAGE@$AGENT_DIGEST"
           fi
           gh release upload "$RELEASE_TAG" "$RELEASE_DIR"/graphwan-* --clobber
           gh release edit "$RELEASE_TAG" --draft=false --prerelease
