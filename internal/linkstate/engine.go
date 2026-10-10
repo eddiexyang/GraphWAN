@@ -15,10 +15,11 @@ import (
 )
 
 const (
-	// RefreshInterval re-originates an unchanged LSA; MaxAge expires one
-	// whose origin stopped refreshing it (a failed or isolated Agent).
-	RefreshInterval = 30 * time.Second
-	MaxAge          = 120 * time.Second
+	// RefreshInterval re-originates an unchanged LSA, which also repairs a
+	// lost one: with idle-link failure detection (up to 15 s) routes converge
+	// within 30 s. MaxAge expires the LSA of an origin that stopped refreshing.
+	RefreshInterval = 10 * time.Second
+	MaxAge          = 40 * time.Second
 	// SPFDelay batches the LSAs of one event; MinOriginateInterval bounds
 	// the origination rate of a flapping link.
 	SPFDelay             = 50 * time.Millisecond

@@ -71,11 +71,13 @@ func TestLinkStateRoutesWithoutController(t *testing.T) {
 	if !agents[0].LocalRouting() {
 		t.Fatal("topology-carrying configuration did not enable local routing")
 	}
+	failed := time.Now()
 	agents[1].Close()
 	waitFor(t, 20*time.Second, "A reroutes to C through D after B fails", func() bool {
 		r := installedRoute(agents[0], c)
 		return r.NextHop == d && r.Cost == 31
 	})
+	t.Logf("rerouted %v after B failed", time.Since(failed).Round(10*time.Millisecond))
 	for _, e := range agents[0].LinkState().Networks[0].Edges {
 		if e.A == a && e.B == b || e.A == b && e.B == a {
 			if e.Usable {

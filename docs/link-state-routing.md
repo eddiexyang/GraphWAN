@@ -41,7 +41,7 @@ An edge is up locally when the Edge has a healthy Link (the same condition the
 Agent reports to the controller today).
 
 - Originated on every local change (rate-limited to one per 100 ms) and
-  refreshed every 30 s. The sequence is at least the origination time in
+  refreshed every 10 s. The sequence is at least the origination time in
   nanoseconds, and an Agent that hears an older LSA of its own continues above
   it, so restarts need no persisted state.
 - Flooded hop by hop on the existing authenticated peer Links as a new Link
@@ -49,12 +49,16 @@ Agent reports to the controller today).
   introduction and confirmed in band, so Agents without it never see the kind.
 - A receiver accepts an LSA with a higher sequence than it holds for that
   origin, records the arrival time, and floods it to its other neighbours.
-- An LSA expires 120 s after arrival unless refreshed. A restarted or isolated
+- An LSA expires 40 s after arrival unless refreshed. A restarted or isolated
   origin therefore ages out without any controller.
 - A new adjacency exchanges the full database once.
 - LSAs are not signed. Transit Agents are already trusted hop forwarders in
   GraphWAN's model; LSAs are authenticated per hop by the peer session, like
   data.
+
+Convergence target: under 30 s. Failure detection is at most 15 s on an idle
+Link (10 s idle probe plus 5 s timeout; about 5 s with traffic); a lost LSA is
+repaired by the next refresh, so the worst case stays near 25 s.
 
 ## Route computation
 
