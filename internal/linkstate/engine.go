@@ -16,7 +16,7 @@ import (
 
 const (
 	// RefreshInterval re-originates an unchanged LSA, which also repairs a
-	// lost one: with link failure detection (up to 7 s) routes converge
+	// lost one: with link failure detection (up to 6 s) routes converge
 	// within 30 s. MaxAge expires the LSA of an origin that stopped refreshing.
 	RefreshInterval = 10 * time.Second
 	MaxAge          = 40 * time.Second

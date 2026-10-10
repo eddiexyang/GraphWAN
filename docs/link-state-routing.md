@@ -56,10 +56,10 @@ Agent reports to the controller today).
   GraphWAN's model; LSAs are authenticated per hop by the peer session, like
   data.
 
-Convergence target: under 30 s. A Link fails at most 7 s after its peer stops
-answering when idle (2 s idle probe plus 5 s timeout; 6 s with traffic), and
+Convergence target: under 30 s. Every Link is probed each second, so it fails
+at most 6 s after its peer stops answering (1 s probe plus 5 s timeout), and
 flooding plus SPF add about 0.1 s. A lost LSA is repaired by the next refresh,
-so the worst case stays near 17 s.
+so the worst case stays near 16 s.
 
 ## Route computation
 

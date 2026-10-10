@@ -105,7 +105,7 @@ func TestDuplicatePathLifecycle(t *testing.T) {
 				candidate = string(id(101))
 			} // Rekey the original candidate.
 			for i, c := range channels {
-				l, err := link.New(ctx, c, link.Info{NetworkID: id(3), EdgeID: id(4), PeerID: id(2 - i), CandidateID: candidate, Transport: transport}, link.Options{PathExchange: exchange && i == 1, Heartbeat: 100 * time.Millisecond, IdleHeartbeat: 100 * time.Millisecond, Timeout: 500 * time.Millisecond})
+				l, err := link.New(ctx, c, link.Info{NetworkID: id(3), EdgeID: id(4), PeerID: id(2 - i), CandidateID: candidate, Transport: transport}, link.Options{PathExchange: exchange && i == 1, Heartbeat: 100 * time.Millisecond, Timeout: 500 * time.Millisecond})
 				if err != nil {
 					t.Fatal(err)
 				}

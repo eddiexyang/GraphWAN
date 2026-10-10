@@ -58,10 +58,9 @@ type Info struct {
 	Transport                 model.Transport
 }
 type Options struct {
+	// Heartbeat probes every Link at a fixed cadence: Link failure drives
+	// route convergence, so idle Links fail as quickly as busy ones.
 	Heartbeat, Timeout, WriteTimeout, RenewAfter time.Duration
-	// IdleHeartbeat spaces probes when no user data is moving. An unanswered
-	// probe resumes Heartbeat cadence and retains the normal response timeout.
-	IdleHeartbeat time.Duration
 	// PathExchange is enabled by the authenticated introduction capability.
 	PathExchange bool
 	// OwnedPackets opts into explicit packet ownership. Consumers must release
@@ -98,11 +97,6 @@ func (o Options) defaults() Options {
 	}
 	if o.Timeout <= 0 {
 		o.Timeout = 5 * time.Second
-	}
-	if o.IdleHeartbeat <= 0 {
-		// Link failure drives route convergence, so an idle Link is probed
-		// often enough to fail within IdleHeartbeat+Timeout (7 s by default).
-		o.IdleHeartbeat = max(2*time.Second, o.Heartbeat)
 	}
 	if o.WriteTimeout <= 0 {
 		o.WriteTimeout = 2 * time.Second
@@ -160,9 +154,6 @@ func New(parent context.Context, channel Channel, info Info, options Options) (*
 	options = options.defaults()
 	if options.Timeout < 2*options.Heartbeat || options.Timeout/options.Heartbeat > 64 {
 		return nil, errors.New("link timeout must span 2–64 heartbeats")
-	}
-	if options.IdleHeartbeat < options.Heartbeat {
-		return nil, errors.New("idle heartbeat must not be shorter than active heartbeat")
 	}
 	if channel == nil || channel.ID() == "" || info.CandidateID == "" || !info.Transport.Valid() {
 		return nil, errors.New("invalid link identity")
@@ -733,12 +724,9 @@ func (l *Link) heartbeat(now time.Time) bool {
 	if !l.probeSince.IsZero() && now.Sub(l.probeSince) >= l.options.Timeout {
 		return false
 	}
+	// Keeps lastTraffic current for selection hysteresis (recentlyActive).
 	l.sampleTrafficLocked(now)
-	interval := l.options.IdleHeartbeat
-	if l.lastPong.IsZero() || !l.probeSince.IsZero() || now.Sub(l.lastTraffic) < l.options.IdleHeartbeat {
-		interval = l.options.Heartbeat
-	}
-	if !l.lastPing.IsZero() && now.Sub(l.lastPing) < interval {
+	if !l.lastPing.IsZero() && now.Sub(l.lastPing) < l.options.Heartbeat {
 		return true
 	}
 	l.nextPing++
