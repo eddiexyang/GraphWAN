@@ -26,6 +26,7 @@ func TestIdlePublication(t *testing.T) {
 		"removal":   func(r *model.AgentReport) { r.Links = r.Links[:1] },
 		"revision":  func(r *model.AgentReport) { r.AppliedRevision++ },
 		"error":     func(r *model.AgentReport) { r.RuntimeError = "tunnel unavailable" },
+		"routes":    func(r *model.AgentReport) { r.LinkState = &model.LinkStateReport{RouteHash: "1"} },
 	} {
 		r := next
 		r.Links = slices.Clone(next.Links)

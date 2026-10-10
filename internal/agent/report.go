@@ -6,9 +6,13 @@ import (
 )
 
 // Idle resource/RTT samples ride on the periodic report. Configuration, errors,
-// link transitions and user-data counters still trigger the next two-second tick.
+// link transitions, link-state route changes and user-data counters still
+// trigger the next two-second tick.
 func reportChanged(previous, next model.AgentReport) bool {
 	if !reflect.DeepEqual(previous.Update, next.Update) || previous.Version != next.Version || previous.AppliedRevision != next.AppliedRevision || previous.RoutingHash != next.RoutingHash || previous.ConfigError != next.ConfigError || previous.RuntimeError != next.RuntimeError || len(previous.Links) != len(next.Links) {
+		return true
+	}
+	if (previous.LinkState == nil) != (next.LinkState == nil) || next.LinkState != nil && previous.LinkState.RouteHash != next.LinkState.RouteHash {
 		return true
 	}
 	old := make(map[string]model.LinkStatus, len(previous.Links))

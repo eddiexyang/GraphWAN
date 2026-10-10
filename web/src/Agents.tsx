@@ -14,6 +14,7 @@ import {
   transports,
   newID,
   nodeState,
+  routingView,
   shortID,
 } from './model'
 export function Enrollment({ csrf, close }: { csrf: string; close: () => void }) {
@@ -315,6 +316,35 @@ function AgentEditor({
     </Modal>
   )
 }
+function RoutingSummary({
+  state,
+  statuses,
+  status,
+  live,
+}: {
+  state: State
+  statuses: AgentStatus[]
+  status: AgentStatus | undefined
+  live: boolean
+}) {
+  if (!live || !status?.connected) return <>—</>
+  const view = routingView(state, statuses, status)
+  if (view.mode === 'controller') return <>Controller</>
+  const behind = [...view.missing, ...view.stale]
+  return (
+    <>
+      <Badge tone={view.missing.length ? 'error' : view.stale.length ? 'switching' : 'online'}>
+        {behind.length ? 'Out of sync' : 'Link-state'}
+      </Badge>
+      <small title={status.link_state?.route_hash}>
+        {view.origins} advertisements
+        {status.link_state?.route_hash && <> · routes {status.link_state.route_hash.slice(0, 8)}</>}
+      </small>
+      {view.missing.length > 0 && <small className="red">Missing {view.missing.join(', ')}</small>}
+      {view.stale.length > 0 && <small>Stale {view.stale.join(', ')}</small>}
+    </>
+  )
+}
 export default function Agents({
   state,
   statuses,
@@ -350,6 +380,7 @@ export default function Agents({
               <th>Agent</th>
               <th>Status</th>
               <th>Memberships</th>
+              <th>Routing</th>
               <th>Endpoints</th>
               <th>Resources</th>
               <th>Version</th>
@@ -377,6 +408,9 @@ export default function Agents({
                       .filter((n) => n.nodes.some((node) => node.agent_id === a.id))
                       .map((n) => n.name)
                       .join(', ') || 'No networks'}
+                  </td>
+                  <td>
+                    <RoutingSummary state={state} statuses={statuses} status={status} live={live} />
                   </td>
                   <td>
                     {a.endpoints?.length ?? 0}

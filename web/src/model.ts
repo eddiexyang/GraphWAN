@@ -147,6 +147,13 @@ export type AgentStatus = {
   config_error?: string
   runtime_error?: string
   links: Link[] | null
+  link_state?: LinkStateReport
+}
+export type LinkStateReport = {
+  revision: number
+  origins: Record<string, Record<string, number>> // network -> origin node -> sequence
+  route_hash: string
+  counters: Record<string, number>
 }
 export type Snapshot = { at: string; revision: number; state?: State; agents: AgentStatus[] }
 export type Rates = Record<string, { rx: number; tx: number }>
@@ -289,4 +296,42 @@ export type Draft = { network: Network; base: Network; revision: number }
 export function rebase(draft: Draft, state: State): Draft {
   const remote = state.networks.find((n) => n.id === draft.network.id)
   return equal(remote, draft.base) ? { ...draft, revision: state.revision } : draft
+}
+
+// An origin re-advertises every 10 s and sequences are origination times in
+// nanoseconds, so a copy older than two refreshes plus report delay is stale.
+const staleLSA = 25e9
+export type RoutingView = {
+  mode: 'controller' | 'link-state'
+  origins: number
+  missing: string[] // node names whose advertisement this Agent lacks
+  stale: string[] // node names whose advertisement this Agent holds too old
+}
+// routingView compares one Agent's link-state database with the
+// advertisements other connected Agents originate.
+export function routingView(
+  state: State,
+  statuses: AgentStatus[],
+  status: AgentStatus,
+): RoutingView {
+  const report = status.link_state
+  if (!report) return { mode: 'controller', origins: 0, missing: [], stale: [] }
+  const view: RoutingView = { mode: 'link-state', origins: 0, missing: [], stale: [] }
+  const seen = Date.parse(status.last_seen) * 1e6
+  for (const network of state.networks) {
+    const db = report.origins[network.id]
+    if (!db) continue
+    const self = network.nodes.find((n) => n.agent_id === status.agent_id)
+    for (const node of network.nodes) {
+      if (node.id === self?.id) continue
+      const origin = statuses.find((s) => s.agent_id === node.agent_id)
+      const originated = origin?.connected && origin.link_state?.origins[network.id]?.[node.id]
+      const held = db[node.id]
+      if (held !== undefined) view.origins++
+      if (!originated) continue
+      if (held === undefined) view.missing.push(node.name)
+      else if (seen - held > staleLSA) view.stale.push(node.name)
+    }
+  }
+  return view
 }
