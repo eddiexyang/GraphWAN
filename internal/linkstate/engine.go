@@ -28,6 +28,10 @@ const (
 	maxLSA               = 64 * 1024
 )
 
+// ErrSuperseded is returned by Callbacks.Apply for routes computed for an
+// older configuration; routes for the current one are already scheduled.
+var ErrSuperseded = errors.New("routes superseded by a newer configuration")
+
 // LSA is one origin's report of the edges it can use in one network.
 type LSA struct {
 	Network  model.ID   `json:"network"`
@@ -60,6 +64,7 @@ type network struct {
 	sequence  uint64
 	sent      time.Time
 	dirty     bool // local state changed since the last origination
+	lastUp    []model.ID
 }
 
 type Engine struct {
@@ -69,6 +74,7 @@ type Engine struct {
 	networks map[model.ID]*network
 	spfAt    time.Time
 	applied  string
+	observed bool // local link state has been polled at least once
 	stats    Stats
 	events   []Event
 }
@@ -94,9 +100,14 @@ func Active(s model.Snapshot) bool {
 	return true
 }
 
-// Configure installs a new configuration. Databases of networks that remain
-// are kept; their entries are evaluated against the new topology.
-func (e *Engine) Configure(s model.Snapshot) {
+// Configure installs a new configuration and returns the routes for it, which
+// the caller installs together with the configuration and reports to Applied.
+// Before the first poll of local Links it returns nil: the compiled routes stay
+// until Step computes routes from observed state.
+// Databases of networks that remain are kept; their entries are evaluated
+// against the new topology. A new revision is advertised only when it changes
+// this node's neighbours or the topology.
+func (e *Engine) Configure(s model.Snapshot) *model.RouteUpdate {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	clone := s.Clone()
@@ -105,18 +116,42 @@ func (e *Engine) Configure(s model.Snapshot) {
 	for _, c := range clone.Networks {
 		n := e.networks[c.ID]
 		if n == nil {
-			n = &network{db: map[model.ID]entry{}, local: map[model.ID]bool{}}
+			n = &network{db: map[model.ID]entry{}, local: map[model.ID]bool{}, dirty: true}
 		}
-		n.config = c
-		n.neighbors = map[model.ID]bool{}
+		neighbors := map[model.ID]bool{}
 		for _, p := range c.Peers {
-			n.neighbors[p.Node.ID] = true
+			neighbors[p.Node.ID] = true
 		}
-		n.dirty = true
+		if !maps(n.neighbors, neighbors) || !slices.Equal(n.config.Topology, c.Topology) || n.config.Self.ID != c.Self.ID {
+			n.dirty = true
+		}
+		n.config, n.neighbors = c, neighbors
 		next[c.ID] = n
 	}
 	e.networks = next
-	e.scheduleSPFLocked()
+	if !e.observed {
+		e.scheduleSPFLocked()
+		return nil
+	}
+	return e.spfLocked()
+}
+
+// Applied records the outcome of installing routes from Configure or Step.
+func (e *Engine) Applied(update model.RouteUpdate, err error, took time.Duration) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	switch {
+	case err == nil:
+		e.stats.SPFRuns.Add(1)
+		e.applied = update.Hash()
+		e.eventLocked("routes", "", "", "", uint64(took.Microseconds()))
+	case errors.Is(err, ErrSuperseded):
+		e.stats.Superseded.Add(1)
+	default:
+		e.stats.ApplyErrors.Add(1)
+		e.eventLocked("route-error", "", "", "", update.Revision)
+		e.scheduleSPFLocked()
+	}
 }
 
 // PeerReady sends the whole database to a neighbour that can now exchange
@@ -175,8 +210,10 @@ func (e *Engine) Receive(networkID, peer model.ID, raw []byte) error {
 	for _, id := range lsa.Up {
 		up[id] = true
 	}
+	if old, ok := n.db[lsa.Origin]; !ok || !slices.Equal(old.lsa.Up, lsa.Up) {
+		e.eventLocked("received", networkID, lsa.Origin, "", lsa.Sequence)
+	}
 	n.db[lsa.Origin] = entry{lsa: lsa, up: up, arrived: e.cb.Now()}
-	e.eventLocked("received", networkID, lsa.Origin, lsa.Sequence)
 	e.scheduleSPFLocked()
 	targets := n.floodTargets(peer)
 	e.mu.Unlock()
@@ -237,8 +274,18 @@ func (e *Engine) Step() {
 	var sends []send
 	var update *model.RouteUpdate
 	e.mu.Lock()
+	e.observed = true
 	for id, n := range e.networks {
 		if !maps(n.local, local[id]) {
+			for _, edge := range n.config.Topology {
+				if was, is := n.local[edge.ID], local[id][edge.ID]; was != is {
+					kind := "edge-down"
+					if is {
+						kind = "edge-up"
+					}
+					e.eventLocked(kind, id, "", edge.ID, 0)
+				}
+			}
 			n.local = copyMap(local[id])
 			n.dirty = true
 		}
@@ -246,7 +293,7 @@ func (e *Engine) Step() {
 			if now.Sub(en.arrived) > MaxAge {
 				delete(n.db, origin)
 				e.stats.Expired.Add(1)
-				e.eventLocked("expired", id, origin, en.lsa.Sequence)
+				e.eventLocked("expired", id, origin, "", en.lsa.Sequence)
 				e.scheduleSPFLocked()
 			}
 		}
@@ -255,7 +302,10 @@ func (e *Engine) Step() {
 			if raw, err := json.Marshal(lsa); err == nil {
 				sends = append(sends, send{id, n.floodTargets(""), raw})
 			}
-			e.eventLocked("originated", id, lsa.Origin, lsa.Sequence)
+			if !slices.Equal(n.lastUp, lsa.Up) {
+				e.eventLocked("originated", id, lsa.Origin, "", lsa.Sequence)
+				n.lastUp = lsa.Up
+			}
 			e.scheduleSPFLocked()
 		}
 	}
@@ -273,15 +323,7 @@ func (e *Engine) Step() {
 	if update != nil {
 		start := e.cb.Now()
 		err := e.cb.Apply(*update)
-		e.mu.Lock()
-		e.stats.SPFRuns.Add(1)
-		if err == nil {
-			e.applied = update.Hash()
-			e.eventLocked("routes", "", "", uint64(e.cb.Now().Sub(start).Microseconds()))
-		} else {
-			e.stats.ApplyErrors.Add(1)
-		}
-		e.mu.Unlock()
+		e.Applied(*update, err, e.cb.Now().Sub(start))
 	}
 }
 

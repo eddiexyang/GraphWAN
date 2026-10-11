@@ -256,6 +256,16 @@ func applicationAddress(addr netip.Addr) (tcpip.Address, tcpip.NetworkProtocolNu
 }
 
 func streamAgents(t *testing.T, carrier model.Transport, configure ...func(*model.State)) ([3]*DataPlane, [3]*kernelTUN, model.State) {
+	return streamAgentsWith(t, carrier, streamOptions{}, configure...)
+}
+
+type streamOptions struct {
+	// withoutLinkState applies configurations without topology, so Agents
+	// forward on the compiled routes.
+	withoutLinkState bool
+}
+
+func streamAgentsWith(t *testing.T, carrier model.Transport, options streamOptions, configure ...func(*model.State)) ([3]*DataPlane, [3]*kernelTUN, model.State) {
 	t.Helper()
 	state := testutil.Topology()
 	state.Agents = state.Agents[:3]
@@ -300,6 +310,11 @@ func streamAgents(t *testing.T, carrier model.Transport, configure ...func(*mode
 		snapshot, err := routing.Compile(state, state.Agents[i].ID)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if options.withoutLinkState {
+			for n := range snapshot.Networks {
+				snapshot.Networks[n].Topology = nil
+			}
 		}
 		if err := agent.Apply(ctx, snapshot); err != nil {
 			t.Fatal(err)
@@ -581,7 +596,10 @@ func TestTCPWireGuardAccessBoundary(t *testing.T) {
 			}
 			leafID := testutil.ID(80)
 			leafAddress := netip.MustParseAddr("10.42.0.10")
-			agents, devices, state := streamAgents(t, model.TCP, func(s *model.State) {
+			// The simulated leaf bypasses the WireGuard hub and never completes a
+			// handshake, so link-state would rightly report its edge down: the
+			// Agents forward on the compiled routes instead.
+			agents, devices, state := streamAgentsWith(t, model.TCP, streamOptions{withoutLinkState: true}, func(s *model.State) {
 				key, err := ecdh.X25519().GenerateKey(rand.Reader)
 				if err != nil {
 					t.Fatal(err)

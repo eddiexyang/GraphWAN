@@ -96,9 +96,9 @@ func runAgentStatus(args []string) error {
 		}
 	}
 	if all || *events {
-		fmt.Fprintln(w, "\nTIME\tEVENT\tNETWORK\tORIGIN\tVALUE")
+		fmt.Fprintln(w, "\nTIME\tEVENT\tNETWORK\tORIGIN\tEDGE\tVALUE")
 		for _, e := range s.Events {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\n", e.At.Format(time.RFC3339Nano), e.Kind, e.Network, e.Origin, e.Value)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\n", e.At.Format(time.RFC3339Nano), e.Kind, e.Network, e.Origin, e.Edge, e.Value)
 		}
 	}
 	return nil

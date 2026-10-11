@@ -2,7 +2,9 @@ package linkstate
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -27,10 +29,21 @@ type lab struct {
 	down    map[model.ID]bool // edge ID -> failed
 	queue   []message
 	legacyD bool
+	// apply, when set, can fail route installs before they reach the table.
+	apply     func(node model.ID, u model.RouteUpdate) error
+	snapshots map[model.ID]model.Snapshot
+}
+
+// configure installs a configuration and its routes as the Agent does.
+func (l *lab) configure(node model.ID, e *Engine, s model.Snapshot) {
+	if u := e.Configure(s); u != nil {
+		err := e.cb.Apply(*u)
+		e.Applied(*u, err, 0)
+	}
 }
 
 func newLab(t *testing.T, without ...model.ID) *lab {
-	l := &lab{t: t, state: testutil.Topology(), now: time.Unix(1_800_000_000, 0), engines: map[model.ID]*Engine{}, routes: map[model.ID]model.RouteUpdate{}, down: map[model.ID]bool{}}
+	l := &lab{t: t, state: testutil.Topology(), now: time.Unix(1_800_000_000, 0), engines: map[model.ID]*Engine{}, routes: map[model.ID]model.RouteUpdate{}, down: map[model.ID]bool{}, snapshots: map[model.ID]model.Snapshot{}}
 	skip := map[model.ID]bool{}
 	for _, id := range without {
 		skip[id] = true
@@ -49,7 +62,8 @@ func (l *lab) start(node model.Node) {
 		l.t.Fatal(err)
 	}
 	self := node.ID
-	e := New(Callbacks{
+	var e *Engine
+	e = New(Callbacks{
 		Now: func() time.Time { return l.now },
 		Send: func(network, peer model.ID, raw []byte) {
 			l.queue = append(l.queue, message{network, self, peer, append([]byte(nil), raw...)})
@@ -65,14 +79,20 @@ func (l *lab) start(node model.Node) {
 			return map[model.ID]map[model.ID]bool{snapshot.Networks[0].ID: up}
 		},
 		Apply: func(u model.RouteUpdate) error {
-			if _, err := u.Apply(snapshot); err != nil {
+			if l.apply != nil {
+				if err := l.apply(self, u); err != nil {
+					return err
+				}
+			}
+			if _, err := u.Apply(*e.snapshot); err != nil {
 				return err
 			}
 			l.routes[self] = u
 			return nil
 		},
 	})
-	e.Configure(snapshot)
+	l.snapshots[self] = snapshot
+	l.configure(self, e, snapshot)
 	l.engines[self] = e
 	for _, p := range snapshot.Networks[0].Peers {
 		e.PeerReady(snapshot.Networks[0].ID, p.Node.ID)
@@ -229,6 +249,104 @@ func TestOwnAdvertisementEchoIsIgnored(t *testing.T) {
 	l.run(time.Second)
 	if after := a.View().Networks[0].Sequence; after != before {
 		t.Fatalf("echo of the current advertisement re-originated it: %d -> %d", before, after)
+	}
+}
+
+// A new revision that leaves the topology alone gets routes for that revision
+// at once but is not advertised again.
+func TestRevisionWithoutTopologyChangeIsNotAdvertised(t *testing.T) {
+	l := newLab(t)
+	l.run(time.Second)
+	a := l.engines[nodeA]
+	before := a.View().Networks[0].Sequence
+	next := l.snapshots[nodeA]
+	next.Revision++
+	l.configure(nodeA, a, next)
+	if got := l.routes[nodeA].Revision; got != next.Revision {
+		t.Fatalf("routes for revision %d after configuring %d", got, next.Revision)
+	}
+	l.run(time.Second)
+	if after := a.View().Networks[0].Sequence; after != before {
+		t.Fatalf("unchanged topology re-advertised: %d -> %d", before, after)
+	}
+}
+
+// Routes computed for a configuration that was replaced before they were
+// installed are superseded, not failures; a real failure is retried.
+func TestSupersededAndFailedRouteInstalls(t *testing.T) {
+	l := newLab(t)
+	l.run(time.Second)
+	a := l.engines[nodeA]
+	// While A's routes for the failed edge wait to be installed, the Agent
+	// applies a newer configuration with its own routes, then rejects them.
+	next := l.snapshots[nodeA]
+	next.Revision++
+	l.apply = func(node model.ID, u model.RouteUpdate) error {
+		if node == nodeA && u.Revision < next.Revision {
+			l.apply = nil
+			l.snapshots[nodeA] = next
+			l.configure(nodeA, a, next)
+			return ErrSuperseded
+		}
+		return nil
+	}
+	l.down[edgeAB] = true
+	l.run(time.Second)
+	c := a.View().Counters
+	if c["routes_superseded"] != 1 || c["route_apply_errors"] != 0 {
+		t.Fatalf("counters %v", c)
+	}
+	if r := l.route(nodeA, nodeC); r.NextHop != nodeD || l.routes[nodeA].Revision != next.Revision {
+		t.Fatalf("A->C %+v at revision %d", r, l.routes[nodeA].Revision)
+	}
+	failures := 1
+	l.apply = func(node model.ID, u model.RouteUpdate) error {
+		if node == nodeA && failures > 0 {
+			failures--
+			return errors.New("router busy")
+		}
+		return nil
+	}
+	delete(l.down, edgeAB)
+	l.run(time.Second)
+	if c := a.View().Counters; c["route_apply_errors"] != 1 {
+		t.Fatalf("counters %v", c)
+	}
+	if r := l.route(nodeA, nodeC); r.NextHop != nodeB {
+		t.Fatalf("failed install was not retried: A->C %+v", r)
+	}
+	var kinds []string
+	for _, ev := range a.View().Events {
+		if ev.Edge == edgeAB {
+			kinds = append(kinds, ev.Kind)
+		}
+	}
+	// The first edge-up is the Link coming up at start.
+	if !slices.Equal(kinds, []string{"edge-up", "edge-down", "edge-up"}) {
+		t.Fatalf("A-B edge events %v", kinds)
+	}
+}
+
+// Until local Links have been polled, a configuration keeps its compiled
+// routes: link-state would otherwise report every local edge down.
+func TestFirstConfigurationKeepsCompiledRoutesUntilObserved(t *testing.T) {
+	state := testutil.Topology()
+	snapshot, err := routing.Compile(state, state.Agents[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(Callbacks{
+		Send:  func(model.ID, model.ID, []byte) {},
+		Local: func() map[model.ID]map[model.ID]bool { return nil },
+		Apply: func(model.RouteUpdate) error { return nil },
+	})
+	if u := e.Configure(snapshot); u != nil {
+		t.Fatalf("routes before observing local Links: %+v", u)
+	}
+	e.Step()
+	snapshot.Revision++
+	if u := e.Configure(snapshot); u == nil || u.Revision != snapshot.Revision {
+		t.Fatalf("routes for an observed configuration: %+v", u)
 	}
 }
 

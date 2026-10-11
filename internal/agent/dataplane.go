@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/eWloYW8/GraphWAN/internal/forwarding"
 	"github.com/eWloYW8/GraphWAN/internal/gateway"
@@ -224,7 +225,13 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 	}
 	r.state.Store(next)
 	if linkstate.Active(snapshot) {
-		r.linkState.Configure(snapshot)
+		// Install link-state routes with the configuration, so forwarding never
+		// uses the controller's routes for a revision, even briefly.
+		if update := r.linkState.Configure(snapshot); update != nil {
+			start := time.Now()
+			err := r.applyRoutesLocked(*update)
+			r.linkState.Applied(*update, err, time.Since(start))
+		}
 	}
 	for _, network := range snapshot.Networks {
 		next.tcp[network.ID].engine.SetMTU(network.MTU)

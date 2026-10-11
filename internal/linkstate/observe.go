@@ -12,28 +12,31 @@ import (
 	"github.com/eWloYW8/GraphWAN/internal/routing"
 )
 
-const maxEvents = 256
+const maxEvents = 512
 
 type Stats struct {
-	Sent, Received, Duplicate, Rejected, Expired, SPFRuns, ApplyErrors atomic.Uint64
+	Sent, Received, Duplicate, Rejected, Expired, SPFRuns, Superseded, ApplyErrors atomic.Uint64
 }
 
-// Event records database and routing changes for diagnosis. Value is the
-// sequence for LSA events and the apply duration in microseconds for routes.
+// Event records changes for diagnosis: local edge-up/edge-down, advertisements
+// whose edge set changed (originated, received), expiry, and route installs.
+// Value is the sequence for LSA events, the apply duration in microseconds for
+// routes and the revision for route-error.
 type Event struct {
 	At      time.Time `json:"at"`
 	Kind    string    `json:"kind"`
 	Network model.ID  `json:"network,omitempty"`
 	Origin  model.ID  `json:"origin,omitempty"`
+	Edge    model.ID  `json:"edge,omitempty"`
 	Value   uint64    `json:"value"`
 }
 
-func (e *Engine) eventLocked(kind string, network, origin model.ID, value uint64) {
+func (e *Engine) eventLocked(kind string, network, origin, edge model.ID, value uint64) {
 	if len(e.events) == maxEvents {
 		copy(e.events, e.events[1:])
 		e.events = e.events[:maxEvents-1]
 	}
-	e.events = append(e.events, Event{At: e.cb.Now(), Kind: kind, Network: network, Origin: origin, Value: value})
+	e.events = append(e.events, Event{At: e.cb.Now(), Kind: kind, Network: network, Origin: origin, Edge: edge, Value: value})
 }
 
 type View struct {
@@ -127,7 +130,7 @@ func (e *Engine) counters() map[string]uint64 {
 		"lsa_sent": e.stats.Sent.Load(), "lsa_received": e.stats.Received.Load(),
 		"lsa_duplicate": e.stats.Duplicate.Load(), "lsa_rejected": e.stats.Rejected.Load(),
 		"lsa_expired": e.stats.Expired.Load(), "spf_runs": e.stats.SPFRuns.Load(),
-		"route_apply_errors": e.stats.ApplyErrors.Load(),
+		"routes_superseded": e.stats.Superseded.Load(), "route_apply_errors": e.stats.ApplyErrors.Load(),
 	}
 }
 

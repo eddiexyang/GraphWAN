@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 
+	"github.com/eWloYW8/GraphWAN/internal/linkstate"
 	"github.com/eWloYW8/GraphWAN/internal/model"
 	bolt "go.etcd.io/bbolt"
 )
@@ -36,9 +37,16 @@ func carryLiveRoutes(snapshot model.Snapshot, previous *model.RouteUpdate) model
 func (r *DataPlane) ApplyRoutes(update model.RouteUpdate) error {
 	r.applyMu.Lock()
 	defer r.applyMu.Unlock()
+	return r.applyRoutesLocked(update)
+}
+
+func (r *DataPlane) applyRoutesLocked(update model.RouteUpdate) error {
 	state := r.state.Load()
 	if r.closed || state == nil {
 		return errors.New("runtime unavailable for route update")
+	}
+	if update.Revision < state.snapshot.Revision {
+		return linkstate.ErrSuperseded
 	}
 	next, err := update.Apply(state.snapshot)
 	if err != nil {
