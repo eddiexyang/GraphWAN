@@ -314,7 +314,7 @@ func (c *Client) connect(parent context.Context, id model.ID, updates chan model
 	}
 	defer func() { c.failedTargets[target.key] = true }()
 	dialCtx, stop := context.WithTimeout(ctx, 4*time.Second)
-	conn, resp, err := websocket.Dial(dialCtx, c.server+"/api/v1/agent/control", &websocket.DialOptions{HTTPClient: c.http, Subprotocols: []string{model.RoutingSubprotocol}, CompressionMode: websocket.CompressionNoContextTakeover})
+	conn, resp, err := websocket.Dial(dialCtx, c.server+"/api/v1/agent/control", &websocket.DialOptions{HTTPClient: c.http, Subprotocols: []string{model.DeltaSubprotocol, model.RoutingSubprotocol}, CompressionMode: websocket.CompressionNoContextTakeover})
 	stop()
 	if err != nil {
 		if resp != nil {
@@ -384,7 +384,25 @@ func (c *Client) connect(parent context.Context, id model.ID, updates chan model
 			}
 		}
 		report := c.Report()
-		changed := reportChanged(previous, report)
+		comparison := previous
+		if conn.Subprotocol() == model.DeltaSubprotocol {
+			comparison.AppliedRevision = report.AppliedRevision
+		}
+		changed := reportChanged(comparison, report)
+		if conn.Subprotocol() == model.DeltaSubprotocol && previous.Version != "" && !changed && !settling && time.Since(lastReport) < 15*time.Second {
+			if force || previous.AppliedRevision != report.AppliedRevision {
+				writeCtx, stop := context.WithTimeout(ctx, 10*time.Second)
+				err := wsjson.Write(writeCtx, conn, model.ControlMessage{Type: "ack_revision", Ack: &model.RevisionAck{AppliedRevision: report.AppliedRevision}})
+				stop()
+				if err != nil {
+					conn.CloseNow()
+					<-readerDone
+					return err
+				}
+			}
+			previous = report
+			continue
+		}
 		// Send one final unchanged sample so displayed traffic rates return to
 		// zero promptly when a transfer stops, before entering idle cadence.
 		if !force && !settling && time.Since(lastReport) < 15*time.Second && !changed {
@@ -415,6 +433,7 @@ func (c *Client) sendEndpoints(ctx context.Context, conn *websocket.Conn) error 
 	return wsjson.Write(ctx, conn, model.ControlMessage{Type: "endpoints", Endpoints: endpoints})
 }
 func (c *Client) readControl(ctx context.Context, conn *websocket.Conn, id model.ID, updates chan model.Snapshot, acks chan struct{}) error {
+	var received *model.Snapshot
 	for {
 		var message model.ControlMessage
 		readCtx, stop := context.WithTimeout(ctx, 45*time.Second)
@@ -434,13 +453,23 @@ func (c *Client) readControl(ctx context.Context, conn *websocket.Conn, id model
 				c.mu.Unlock()
 			}
 		case "routes":
-			if conn.Subprotocol() != model.RoutingSubprotocol || message.Routes == nil {
+			if !model.SupportsRoutes(conn.Subprotocol()) || message.Routes == nil {
 				return errors.New("unnegotiated or missing live routes")
 			}
 			if err := c.reconcile.AcceptRoutes(*message.Routes); err != nil {
 				return err
 			}
-		case "config":
+		case "config", "config_delta":
+			if message.Type == "config_delta" {
+				if conn.Subprotocol() != model.DeltaSubprotocol || message.Delta == nil || received == nil {
+					return errors.New("unnegotiated or baseless configuration delta")
+				}
+				next, err := message.Delta.Apply(*received)
+				if err != nil {
+					return err
+				}
+				message.Snapshot = &next
+			}
 			if message.Snapshot == nil {
 				return errors.New("controller omitted snapshot")
 			}
@@ -450,6 +479,7 @@ func (c *Client) readControl(ctx context.Context, conn *websocket.Conn, id model
 			if err := c.cache.SaveDirectory(message.Snapshot.Servers, c.options.Roots); err != nil {
 				return err
 			}
+			received = message.Snapshot
 			// Coalesce queued revisions, never the currently applying revision.
 			select {
 			case <-updates:

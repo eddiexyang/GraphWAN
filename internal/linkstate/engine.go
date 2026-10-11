@@ -15,11 +15,14 @@ import (
 )
 
 const (
-	// RefreshInterval re-originates an unchanged LSA, which also repairs a
-	// lost one: with link failure detection (up to 6 s) routes converge
-	// within 30 s. MaxAge expires the LSA of an origin that stopped refreshing.
-	RefreshInterval = 10 * time.Second
-	MaxAge          = 40 * time.Second
+	// Changes flood immediately; capable neighbours repair missing records
+	// through periodic database reconciliation. Legacy networks retain their
+	// original refresh/expiry cadence throughout a rolling upgrade.
+	RefreshInterval       = 5 * time.Minute
+	MaxAge                = 15 * time.Minute
+	LegacyRefreshInterval = 10 * time.Second
+	LegacyMaxAge          = 40 * time.Second
+	SyncInterval          = 10 * time.Second
 	// SPFDelay batches the LSAs of one event; MinOriginateInterval bounds
 	// the origination rate of a flapping link.
 	SPFDelay             = 50 * time.Millisecond
@@ -39,6 +42,8 @@ type LSA struct {
 	Revision uint64     `json:"revision"`
 	Sequence uint64     `json:"sequence"`
 	Up       []model.ID `json:"up"`
+	Sync     bool       `json:"sync,omitempty"`
+	AgeMS    int64      `json:"age_ms,omitempty"`
 }
 
 // Callbacks connect the engine to an Agent. Send is best effort: periodic
@@ -57,14 +62,18 @@ type entry struct {
 }
 
 type network struct {
-	config    model.NetworkConfig
-	neighbors map[model.ID]bool // peer node IDs
-	local     map[model.ID]bool
-	db        map[model.ID]entry
-	sequence  uint64
-	sent      time.Time
-	dirty     bool // local state changed since the last origination
-	lastUp    []model.ID
+	config      model.NetworkConfig
+	neighbors   map[model.ID]bool // peer node IDs
+	local       map[model.ID]bool
+	db          map[model.ID]entry
+	sequence    uint64
+	sent        time.Time
+	dirty       bool // local state changed since the last origination
+	lastUp      []model.ID
+	self        *LSA
+	syncReady   bool
+	syncSent    time.Time
+	syncMembers []model.ID
 }
 
 type Engine struct {
@@ -126,6 +135,12 @@ func (e *Engine) Configure(s model.Snapshot) *model.RouteUpdate {
 			n.dirty = true
 		}
 		n.config, n.neighbors = c, neighbors
+		n.syncMembers = componentMembers(c)
+		for origin := range n.db {
+			if !n.known(origin) {
+				delete(n.db, origin)
+			}
+		}
 		next[c.ID] = n
 	}
 	e.networks = next
@@ -161,8 +176,8 @@ func (e *Engine) PeerReady(networkID, peer model.ID) {
 	n := e.networks[networkID]
 	var out [][]byte
 	if n != nil && n.neighbors[peer] {
-		for _, en := range n.db {
-			if raw, err := json.Marshal(en.lsa); err == nil {
+		for _, record := range n.records(e.cb.Now()) {
+			if raw, err := json.Marshal(record); err == nil {
 				out = append(out, raw)
 			}
 		}
@@ -179,6 +194,15 @@ func (e *Engine) Receive(networkID, peer model.ID, raw []byte) error {
 	if len(raw) > maxLSA {
 		return errors.New("link-state advertisement too large")
 	}
+	var envelope struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return err
+	}
+	if envelope.Kind != "" {
+		return e.receiveSync(networkID, peer, raw)
+	}
 	var lsa LSA
 	if err := json.Unmarshal(raw, &lsa); err != nil {
 		return err
@@ -190,6 +214,10 @@ func (e *Engine) Receive(networkID, peer model.ID, raw []byte) error {
 		e.mu.Unlock()
 		e.stats.Rejected.Add(1)
 		return errors.New("link-state advertisement for an unknown network or node")
+	}
+	if lsa.AgeMS < 0 || lsa.AgeMS >= lsa.maxAge().Milliseconds() {
+		e.mu.Unlock()
+		return errors.New("expired link-state advertisement")
 	}
 	if lsa.Origin == n.config.Self.ID {
 		// Our own advertisement from before a restart: continue above it.
@@ -213,7 +241,7 @@ func (e *Engine) Receive(networkID, peer model.ID, raw []byte) error {
 	if old, ok := n.db[lsa.Origin]; !ok || !slices.Equal(old.lsa.Up, lsa.Up) {
 		e.eventLocked("received", networkID, lsa.Origin, "", lsa.Sequence)
 	}
-	n.db[lsa.Origin] = entry{lsa: lsa, up: up, arrived: e.cb.Now()}
+	n.db[lsa.Origin] = entry{lsa: lsa, up: up, arrived: e.cb.Now().Add(-time.Duration(lsa.AgeMS) * time.Millisecond)}
 	e.scheduleSPFLocked()
 	targets := n.floodTargets(peer)
 	e.mu.Unlock()
@@ -270,6 +298,7 @@ func (e *Engine) Step() {
 		network model.ID
 		peers   []model.ID
 		raw     []byte
+		sync    bool
 	}
 	var sends []send
 	var update *model.RouteUpdate
@@ -290,23 +319,44 @@ func (e *Engine) Step() {
 			n.dirty = true
 		}
 		for origin, en := range n.db {
-			if now.Sub(en.arrived) > MaxAge {
+			if now.Sub(en.arrived) > en.lsa.maxAge() {
 				delete(n.db, origin)
 				e.stats.Expired.Add(1)
 				e.eventLocked("expired", id, origin, "", en.lsa.Sequence)
 				e.scheduleSPFLocked()
 			}
 		}
-		if (n.dirty && now.Sub(n.sent) >= MinOriginateInterval) || now.Sub(n.sent) >= RefreshInterval {
+		ready := n.supportsSync()
+		if n.syncReady && !ready {
+			n.dirty = true // A legacy/restarted origin needs the short cadence now.
+		}
+		n.syncReady = ready
+		interval := LegacyRefreshInterval
+		if ready {
+			interval = RefreshInterval
+		}
+		if (n.dirty && now.Sub(n.sent) >= MinOriginateInterval) || now.Sub(n.sent) >= interval {
 			lsa := n.originate(e.snapshot.Revision, now)
 			if raw, err := json.Marshal(lsa); err == nil {
-				sends = append(sends, send{id, n.floodTargets(""), raw})
+				sends = append(sends, send{id, n.floodTargets(""), raw, false})
 			}
 			if !slices.Equal(n.lastUp, lsa.Up) {
 				e.eventLocked("originated", id, lsa.Origin, "", lsa.Sequence)
 				n.lastUp = lsa.Up
 			}
 			e.scheduleSPFLocked()
+		}
+		if now.Sub(n.syncSent) >= SyncInterval {
+			n.syncSent = now
+			message := syncMessage{Kind: "digest", Network: id, Digest: n.digest(now)}
+			raw, _ := json.Marshal(message)
+			var peers []model.ID
+			for peer := range n.neighbors {
+				if en, ok := n.db[peer]; ok && en.lsa.Sync {
+					peers = append(peers, peer)
+				}
+			}
+			sends = append(sends, send{id, peers, raw, true})
 		}
 	}
 	if !e.spfAt.IsZero() && !now.Before(e.spfAt) {
@@ -316,7 +366,9 @@ func (e *Engine) Step() {
 	e.mu.Unlock()
 	for _, s := range sends {
 		for _, p := range s.peers {
-			e.stats.Sent.Add(1)
+			if !s.sync {
+				e.stats.Sent.Add(1)
+			}
 			e.cb.Send(s.network, p, s.raw)
 		}
 	}
@@ -337,7 +389,9 @@ func (n *network) originate(revision uint64, now time.Time) LSA {
 		}
 	}
 	slices.Sort(up)
-	return LSA{Network: n.config.ID, Origin: n.config.Self.ID, Revision: revision, Sequence: n.sequence, Up: up}
+	lsa := LSA{Network: n.config.ID, Origin: n.config.Self.ID, Revision: revision, Sequence: n.sequence, Up: up, Sync: true}
+	n.self = &lsa
+	return lsa
 }
 
 func (e *Engine) scheduleSPFLocked() {

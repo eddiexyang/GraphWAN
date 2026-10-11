@@ -73,7 +73,7 @@ func (s *Server) agentControl(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, err)
 		return
 	}
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{model.RoutingSubprotocol}, CompressionMode: websocket.CompressionNoContextTakeover})
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{model.DeltaSubprotocol, model.RoutingSubprotocol}, CompressionMode: websocket.CompressionNoContextTakeover})
 	if err != nil {
 		return
 	}
@@ -129,6 +129,7 @@ func (s *Server) agentControl(w http.ResponseWriter, r *http.Request) {
 		}
 		message := model.ControlMessage{Type: "heartbeat"}
 		if first || state.Revision != last {
+			previous := snapshot
 			snapshot, err = routing.Compile(state, id)
 			if err != nil {
 				conn.CloseNow()
@@ -137,10 +138,15 @@ func (s *Server) agentControl(w http.ResponseWriter, r *http.Request) {
 			}
 			message.Type = "config"
 			message.Snapshot = &snapshot
+			if !first && conn.Subprotocol() == model.DeltaSubprotocol {
+				if delta := model.EndpointDeltaFrom(previous, snapshot); delta != nil {
+					message.Type, message.Delta, message.Snapshot = "config_delta", delta, nil
+				}
+			}
 			last = snapshot.Revision
 			first = false
 			routeHash = ""
-		} else if conn.Subprotocol() == model.RoutingSubprotocol {
+		} else if model.SupportsRoutes(conn.Subprotocol()) {
 			s.mu.Lock()
 			ack := s.statuses[id].AppliedRevision
 			s.mu.Unlock()
@@ -202,6 +208,26 @@ func (s *Server) readAgent(ctx context.Context, conn *websocket.Conn, id model.I
 		cancel()
 		if err != nil {
 			return err
+		}
+		if message.Type == "ack_revision" {
+			if conn.Subprotocol() != model.DeltaSubprotocol || message.Ack == nil {
+				return errors.New("unnegotiated or missing revision acknowledgement")
+			}
+			s.mu.Lock()
+			status := s.statuses[id]
+			s.mu.Unlock()
+			if status.Version == "" || status.ConfigError != "" || message.Ack.AppliedRevision < status.AppliedRevision {
+				return errors.New("revision acknowledgement needs a valid full report")
+			}
+			report := status.AgentReport
+			report.AppliedRevision = message.Ack.AppliedRevision
+			report.Links = slices.Clone(report.Links)
+			if report.LinkState != nil {
+				ls := *report.LinkState
+				ls.Revision = report.AppliedRevision
+				report.LinkState = &ls
+			}
+			message.Type, message.Report = "ack", &report
 		}
 		switch message.Type {
 		case "ack":

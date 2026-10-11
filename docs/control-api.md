@@ -194,10 +194,29 @@ The controller sends `ControlMessage` JSON envelopes:
 - `{"type":"config","snapshot":{...}}`: initial and updated compiled snapshot.
 - `{"type":"heartbeat"}`: liveness message every 15 seconds when unchanged.
 
+New Agent/controller pairs negotiate `graphwan.control.delta.v1`, falling back
+to `graphwan.control.routes.v1` with older peers. Every connection starts with a
+full snapshot. Subsequent endpoint-only revisions use
+`{"type":"config_delta","delta":{"base_revision":N,"revision":N+1,...}}`.
+Leases contain only endpoint ID and expiry; address additions/removals carry
+endpoint differences and their resulting order. Network membership, topology,
+policy and trust changes continue to send full snapshots. The reconstructed
+snapshot follows the same validation, persistence and application pipeline.
+The base is the last snapshot received on that connection, even when the
+runtime coalesces pending applications. A mismatched base closes the stream;
+reconnection establishes a fresh full baseline.
+
 The Agent checks telemetry every 2 seconds. User traffic, link/state changes and
 errors trigger reports at that cadence; applied configuration is ACKed promptly.
 When idle, a full report is sent approximately every 15 seconds, including in
-response to controller heartbeats. One final unchanged sample clears displayed
+response to controller heartbeats. Under the delta protocol, a revision-only
+application or an early heartbeat response uses
+`{"type":"ack_revision","ack":{"applied_revision":N}}` while the last full
+report is less than 15 seconds old and all other report state is unchanged.
+The controller retains that full telemetry and updates the acknowledged
+revision/liveness through the normal report validation path. Errors and changes
+to links, routing or traffic still produce full reports. Small acknowledgements
+do not postpone the periodic full report. One final unchanged sample clears displayed
 traffic rates when transfers stop. CPU, memory, RTT and loss samples alone do not
 trigger extra reports for ordinary links. WireGuard ICMP sample validity and
 measurement timestamps trigger updates: `rtt_valid` marks an available sample,

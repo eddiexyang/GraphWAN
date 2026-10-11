@@ -40,8 +40,10 @@ LSA { network, origin node, config revision, sequence, edges: [edge ID -> up] }
 An edge is up locally when the Edge has a healthy Link (the same condition the
 Agent reports to the controller today).
 
-- Originated on every local change (rate-limited to one per 100 ms) and
-  refreshed every 10 s. The sequence is at least the origination time in
+- Originated on every local change (rate-limited to one per 100 ms). Once all
+  nodes in the configured connected component advertise `sync: true`, stable
+  LSAs refresh every five minutes. While a member is unknown or legacy,
+  refresh remains every 10 s. The sequence is at least the origination time in
   nanoseconds, and an Agent that hears an older LSA of its own continues above
   it, so restarts need no persisted state.
 - Flooded hop by hop on the existing authenticated peer Links as a new Link
@@ -49,17 +51,36 @@ Agent reports to the controller today).
   introduction and confirmed in band, so Agents without it never see the kind.
 - A receiver accepts an LSA with a higher sequence than it holds for that
   origin, records the arrival time, and floods it to its other neighbours.
-- An LSA expires 40 s after arrival unless refreshed. A restarted or isolated
-  origin therefore ages out without any controller.
-- A new adjacency exchanges the full database once.
+- Capable neighbours exchange a 128-bit database digest every 10 s. Matching
+  digests need no reply. Mismatches exchange origin/sequence inventories and
+  transfer only newer or missing LSAs. Inventories use bounded, sorted ID
+  ranges so large databases stay within the peer frame limit.
+- Legacy-origin LSAs expire after 40 s; `sync: true` origins expire after
+  15 minutes. These are database garbage-collection limits; failed links are
+  still withdrawn immediately when the existing failure detector reports them.
+  A relayed/resynchronized LSA carries its accumulated `age_ms`. Digests,
+  inventories and duplicate LSAs never renew a lease. A silent origin cannot
+  remain alive merely because its neighbours keep exchanging its cached record.
+- A new adjacency exchanges the current database, including the sender's own
+  LSA, once. Sync messages are sent only to neighbours advertising support.
 - LSAs are not signed. Transit Agents are already trusted hop forwarders in
   GraphWAN's model; LSAs are authenticated per hop by the peer session, like
   data.
 
-Convergence target: under 30 s. Every Link is probed each second, so it fails
-at most 6 s after its peer stops answering (1 s probe plus 5 s timeout), and
-flooding plus SPF add about 0.1 s. A lost LSA is repaired by the next refresh,
-so the worst case stays near 16 s.
+Convergence target: under 30 s under ordinary delivery conditions. The existing
+Link probe/timeout settings are unchanged. Changes flood immediately; a lost
+advertisement is repaired by the next successful digest/inventory exchange,
+without waiting for the five-minute refresh. Repeated packet loss can delay
+recovery. During mixed-version operation the original ten-second full refresh
+also remains available. Downgrading a member returns the component to that
+cadence when its legacy LSA is received.
+
+`TestStableThirteenNodeTrafficBudget` models 13 nodes and 39 edges, including a
+seven-neighbour node. It counts both directions, peer framing/encryption,
+IP/TCP/Ethernet headers, and a separate TCP ACK for every routing message over
+ten minutes. Its routing-only budget is 8 kbit/s per node. Heartbeats, controller
+traffic and user data are separate; this is a simulation, not an underlay
+measurement or a guarantee for arbitrary topology sizes.
 
 ## Route computation
 

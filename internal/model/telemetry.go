@@ -50,9 +50,12 @@ type AgentStatus struct {
 }
 
 // ControlMessage is a versioned envelope carried on an authenticated WebSocket.
-// Type is config, routes, heartbeat, ack, endpoints, update or error. Configuration is immutable
+// Type is config, config_delta, routes, heartbeat, ack, ack_revision, endpoints,
+// update or error. Configuration is immutable
 // desired state; ACK describes runtime application, not merely receipt.
 type ControlMessage struct {
+	Delta     *SnapshotDelta `json:"delta,omitempty"`
+	Ack       *RevisionAck   `json:"ack,omitempty"`
 	Update    *UpdateRequest `json:"update,omitempty"`
 	Type      string         `json:"type"`
 	Snapshot  *Snapshot      `json:"snapshot,omitempty"`
