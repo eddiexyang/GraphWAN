@@ -397,6 +397,26 @@ func (r *Router) timeExceeded(ctx context.Context, n *network, raw []byte) error
 	return r.send(ctx, n.id, hop, buffer.Data)
 }
 
+// CompactHeader rebuilds the header a compact Link omitted. Source and
+// destination are the owners of the inner addresses: the only Nodes fromPeer
+// admits for them, so the expanded frame still passes every FromPeer check.
+func (r *Router) CompactHeader(header []byte, networkWire [16]byte, hopLimit uint8, payload []byte) bool {
+	n := r.state.Load().byWire[networkWire]
+	if n == nil {
+		return false
+	}
+	info, err := packet.InspectAddresses(payload)
+	if err != nil {
+		return false
+	}
+	source, destination := n.owner(info.Source), n.owner(info.Destination)
+	if source == nil || destination == nil {
+		return false
+	}
+	packet.PutHeader(header, networkWire, source.wire, destination.wire, hopLimit, len(payload))
+	return true
+}
+
 // owner performs longest-prefix matching without allocations. Overlay hosts take
 // precedence over external routes, including /0, and unknown overlay IPs drop.
 func (n *network) owner(ip netip.Addr) *node {

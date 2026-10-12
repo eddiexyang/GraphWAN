@@ -71,6 +71,21 @@ func (p Packet) AppendBinary(dst []byte) ([]byte, error) {
 	return dst, nil
 }
 
+// PutHeader writes a header for payloadLen bytes into out[:HeaderSize], with
+// zero Epoch, Flow and Sequence, which receivers do not use. Compact Links use
+// it to rebuild the header that the sender omitted.
+func PutHeader(out []byte, network, source, destination [16]byte, hopLimit uint8, payloadLen int) {
+	out = out[:HeaderSize]
+	clear(out)
+	out[0], out[1] = 'G', 'W'
+	out[2] = Version
+	out[3] = hopLimit
+	binary.BigEndian.PutUint16(out[4:6], uint16(payloadLen))
+	copy(out[8:24], network[:])
+	copy(out[24:40], source[:])
+	copy(out[40:56], destination[:])
+}
+
 // View keeps wire IDs in their native fixed-width representation so configured
 // forwarding tables can look them up without allocating hexadecimal strings.
 // Payload references the caller's frame and must not outlive its ownership.

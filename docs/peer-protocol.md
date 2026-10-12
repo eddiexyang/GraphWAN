@@ -192,6 +192,16 @@ Destination IDs, routing epoch, flow hash and sequence field. The peer session
 layer supplies cryptographic replay protection. The complete overlay header and
 IP packet are encrypted together on each hop.
 
+Links between current Agents omit that header. The dialer offers
+`compact_data` in its link introduction and the acceptor confirms in band, as for
+streams and link-state advertisements. A compact data frame is the message kind,
+the overlay hop limit and the IP packet: 2 bytes instead of 81. The Network is
+the Link's own; the receiver rebuilds Source and Destination as the owners of the
+inner addresses, the only IDs admission accepts, and applies the same checks.
+Epoch, flow hash and sequence are not read on receive and are not carried. The
+acceptor sends compact frames at once; the dialer only after the confirmation, so
+older peers never see them. Telemetry counts each compact frame at its full size.
+
 TUN-originated packets must use that Node's configured virtual source address.
 Peer-originated packets must arrive from an authenticated, configured neighbor;
 header IDs and inner IP addresses must agree with the Network's address directory.

@@ -40,6 +40,7 @@ type policy struct {
 type Mesh struct {
 	streamHandler  StreamHandler
 	linkState      *LinkStateHandler
+	compact        link.CompactHeader
 	extensionMu    sync.Mutex
 	extensionNext  time.Time
 	extensionSlots chan struct{}
@@ -427,7 +428,8 @@ func (m *Mesh) accept(conn transport.Conn, kind model.Transport) {
 		// The acceptor confirms each offered capability in band.
 		streams := introduction.TCPStreams && m.streamsEnabled() && streamTransport(kind)
 		linkState := introduction.LinkState && m.linkStateEnabled()
-		selected.register(channel, *candidate, introduction.PathExchange, linkCaps{streams, true, linkState, true, true})
+		compact := introduction.CompactData && m.compactHeader() != nil
+		selected.register(channel, *candidate, introduction.PathExchange, linkCaps{streams: streams, streamHello: true, linkState: linkState, linkStateHello: true, compact: compact, compactHello: true, accepted: true})
 	}()
 }
 func addressFamily(address net.Addr) int {
@@ -505,6 +507,7 @@ func (g *group) close() {
 // offer (acceptor, which announces each with a hello message).
 type linkCaps struct {
 	streams, streamHello, linkState, linkStateHello bool
+	compact, compactHello                           bool
 	accepted                                        bool
 }
 
@@ -531,6 +534,9 @@ func (g *group) register(channel *peer.Channel, candidate link.Candidate, pathEx
 	}
 	if caps.linkState {
 		options.LinkState, options.LinkStateHello = g, caps.linkStateHello
+	}
+	if caps.compact {
+		options.Compact, options.CompactHello = g.mesh.compactHeader(), caps.compactHello
 	}
 	l, err := link.New(g.ctx, channel, link.Info{NetworkID: cfg.network, EdgeID: cfg.peer.Edge.ID, PeerID: cfg.peer.Node.ID, CandidateID: candidate.ID, Transport: candidate.Endpoint.Transport}, options)
 	if err != nil {

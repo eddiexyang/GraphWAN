@@ -3,6 +3,7 @@ package link
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"net"
 	"sync"
@@ -33,6 +34,10 @@ const (
 	linkStateHelloMessage = 13
 	linkStateMessage      = 14
 	linkStateQueue        = 256
+	// Compact data omits the packet header after the same in-band confirmation:
+	// [compactDataMessage][hop limit][IP packet]. The receiver rebuilds it.
+	compactHelloMessage = 15
+	compactDataMessage  = 16
 	// Leave room for multiple kernel GSO bursts while writers process bounded
 	// batches. The queue is still finite; control messages use a separate queue.
 	queueSize = 512
@@ -81,7 +86,17 @@ type Options struct {
 	// the accepting side, as for streams. Any transport may carry them.
 	LinkState      LinkStateHandler
 	LinkStateHello bool
+	// Compact rebuilds the packet header of a compact data frame from its inner
+	// addresses; it is set when both sides offered the capability. The accepting
+	// side sets CompactHello and sends compact frames at once; the dialer only
+	// after that announcement arrives. Either side accepts them throughout.
+	Compact      CompactHeader
+	CompactHello bool
 }
+
+// CompactHeader writes the omitted packet header into header[:packet.HeaderSize]
+// for payload, or reports that its addresses have no admitted owners.
+type CompactHeader func(header []byte, network [16]byte, hopLimit uint8, payload []byte) bool
 
 // LinkStateHandler receives advertisements; payload is only valid during the call.
 type LinkStateHandler interface {
@@ -156,6 +171,8 @@ type Link struct {
 	linkStateReady  atomic.Bool
 	linkStateOut    chan []byte
 	linkStateLost   atomic.Uint64
+	compactOut      atomic.Bool
+	networkWire     [16]byte
 }
 
 func New(parent context.Context, channel Channel, info Info, options Options) (*Link, error) {
@@ -191,6 +208,17 @@ func New(parent context.Context, channel Channel, info Info, options Options) (*
 	if options.LinkState != nil && options.LinkStateHello {
 		l.control <- []byte{linkStateHelloMessage, 1}
 		l.linkStateReady.Store(true)
+	}
+	if options.Compact != nil {
+		if _, err := hex.Decode(l.networkWire[:], []byte(info.NetworkID)); err != nil {
+			cancel()
+			return nil, err
+		}
+		if options.CompactHello {
+			// The dialer offered compact frames, so it already accepts them.
+			l.control <- []byte{compactHelloMessage, 1}
+			l.compactOut.Store(true)
+		}
 	}
 	l.wg.Add(3)
 	go l.readLoop()
@@ -335,7 +363,9 @@ func (l *Link) enqueue(ctx context.Context, frames [][]byte, owners []*packetbuf
 			break
 		}
 		var buffer *packetbuf.Buffer
-		if owners != nil && owners[i].PrependByte(dataMessage) {
+		if l.compactOut.Load() {
+			buffer = compactFrame(frame, owners, i)
+		} else if owners != nil && owners[i].PrependByte(dataMessage) {
 			buffer = owners[i]
 		} else {
 			buffer = packetbuf.Get(len(frame) + 1)
@@ -359,6 +389,23 @@ func (l *Link) enqueue(ctx context.Context, frames [][]byte, owners []*packetbuf
 	}
 	return nil
 }
+
+// compactFrame replaces the packet header with the two-byte compact prefix,
+// in place for an owned buffer; frame[3] is the overlay hop limit.
+func compactFrame(frame []byte, owners []*packetbuf.Buffer, i int) *packetbuf.Buffer {
+	if owners != nil {
+		buffer := owners[i]
+		buffer.Data[packet.HeaderSize-2] = compactDataMessage
+		buffer.Data[packet.HeaderSize-1] = frame[3]
+		buffer.Data = buffer.Data[packet.HeaderSize-2:]
+		return buffer
+	}
+	buffer := packetbuf.Get(len(frame) - packet.HeaderSize + 2)
+	buffer.Data[0], buffer.Data[1] = compactDataMessage, frame[3]
+	copy(buffer.Data[2:], frame[packet.HeaderSize:])
+	return buffer
+}
+
 func (l *Link) tcpBacked() bool {
 	switch l.info.Transport {
 	case model.TCP, model.WS, model.WSS, model.GRPC:
@@ -496,6 +543,43 @@ func (l *Link) readLoop() {
 				default:
 					l.dropped.Add(1)
 				}
+			}
+		case compactHelloMessage:
+			if len(raw) != 2 || l.options.Compact == nil || l.options.CompactHello {
+				return
+			}
+			l.compactOut.Store(true)
+		case compactDataMessage:
+			if l.options.Compact == nil || len(raw) <= 2 || len(raw)-2 > packet.MaxPayload {
+				return
+			}
+			// Owned receivers release pooled buffers; packets channel readers keep
+			// their frames, which therefore need their own allocation.
+			var buffer *packetbuf.Buffer
+			if owning {
+				buffer = packetbuf.Get(packet.HeaderSize + len(raw) - 2)
+			} else {
+				buffer = packetbuf.Wrap(make([]byte, packet.HeaderSize+len(raw)-2))
+			}
+			if !l.options.Compact(buffer.Data[:packet.HeaderSize], l.networkWire, raw[1], raw[2:]) {
+				buffer.Release()
+				l.dropped.Add(1)
+				continue
+			}
+			copy(buffer.Data[packet.HeaderSize:], raw[2:])
+			l.rx.Add(uint64(len(buffer.Data)))
+			if owning {
+				ready[count] = buffer
+				count++
+				if count == len(ready) {
+					flush()
+				}
+				continue
+			}
+			select {
+			case l.packets <- buffer.Data:
+			default:
+				l.dropped.Add(1)
 			}
 		case streamHelloMessage:
 			if len(raw) != 2 || l.options.Streams == nil || l.options.StreamHello || !l.tcpBacked() {
@@ -653,8 +737,11 @@ func (l *Link) writeLoop() {
 			return
 		}
 		for i, raw := range messages[:count] {
-			if raw[0] == dataMessage || raw[0] == streamMessage {
+			switch raw[0] {
+			case dataMessage, streamMessage:
 				l.tx.Add(uint64(len(raw) - 1))
+			case compactDataMessage:
+				l.tx.Add(uint64(len(raw) - 2 + packet.HeaderSize))
 			}
 			messages[i] = nil
 			owners[i].Release()

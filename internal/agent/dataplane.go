@@ -175,6 +175,7 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 		next.mesh.EnableWireGuard(r.receiveWireGuard)
 		next.mesh.EnableStreams(r.acceptTCP)
 		next.mesh.EnableLinkState(r.linkStateHandler())
+		next.mesh.EnableCompact(r.compactHeader)
 		newMesh = true
 	}
 	forwardingSnapshot := carryLiveRoutes(snapshot, r.lastRoutes)
@@ -323,6 +324,14 @@ func (r *DataPlane) readTunnel(network model.ID, device *runtimeTunnel) {
 		r.accessPacket(state, r.ctx, network, buffer[:n], false)
 	}
 }
+
+// compactHeader expands compact Link frames against the active forwarding
+// table; frames arriving before the first table is published are dropped.
+func (r *DataPlane) compactHeader(header []byte, network [16]byte, hopLimit uint8, payload []byte) bool {
+	state := r.state.Load()
+	return state != nil && state.router.CompactHeader(header, network, hopLimit, payload)
+}
+
 func (r *DataPlane) receive(ctx context.Context, remote model.ID, frame []byte) error {
 	state := r.state.Load()
 	if state == nil {

@@ -28,6 +28,8 @@ type introduction struct {
 	TCPStreams bool `json:"tcp_streams,omitempty"`
 	// LinkState offers link-state advertisements on this Link.
 	LinkState bool `json:"link_state,omitempty"`
+	// CompactData offers data frames without the packet header.
+	CompactData bool `json:"compact_data,omitempty"`
 }
 
 func receiveIntroduction(ctx context.Context, channel *peer.Channel) (introduction, error) {
@@ -261,8 +263,8 @@ func (g *group) connect(ctx context.Context, candidate link.Candidate) (*peer.Ch
 		return nil, linkCaps{}, err
 	}
 	streams := g.mesh.streamsEnabled() && streamTransport(candidate.Endpoint.Transport)
-	offered := linkCaps{streams: streams, linkState: g.mesh.linkStateEnabled()}
-	intro := introduction{Candidate: candidate.ID, Endpoint: endpointFingerprint(candidate.Endpoint), Scope: link.ScopeIdentity(candidate.Scope), PathExchange: true, TCPStreams: offered.streams, LinkState: offered.linkState}
+	offered := linkCaps{streams: streams, linkState: g.mesh.linkStateEnabled(), compact: g.mesh.compactHeader() != nil}
+	intro := introduction{Candidate: candidate.ID, Endpoint: endpointFingerprint(candidate.Endpoint), Scope: link.ScopeIdentity(candidate.Scope), PathExchange: true, TCPStreams: offered.streams, LinkState: offered.linkState, CompactData: offered.compact}
 	if candidate.Target.IsValid() {
 		intro.Target = candidate.Target.String()
 	}
