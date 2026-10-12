@@ -38,6 +38,8 @@ const (
 	queueSize = 512
 	// TCP-backed links retain at most 256 KiB of queued plaintext frames.
 	tcpQueueBytes = 256 * 1024
+	// acceptedProbe paces an accepted Link's own RTT samples.
+	acceptedProbe = 30 * time.Second
 )
 
 var ErrQueueFull = errors.New("link packet queue is full")
@@ -61,6 +63,10 @@ type Options struct {
 	// Heartbeat probes every Link at a fixed cadence: Link failure drives
 	// route convergence, so idle Links fail as quickly as busy ones.
 	Heartbeat, Timeout, WriteTimeout, RenewAfter time.Duration
+	// Accepted Links leave liveness probing to the dialer: received pings
+	// prove liveness, and own pings only sample RTT every acceptedProbe.
+	// The ping format is unchanged, so older peers keep probing as before.
+	Accepted bool
 	// PathExchange is enabled by the authenticated introduction capability.
 	PathExchange bool
 	// OwnedPackets opts into explicit packet ownership. Consumers must release
@@ -93,10 +99,10 @@ type StreamHandler interface {
 
 func (o Options) defaults() Options {
 	if o.Heartbeat <= 0 {
-		o.Heartbeat = time.Second
+		o.Heartbeat = 2 * time.Second
 	}
 	if o.Timeout <= 0 {
-		o.Timeout = 5 * time.Second
+		o.Timeout = 6 * time.Second
 	}
 	if o.WriteTimeout <= 0 {
 		o.WriteTimeout = 2 * time.Second
@@ -137,6 +143,8 @@ type Link struct {
 	lastPong        time.Time
 	lastPing        time.Time
 	probeSince      time.Time
+	started         time.Time
+	peerPing        time.Time
 	lastTraffic     time.Time
 	sampledRX       uint64
 	sampledTX       uint64
@@ -164,7 +172,7 @@ func New(parent context.Context, channel Channel, info Info, options Options) (*
 		}
 	}
 	ctx, cancel := context.WithCancel(parent)
-	l := &Link{channel: channel, info: info, options: options, ctx: ctx, cancel: cancel, done: make(chan struct{}), dataReady: make(chan struct{}, 1), selection: make(chan Selection, 8), control: make(chan []byte, 8), packets: make(chan []byte, queueSize), pending: map[uint64]time.Time{}}
+	l := &Link{channel: channel, info: info, options: options, ctx: ctx, cancel: cancel, done: make(chan struct{}), dataReady: make(chan struct{}, 1), selection: make(chan Selection, 8), control: make(chan []byte, 8), packets: make(chan []byte, queueSize), pending: map[uint64]time.Time{}, started: time.Now()}
 	l.pathEnabled = options.PathExchange
 	l.retirements = make(chan Retirement, 8)
 	l.streamWake = make(chan struct{}, 1)
@@ -385,7 +393,13 @@ func (l *Link) healthy() bool {
 // Healthy avoids allocating formatted telemetry during connection maintenance.
 func (l *Link) Healthy() bool { return l.healthy() }
 func (l *Link) healthyLocked(now time.Time) bool {
-	return l.ctx.Err() == nil && !l.lastPong.IsZero() && (l.probeSince.IsZero() || now.Sub(l.probeSince) < l.options.Timeout)
+	if l.ctx.Err() != nil {
+		return false
+	}
+	if l.options.Accepted {
+		return !l.peerPing.IsZero() && now.Sub(l.peerPing) < l.options.Timeout
+	}
+	return !l.lastPong.IsZero() && (l.probeSince.IsZero() || now.Sub(l.probeSince) < l.options.Timeout)
 }
 func (l *Link) Stats() model.LinkStatus {
 	l.mu.Lock()
@@ -513,6 +527,11 @@ func (l *Link) readLoop() {
 		case pingMessage:
 			if len(raw) != 9 {
 				return
+			}
+			if l.options.Accepted {
+				l.mu.Lock()
+				l.peerPing = time.Now()
+				l.mu.Unlock()
 			}
 			response := append([]byte{}, raw...)
 			response[0] = pongMessage
@@ -724,9 +743,20 @@ func (l *Link) heartbeat(now time.Time) bool {
 	if !l.probeSince.IsZero() && now.Sub(l.probeSince) >= l.options.Timeout {
 		return false
 	}
+	interval := l.options.Heartbeat
+	if l.options.Accepted {
+		heard := l.started
+		if l.peerPing.After(heard) {
+			heard = l.peerPing
+		}
+		if now.Sub(heard) >= l.options.Timeout {
+			return false
+		}
+		interval = acceptedProbe
+	}
 	// Keeps lastTraffic current for selection hysteresis (recentlyActive).
 	l.sampleTrafficLocked(now)
-	if !l.lastPing.IsZero() && now.Sub(l.lastPing) < l.options.Heartbeat {
+	if !l.lastPing.IsZero() && now.Sub(l.lastPing) < interval {
 		return true
 	}
 	l.nextPing++

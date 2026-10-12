@@ -389,7 +389,7 @@ func (c *Client) connect(parent context.Context, id model.ID, updates chan model
 			comparison.AppliedRevision = report.AppliedRevision
 		}
 		changed := reportChanged(comparison, report)
-		if conn.Subprotocol() == model.DeltaSubprotocol && previous.Version != "" && !changed && !settling && time.Since(lastReport) < 15*time.Second {
+		if conn.Subprotocol() == model.DeltaSubprotocol && previous.Version != "" && !changed && !settling && time.Since(lastReport) < idleReportInterval {
 			if force || previous.AppliedRevision != report.AppliedRevision {
 				writeCtx, stop := context.WithTimeout(ctx, 10*time.Second)
 				err := wsjson.Write(writeCtx, conn, model.ControlMessage{Type: "ack_revision", Ack: &model.RevisionAck{AppliedRevision: report.AppliedRevision}})
@@ -403,9 +403,9 @@ func (c *Client) connect(parent context.Context, id model.ID, updates chan model
 			previous = report
 			continue
 		}
-		// Send one final unchanged sample so displayed traffic rates return to
-		// zero promptly when a transfer stops, before entering idle cadence.
-		if !force && !settling && time.Since(lastReport) < 15*time.Second && !changed {
+		// Send one final unchanged sample after a change, then report idle
+		// metrics and traffic counters every idleReportInterval.
+		if !force && !settling && time.Since(lastReport) < idleReportInterval && !changed {
 			continue
 		}
 		writeCtx, stop := context.WithTimeout(ctx, 10*time.Second)
@@ -420,6 +420,10 @@ func (c *Client) connect(parent context.Context, id model.ID, updates chan model
 		settling = changed
 	}
 }
+
+// idleReportInterval bounds controller traffic for unchanged Agents.
+const idleReportInterval = 30 * time.Second
+
 func (c *Client) sendEndpoints(ctx context.Context, conn *websocket.Conn) error {
 	c.mu.Lock()
 	endpoints := append([]model.Endpoint{}, c.endpoints...)

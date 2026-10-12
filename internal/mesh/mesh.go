@@ -427,7 +427,7 @@ func (m *Mesh) accept(conn transport.Conn, kind model.Transport) {
 		// The acceptor confirms each offered capability in band.
 		streams := introduction.TCPStreams && m.streamsEnabled() && streamTransport(kind)
 		linkState := introduction.LinkState && m.linkStateEnabled()
-		selected.register(channel, *candidate, introduction.PathExchange, linkCaps{streams, true, linkState, true})
+		selected.register(channel, *candidate, introduction.PathExchange, linkCaps{streams, true, linkState, true, true})
 	}()
 }
 func addressFamily(address net.Addr) int {
@@ -505,6 +505,7 @@ func (g *group) close() {
 // offer (acceptor, which announces each with a hello message).
 type linkCaps struct {
 	streams, streamHello, linkState, linkStateHello bool
+	accepted                                        bool
 }
 
 func (g *group) register(channel *peer.Channel, candidate link.Candidate, pathExchange bool, caps linkCaps) {
@@ -523,6 +524,7 @@ func (g *group) register(channel *peer.Channel, candidate link.Candidate, pathEx
 	options := g.mesh.linkOptions
 	options.OwnedPackets = true
 	options.PathExchange = pathExchange
+	options.Accepted = caps.accepted
 	if caps.streams {
 		options.Streams, options.StreamHello = g.mux, caps.streamHello
 		channel.UseKernelWriteBacklog()

@@ -15,12 +15,12 @@ func TestIdlePublication(t *testing.T) {
 	slices.Reverse(next.Links)
 	next.Links[0].RTTMillis = 7
 	next.Links[0].Loss = 0.1
+	next.Links[0].RXBytes, next.Links[1].TXBytes = 9, 3
 	next.Resources = &model.ResourceUsage{UptimeSeconds: 10}
 	if reportChanged(previous, next) {
-		t.Fatal("idle metrics or order triggered a full report")
+		t.Fatal("idle metrics, counters or order triggered a full report")
 	}
 	for name, change := range map[string]func(*model.AgentReport){
-		"data":      func(r *model.AgentReport) { r.Links[0].TXBytes++ },
 		"health":    func(r *model.AgentReport) { r.Links[0].Healthy = false },
 		"selection": func(r *model.AgentReport) { r.Links[0].Active = true },
 		"removal":   func(r *model.AgentReport) { r.Links = r.Links[:1] },
