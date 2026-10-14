@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -254,7 +255,24 @@ func (l *Link) setActive(active bool) {
 	generation := l.dataGeneration.Load()
 	if (generation%2 == 1) != active {
 		l.dataGeneration.Add(1)
+		if active {
+			slog.Info("link selected", l.logAttrs()...)
+		} else {
+			slog.Info("link deselected", l.logAttrs()...)
+		}
 	}
+}
+
+// logAttrs identifies the Link in health and selection logs.
+func (l *Link) logAttrs(extra ...any) []any {
+	attrs := []any{"peer", l.info.PeerID, "edge", l.info.EdgeID, "candidate", l.info.CandidateID, "transport", l.info.Transport}
+	if l.channel != nil {
+		if remote := l.channel.RemoteAddr(); remote != nil {
+			attrs = append(attrs, "remote", remote.String())
+		}
+		attrs = append(attrs, "link", l.ID())
+	}
+	return append(attrs, extra...)
 }
 func (l *Link) ID() string         { return l.channel.ID() }
 func (l *Link) StreamsReady() bool { return l.streamsReady.Load() }
@@ -614,8 +632,12 @@ func (l *Link) readLoop() {
 			}
 			if l.options.Accepted {
 				l.mu.Lock()
+				first := l.peerPing.IsZero()
 				l.peerPing = time.Now()
 				l.mu.Unlock()
+				if first {
+					slog.Info("link up", l.logAttrs()...)
+				}
 			}
 			response := append([]byte{}, raw...)
 			response[0] = pongMessage
@@ -769,21 +791,37 @@ func (l *Link) healthLoop() {
 	ticker := time.NewTicker(l.options.Heartbeat)
 	defer ticker.Stop()
 	for {
-		if !l.heartbeat(now) || l.channel.NeedsRekey() {
+		if !l.heartbeat(now) {
+			l.logDown("timeout")
+			return
+		}
+		if l.channel.NeedsRekey() {
+			l.logDown("rekey")
 			return
 		}
 		select {
 		case <-l.ctx.Done():
+			l.logDown("closed")
 			return
 		case now = <-ticker.C:
 		}
 	}
 }
 
+func (l *Link) logDown(reason string) {
+	l.mu.Lock()
+	wasUp := !l.lastPong.IsZero() || !l.peerPing.IsZero()
+	l.mu.Unlock()
+	slog.Info("link down", l.logAttrs("reason", reason, "was_up", wasUp, "age", time.Since(l.started).Round(time.Second).String(), "rx_bytes", l.rx.Load(), "tx_bytes", l.tx.Load())...)
+}
+
 func (l *Link) recordPong(nonce uint64, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if sent, ok := l.pending[nonce]; ok {
+		if l.lastPong.IsZero() && !l.options.Accepted {
+			defer slog.Info("link up", l.logAttrs("rtt_ms", now.Sub(sent).Milliseconds())...)
+		}
 		sample := now.Sub(sent)
 		if l.rtt == 0 {
 			l.rtt = sample
