@@ -148,7 +148,10 @@ type Link struct {
 	observedLocal                 string
 	lastPath                      time.Time
 	// Odd generations permit data; changing generations invalidates queued data.
-	dataGeneration  atomic.Uint64
+	dataGeneration atomic.Uint64
+	// loggedActive tracks selection for logs only. New Links start with an
+	// active data generation, so it cannot be derived from dataGeneration.
+	loggedActive    atomic.Bool
 	control         chan []byte
 	packets         chan []byte
 	ownedPackets    *packetbuf.Queue
@@ -255,6 +258,8 @@ func (l *Link) setActive(active bool) {
 	generation := l.dataGeneration.Load()
 	if (generation%2 == 1) != active {
 		l.dataGeneration.Add(1)
+	}
+	if l.loggedActive.Swap(active) != active {
 		if active {
 			slog.Info("link selected", l.logAttrs()...)
 		} else {
@@ -817,19 +822,24 @@ func (l *Link) logDown(reason string) {
 
 func (l *Link) recordPong(nonce uint64, now time.Time) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
-	if sent, ok := l.pending[nonce]; ok {
-		if l.lastPong.IsZero() && !l.options.Accepted {
-			defer slog.Info("link up", l.logAttrs("rtt_ms", now.Sub(sent).Milliseconds())...)
-		}
-		sample := now.Sub(sent)
-		if l.rtt == 0 {
-			l.rtt = sample
-		} else {
-			l.rtt = (l.rtt*4 + sample) / 5
-		}
-		l.lastPong, l.probeSince = now, time.Time{}
-		delete(l.pending, nonce)
+	sent, ok := l.pending[nonce]
+	if !ok {
+		l.mu.Unlock()
+		return
+	}
+	first := l.lastPong.IsZero() && !l.options.Accepted
+	sample := now.Sub(sent)
+	if l.rtt == 0 {
+		l.rtt = sample
+	} else {
+		l.rtt = (l.rtt*4 + sample) / 5
+	}
+	l.lastPong, l.probeSince = now, time.Time{}
+	delete(l.pending, nonce)
+	l.mu.Unlock()
+	// Log outside the lock so probing and selection are not delayed.
+	if first {
+		slog.Info("link up", l.logAttrs("rtt_ms", sample.Milliseconds())...)
 	}
 }
 
