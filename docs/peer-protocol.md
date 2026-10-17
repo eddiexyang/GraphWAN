@@ -262,6 +262,36 @@ control processing does not wait for TUN delivery. Stream writes have deadlines;
 transport failure closes that Link so the Edge can use a healthy standby. No
 unbounded application packet backlog or overlay data retransmission is added.
 
+### TCP stream identity and buffer lifetime
+
+Each Edge mux starts its even/odd stream-ID counter at a cryptographically
+random 63-bit position. A new Agent process or recreated Edge therefore avoids
+the deterministic ID reuse that collided with the surviving peer's live streams
+and ended-stream tombstones. Independent starting positions make collisions
+overwhelmingly unlikely; IDs remain sequential within that mux, and exhaustion
+rejects new opens instead of wrapping. Normal Link replacement preserves the
+mux and its retransmission state. This uses the existing uint64 wire ID and is
+compatible with older peers; the Agent opening streams must be upgraded to
+avoid its own reuse after restarting. It does not negotiate a peer restart or
+make existing TCP connections survive an Agent process restart.
+
+Streams retain unacknowledged frames for retransmission after a Link change.
+Access TCP reads use the existing bounded, preallocated batch (at most 16
+frames). After the access read releases its receive lock, reads smaller than
+one frame are copied into storage sized to their encoded bytes before being
+queued. Reads of at least one full frame retain the original batch without an
+extra copy. An idle access reader may still hold one working batch; small
+queued messages no longer retain one full batch each.
+
+The existing Edge maintenance loop, nominally every 250 ms, flushes pending
+cumulative receive acknowledgements and small receive-credit updates. Receipt
+and consumption are separate: even a stopped reader acknowledges received
+bytes so the sender can release its retransmission buffers, while only
+application reads advance the 32 MiB receive window. The immediate 256 KiB
+credit threshold, FIN acknowledgements and Link-change acknowledgements remain
+in use. Unchanged idle streams emit no periodic ACK. The wire format is
+unchanged; the receiving Agent needs the update for timely small-message ACKs.
+
 ## Link control inside the authenticated channel
 
 After Ready, the dialer sends a type-0 plaintext message containing a JSON

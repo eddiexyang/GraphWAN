@@ -2,6 +2,7 @@ package mesh
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -81,10 +82,16 @@ type mux struct {
 
 func newMux(g *group, even bool, handler func(*muxStream)) *mux {
 	m := &mux{g: g, even: even, handler: handler, ready: map[*link.Link]bool{}, streams: map[uint64]*muxStream{}, queued: map[*muxStream]bool{}, ended: map[uint64]time.Time{}}
-	if even {
-		m.next = 2
-	} else {
-		m.next = 1
+	// The peer's mux can outlive this Agent, retaining live stream IDs and
+	// tombstones across Link reconnections. A fresh random counter origin
+	// avoids deterministic reuse after an Agent restart or group recreation.
+	var seed [8]byte
+	for m.next == 0 {
+		rand.Read(seed[:])
+		m.next = binary.BigEndian.Uint64(seed[:]) &^ 1
+		if !even {
+			m.next |= 1
+		}
 	}
 	return m
 }
@@ -127,8 +134,15 @@ func (m *mux) Open(ctx context.Context) (*muxStream, error) {
 	if len(m.streams) >= muxMaxStreams {
 		return nil, errors.New("edge stream limit reached")
 	}
+	if m.next == 0 {
+		return nil, errors.New("edge stream IDs exhausted")
+	}
 	s := m.newStreamLocked(m.next)
-	m.next += 2
+	if m.next > ^uint64(0)-2 {
+		m.next = 0
+	} else {
+		m.next += 2
+	}
 	return s, nil
 }
 
@@ -229,6 +243,16 @@ func (m *mux) maintain() {
 	}
 	for _, s := range failed {
 		s.failLocked(errStreamReset)
+	}
+	// ACK receipt independently of application consumption. Small messages
+	// release retransmission storage even when the reader has stopped; only
+	// consumed bytes increase the receive window.
+	for _, s := range m.streams {
+		if s.received != s.ackReceived || s.consumed+muxWindow > s.advertised {
+			s.ackDue = true
+			m.enqueueLocked(s)
+			wake = m.current
+		}
 	}
 	m.mu.Unlock()
 	if wake != nil {
@@ -465,14 +489,15 @@ type muxStream struct {
 	writeClosed bool
 	finOffset   uint64
 
-	recv       [][]byte
-	recvBytes  int
-	received   uint64
-	consumed   uint64
-	advertised uint64
-	ackDue     bool
-	finRecv    bool
-	finAt      uint64
+	recv        [][]byte
+	recvBytes   int
+	received    uint64
+	ackReceived uint64
+	consumed    uint64
+	advertised  uint64
+	ackDue      bool
+	finRecv     bool
+	finAt       uint64
 
 	closed   bool
 	err      error
@@ -491,6 +516,7 @@ func (s *muxStream) ackFrameLocked() []byte {
 	binary.BigEndian.PutUint64(raw[10:18], received)
 	binary.BigEndian.PutUint64(raw[18:26], limit)
 	s.advertised = max(s.advertised, limit)
+	s.ackReceived = s.received
 	s.ackDue = false
 	return raw
 }
@@ -584,6 +610,14 @@ func (s *muxStream) reserve() (uint64, int, error) {
 // publish queues frames built outside the lock; writers are serialized, so
 // offsets stay contiguous while receivers and other streams proceed.
 func (s *muxStream) publish(b *frameBuilder) error {
+	// ReadInto has released the access TCP receive lock. Compact sparse reads
+	// here so small messages cannot pin a whole batch. Reads of at least one
+	// frame keep the original bulk allocation and copy path.
+	if b.bytes < muxMaxData && b.used < len(b.chunk) {
+		chunk := make([]byte, b.used)
+		copy(chunk, b.chunk[:b.used])
+		b.chunk = chunk
+	}
 	m := s.m
 	m.mu.Lock()
 	if s.err != nil {

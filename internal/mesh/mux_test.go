@@ -343,3 +343,182 @@ func TestMuxRequiresAcceptorSupport(t *testing.T) {
 		t.Fatal("stream message sent without acceptor support")
 	}
 }
+
+// Each ReadInto models one small access-stack read while the TCP connection
+// remains open. It deliberately never fills the mux batch.
+type sparseMuxReader struct {
+	payload []byte
+	reads   int
+}
+
+func (r *sparseMuxReader) Read([]byte) (int, error) { panic("ReadInto bypassed") }
+func (r *sparseMuxReader) ReadInto(w io.Writer) (int, error) {
+	if r.reads == 0 {
+		return 0, io.EOF
+	}
+	r.reads--
+	return w.Write(r.payload)
+}
+
+func TestMuxSparseBatchStorage(t *testing.T) {
+	p := newMuxPair(t)
+	s := p.a.newStreamLocked(2)
+	for _, size := range []int{1, 31, muxMaxData - 1, muxMaxData, muxMaxData + 7, 64 << 10, muxBurst * muxMaxData} {
+		b := newFrameBuilder(s.id, s.sendNext, muxBurst*muxMaxData)
+		payload := bytes.Repeat([]byte("x"), size)
+		b.Write(payload)
+		original := &b.chunk[0]
+		if err := s.publish(b); err != nil {
+			t.Fatal(err)
+		}
+		if size < muxMaxData && len(b.chunk) > 2*b.used {
+			t.Errorf("%d bytes retained a %d-byte batch", size, len(b.chunk))
+		}
+		if size >= muxMaxData && &b.chunk[0] != original {
+			t.Fatal("bulk read was copied")
+		}
+		var got []byte
+		for _, f := range b.frames {
+			got = append(got, f.raw[muxDataHeader:]...)
+		}
+		if !bytes.Equal(got, payload) {
+			t.Fatal("compaction changed payload")
+		}
+		p.a.receiveAck(s.id, s.sendNext, muxWindow)
+	}
+}
+
+func TestMuxSparseACKAndCredit(t *testing.T) {
+	p := newMuxPair(t)
+	s := p.a.newStreamLocked(2)
+	const reads = 72
+	payload := bytes.Repeat([]byte("x"), 31)
+	transfer := func(from, to *mux) int {
+		var dst [128][]byte
+		n := from.PullStream(nil, dst[:])
+		for _, raw := range dst[:n] {
+			if !to.ReceiveStream(nil, raw[1:]) {
+				t.Fatal("invalid frame")
+			}
+		}
+		return n
+	}
+	for cycle := range 8 {
+		if n, err := s.ReadFrom(&sparseMuxReader{payload, reads}); err != nil || n != reads*int64(len(payload)) {
+			t.Fatal(n, err)
+		}
+		if transfer(p.a, p.b) != reads {
+			t.Fatal("missing frames")
+		}
+		if cycle == 0 {
+			<-p.accepted
+		}
+		r := p.b.streams[s.id]
+		// A Link change replays the compacted, unacknowledged frames. The
+		// receiver must retain each byte once and acknowledge the same offset.
+		p.a.switchLocked(nil)
+		if transfer(p.a, p.b) != reads+1 {
+			t.Fatal("Link change did not resend data and receive state")
+		}
+		if r.recvBytes != reads*len(payload) || r.received != uint64((cycle+1)*reads*len(payload)) {
+			t.Fatal("Link change duplicated sparse messages")
+		}
+		before := s.peerLimit
+		p.b.maintain()
+		if transfer(p.b, p.a) != 1 || len(s.frames) != 0 {
+			t.Fatal("small unread messages were not acknowledged")
+		}
+		if s.peerLimit != before {
+			t.Fatal("unread bytes granted receive credit")
+		}
+		got := make([]byte, reads*len(payload))
+		if _, err := io.ReadFull(r, got); err != nil || !bytes.Equal(got, bytes.Repeat(payload, reads)) {
+			t.Fatal("payload changed", err)
+		}
+		p.b.maintain()
+		if transfer(p.b, p.a) != 1 || s.peerLimit != before+uint64(len(got)) {
+			t.Fatal("small reads did not reopen credit")
+		}
+		p.b.maintain()
+		if transfer(p.b, p.a) != 0 {
+			t.Fatal("idle stream emitted ACK")
+		}
+	}
+}
+
+func BenchmarkMuxBatchPublish(b *testing.B) {
+	for _, size := range []int{31, 64 << 10, muxBurst * muxMaxData} {
+		b.Run(fmt.Sprint(size), func(b *testing.B) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			m := newMux(&group{ctx: ctx}, true, nil)
+			s := m.newStreamLocked(2)
+			payload := bytes.Repeat([]byte("x"), size)
+			b.ReportAllocs()
+			b.SetBytes(int64(size))
+			for b.Loop() {
+				batch := newFrameBuilder(s.id, s.sendNext, muxBurst*muxMaxData)
+				batch.Write(payload)
+				if err := s.publish(batch); err != nil {
+					b.Fatal(err)
+				}
+				m.receiveAck(s.id, s.sendNext, s.sendNext+muxWindow)
+			}
+		})
+	}
+}
+
+// Keep the receiver alive across sender restarts, as happens when only one
+// production Agent is upgraded. Both live streams and tombstones survive.
+func TestMuxRestartKeepsNewStreamsDistinct(t *testing.T) {
+	for _, even := range []bool{false, true} {
+		t.Run(fmt.Sprint(even), func(t *testing.T) {
+			p := newMuxPair(t)
+			p.b = newMux(&group{ctx: p.ctx}, !even, func(s *muxStream) { p.accepted <- s })
+			seen := map[uint64]bool{}
+			for restart := range 16 {
+				fresh := newMux(&group{ctx: p.ctx}, even, nil)
+				// Open only needs a selected Link. Frames are delivered below
+				// synchronously so old receive state survives deterministically.
+				fresh.current = &link.Link{}
+				s, err := fresh.Open(p.ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if s.id == 0 || (s.id%2 == 0) != even || seen[s.id] {
+					t.Fatalf("restart %d reused or invalidated stream ID %d", restart, s.id)
+				}
+				seen[s.id] = true
+				payload := fmt.Sprintf("request after restart %d", restart)
+				if _, err := s.Write([]byte(payload)); err != nil {
+					t.Fatal(err)
+				}
+				if !p.b.ReceiveStream(nil, s.frames[0].raw[1:]) || len(p.accepted) != 1 {
+					t.Fatal("surviving peer rejected the new stream")
+				}
+				r := <-p.accepted
+				got := make([]byte, len(payload))
+				if _, err := io.ReadFull(r, got); err != nil || string(got) != payload {
+					t.Fatal("restart changed payload", err)
+				}
+				if restart%2 == 0 {
+					r.Close()
+				}
+				fresh.close()
+			}
+		})
+	}
+}
+
+func TestMuxStreamIDExhaustion(t *testing.T) {
+	p := newMuxPair(t)
+	p.a.current = &link.Link{}
+	p.a.next = ^uint64(0) - 1
+	s, err := p.a.Open(p.ctx)
+	if err != nil || s.id != ^uint64(0)-1 {
+		t.Fatal("last ID was not usable", err)
+	}
+	if _, err := p.a.Open(p.ctx); err == nil {
+		t.Fatal("stream ID wrapped around")
+	}
+}
