@@ -14,21 +14,19 @@ type LinkStateHandler struct {
 
 // EnableLinkState is called before this Mesh is published to the dataplane.
 func (m *Mesh) EnableLinkState(h LinkStateHandler) {
-	m.mu.Lock()
-	m.linkState = &h
-	m.mu.Unlock()
+	m.linkState.Store(&h)
 }
 
 func (m *Mesh) linkStateEnabled() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.linkState != nil && !m.closed
+	return m.linkState.Load() != nil && !m.closed
 }
 
+// linkStateHandler must not take m.mu: groups call it while holding their own
+// lock, and Mesh.Apply takes group locks while holding m.mu.
 func (m *Mesh) linkStateHandler() *LinkStateHandler {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.linkState
+	return m.linkState.Load()
 }
 
 // LinkStateReady may run while the group lock is held during registration,

@@ -39,7 +39,7 @@ type policy struct {
 }
 type Mesh struct {
 	streamHandler  StreamHandler
-	linkState      *LinkStateHandler
+	linkState      atomic.Pointer[LinkStateHandler]
 	compact        link.CompactHeader
 	extensionMu    sync.Mutex
 	extensionNext  time.Time
