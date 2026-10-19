@@ -183,6 +183,7 @@ func (s State) Clone() State {
 		n.GroupLinks = append([]GroupLink(nil), n.GroupLinks...)
 		for j := range n.GroupLinks {
 			n.GroupLinks[j].Transports = append([]Transport(nil), n.GroupLinks[j].Transports...)
+			n.GroupLinks[j].Overrides = cloneOverrides(n.GroupLinks[j].Overrides)
 		}
 		n.Groups = append([]FullMeshGroup(nil), n.Groups...)
 		for j := range n.Groups {
@@ -192,6 +193,7 @@ func (s State) Clone() State {
 			}
 			n.Groups[j].Members = append([]ID(nil), n.Groups[j].Members...)
 			n.Groups[j].Transports = append([]Transport(nil), n.Groups[j].Transports...)
+			n.Groups[j].Overrides = cloneOverrides(n.Groups[j].Overrides)
 		}
 		n.Nodes = append([]Node{}, n.Nodes...)
 		for j := range n.Nodes {

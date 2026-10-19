@@ -1,7 +1,13 @@
 import { useState } from 'react'
 import { Modal, Field, ErrorBox } from './components'
 import { newID, transports, type Edge, type Network } from './model'
-import { coveredEdges, topologyError, type FullMeshGroup, type GroupLink } from './groups'
+import {
+  coveredEdges,
+  pruneGroups,
+  topologyError,
+  type FullMeshGroup,
+  type GroupLink,
+} from './groups'
 
 export function ConnectionPolicy({
   value,
@@ -64,7 +70,8 @@ export function ConnectionPolicy({
   )
 }
 export type GroupEditorTarget =
-  { kind: 'group'; id?: string } | { kind: 'link'; id?: string; node?: string; group?: string }
+  | { kind: 'group'; id?: string }
+  | { kind: 'link'; id?: string; node?: string; sourceGroup?: string; group?: string }
 export default function GroupEditor({
   network,
   target,
@@ -94,7 +101,9 @@ export default function GroupEditor({
     () =>
       network.group_links?.find((l) => l.id === target.id) ?? {
         id: newID(),
-        node: target.kind === 'link' ? (target.node ?? '') : '',
+        ...(target.kind === 'link' && target.sourceGroup
+          ? { source_group: target.sourceGroup }
+          : { node: target.kind === 'link' ? (target.node ?? '') : '' }),
         group: target.kind === 'link' ? (target.group ?? '') : '',
         weight: 10,
         enabled: true,
@@ -113,12 +122,14 @@ export default function GroupEditor({
     }
     if (
       target.kind === 'link' &&
-      (!network.nodes.some((n) => n.id === link.node && !n.wireguard) ||
+      ((link.source_group
+        ? !network.groups?.some((g) => g.id === link.source_group)
+        : !network.nodes.some((n) => n.id === link.node && !n.wireguard)) ||
         !Number.isInteger(link.weight) ||
         link.weight < 1 ||
         link.weight > 4294967295)
     ) {
-      setError('Choose a node and a valid positive routing weight.')
+      setError('Choose a node or group and a valid positive routing weight.')
       return
     }
     const weight = value.weight ?? 1
@@ -131,6 +142,8 @@ export default function GroupEditor({
       updated.groups = [...(network.groups ?? []).filter((g) => g.id !== group.id), group]
     else
       updated.group_links = [...(network.group_links ?? []).filter((l) => l.id !== link.id), link]
+    // Membership edits drop overrides for pairs that no longer exist.
+    updated = pruneGroups(updated)
     // Bound expansion before calculating conflicts for large drafts.
     const count = (updated.groups ?? []).reduce(
       (n, g) => n + (g.members.length * (g.members.length - 1)) / 2,
@@ -159,7 +172,16 @@ export default function GroupEditor({
     close()
   }
   return (
-    <Modal title={target.kind === 'group' ? 'Full mesh group' : 'Node-to-group link'} close={close}>
+    <Modal
+      title={
+        target.kind === 'group'
+          ? 'Full mesh group'
+          : link.source_group
+            ? 'Group-to-group link'
+            : 'Node-to-group link'
+      }
+      close={close}
+    >
       <form
         onSubmit={(e) => {
           e.preventDefault()
@@ -224,20 +246,41 @@ export default function GroupEditor({
           </>
         ) : (
           <>
-            <Field label="Node">
+            <Field label="From">
               <select
                 required
-                value={link.node}
-                onChange={(e) => setLink({ ...link, node: e.target.value })}
+                value={
+                  link.source_group
+                    ? `group:${link.source_group}`
+                    : link.node
+                      ? `node:${link.node}`
+                      : ''
+                }
+                onChange={(e) => {
+                  const [kind, id] = e.target.value.split(':')
+                  const { node: _node, source_group: _group, ...rest } = link
+                  setLink(kind === 'group' ? { ...rest, source_group: id } : { ...rest, node: id })
+                }}
               >
-                <option value="">Choose node</option>
-                {network.nodes
-                  .filter((n) => !n.wireguard)
-                  .map((n) => (
-                    <option key={n.id} value={n.id}>
-                      {n.name}
-                    </option>
-                  ))}
+                <option value="">Choose node or group</option>
+                {!!network.groups?.length && (
+                  <optgroup label="Groups">
+                    {network.groups.map((g) => (
+                      <option key={g.id} value={`group:${g.id}`} disabled={g.id === link.group}>
+                        {g.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                <optgroup label="Nodes">
+                  {network.nodes
+                    .filter((n) => !n.wireguard)
+                    .map((n) => (
+                      <option key={n.id} value={`node:${n.id}`}>
+                        {n.name}
+                      </option>
+                    ))}
+                </optgroup>
               </select>
             </Field>
             <Field label="Full mesh group">
@@ -248,7 +291,13 @@ export default function GroupEditor({
               >
                 <option value="">Choose group</option>
                 {network.groups?.map((g) => (
-                  <option key={g.id} value={g.id} disabled={g.members.includes(link.node)}>
+                  <option
+                    key={g.id}
+                    value={g.id}
+                    disabled={
+                      g.id === link.source_group || (!!link.node && g.members.includes(link.node))
+                    }
+                  >
                     {g.name}
                   </option>
                 ))}

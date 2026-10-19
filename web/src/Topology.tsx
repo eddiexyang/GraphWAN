@@ -3,6 +3,10 @@ import {
   effectiveEdges,
   internalEdges,
   childEdges,
+  linkSource,
+  linkSources,
+  setOverride,
+  type EdgeOwner,
   aggregate,
   individualConnection,
 } from './groups'
@@ -209,14 +213,14 @@ export default function Topology({
     scopeGroup?.members ??
       (scopeLink
         ? [
-            scopeLink.node,
+            ...linkSources(network, scopeLink),
             ...(network.groups?.find((g) => g.id === scopeLink.group)?.members ?? []),
           ]
         : network.nodes.map((n) => n.id)),
   )
   const displayEdges = scopedEdges ?? [
     ...network.edges,
-    ...(network.group_links ?? []).map((l) => ({ ...l, a: l.node, b: l.group })),
+    ...(network.group_links ?? []).map((l) => ({ ...l, a: linkSource(l), b: l.group })),
   ]
   const globeNetwork = useMemo(
     () => ({ ...network, groups: [], group_links: [], edges: allEdges }),
@@ -263,7 +267,12 @@ export default function Topology({
   }, [editing, network.id])
   const connect = (source: string, target: string) => {
     if (!editing) return
-    const group = network.groups?.find((g) => g.id === source || g.id === target)
+    const groups = network.groups?.filter((g) => g.id === source || g.id === target) ?? []
+    if (groups.length === 2) {
+      setGroupEditor({ kind: 'link', sourceGroup: source, group: target })
+      return
+    }
+    const group = groups[0]
     if (group) {
       const node = source === group.id ? target : source
       if (!group.members.includes(node) && network.nodes.some((n) => n.id === node && !n.wireguard))
@@ -281,12 +290,15 @@ export default function Topology({
   const validConnection = ({ source, target }: { source: string | null; target: string | null }) =>
     !!source &&
     !!target &&
-    (network.groups?.some(
-      (g) =>
-        (g.id === source || g.id === target) &&
-        !g.members.includes(g.id === source ? target : source) &&
-        network.nodes.some((n) => n.id === (g.id === source ? target : source) && !n.wireguard),
-    ) ||
+    ((source !== target &&
+      !!network.groups?.some((g) => g.id === source) &&
+      !!network.groups?.some((g) => g.id === target)) ||
+      network.groups?.some(
+        (g) =>
+          (g.id === source || g.id === target) &&
+          !g.members.includes(g.id === source ? target : source) &&
+          network.nodes.some((n) => n.id === (g.id === source ? target : source) && !n.wireguard),
+      ) ||
       !!createEdge({ ...network, group_links: [] }, source, target))
 
   const path = useMemo(
@@ -504,10 +516,19 @@ export default function Topology({
   const node =
     selection?.type === 'node' ? network.nodes.find((n) => n.id === selection.id) : undefined
   const edge = selection?.type === 'edge' ? allEdges.find((e) => e.id === selection.id) : undefined
-  const derivedOwner = edge
+  const derivedOwner: EdgeOwner | undefined = edge
     ? (network.groups?.find((g) => internalEdges(g).some((e) => e.id === edge.id)) ??
       network.group_links?.find((l) => childEdges(network, l).some((e) => e.id === edge.id)))
     : undefined
+  const sharedEdge =
+    derivedOwner &&
+    ('members' in derivedOwner
+      ? internalEdges(derivedOwner, true)
+      : childEdges(network, derivedOwner, true)
+    ).find((e) => e.id === edge!.id)
+  const overridden = !!derivedOwner?.overrides?.some(
+    (o) => (o.a === edge!.a && o.b === edge!.b) || (o.a === edge!.b && o.b === edge!.a),
+  )
   const scopeSummary = scopedEdges
     ? aggregate(network, scopedEdges, statuses, rates, live)
     : undefined
@@ -525,12 +546,29 @@ export default function Topology({
     viewStyle === 'globe' || selection?.type === 'node',
   )
   const nodeGeography = node ? geography.data?.agents[node.agent_id] : undefined
+  // Derived edges are stored as per-pair overrides on their group or group link.
+  const updateOwner = (owner: EdgeOwner, overrides: EdgeOwner['overrides']) =>
+    change(
+      'members' in owner
+        ? {
+            ...network,
+            groups: network.groups?.map((g) => (g.id === owner.id ? { ...g, overrides } : g)),
+          }
+        : {
+            ...network,
+            group_links: network.group_links?.map((l) =>
+              l.id === owner.id ? { ...l, overrides } : l,
+            ),
+          },
+    )
   const updateEdge = (patch: Partial<Edge>) =>
     edge &&
-    change({
-      ...network,
-      edges: network.edges.map((e) => (e.id === edge.id ? { ...e, ...patch } : e)),
-    })
+    (derivedOwner && sharedEdge
+      ? updateOwner(derivedOwner, setOverride(derivedOwner, sharedEdge, { ...edge, ...patch }))
+      : change({
+          ...network,
+          edges: network.edges.map((e) => (e.id === edge.id ? { ...e, ...patch } : e)),
+        }))
   return (
     <div className="workspace">
       {groupEditor && (
@@ -580,7 +618,7 @@ export default function Topology({
                 disabled={!network.groups?.length}
                 onClick={() => setGroupEditor({ kind: 'link' })}
               >
-                Node → group
+                Group link
               </button>
               <button onClick={addNode}>
                 <Plus size={14} />
@@ -843,7 +881,9 @@ export default function Topology({
                         ? {
                             ...network,
                             groups: network.groups?.filter((g) => g.id !== scope.id),
-                            group_links: network.group_links?.filter((l) => l.group !== scope.id),
+                            group_links: network.group_links?.filter(
+                              (l) => l.group !== scope.id && l.source_group !== scope.id,
+                            ),
                           }
                         : {
                             ...network,
@@ -1221,7 +1261,23 @@ export default function Topology({
                 Shared {'members' in derivedOwner ? 'group' : 'link'} settings
               </button>
             )}
-            <fieldset disabled={!editing || !!derivedOwner}>
+            {derivedOwner && (
+              <p className="mesh-note">
+                {overridden
+                  ? 'This edge overrides the shared settings.'
+                  : 'This edge inherits the shared settings; changes here apply only to it.'}
+              </p>
+            )}
+            {editing && derivedOwner && sharedEdge && overridden && (
+              <button
+                onClick={() =>
+                  updateOwner(derivedOwner, setOverride(derivedOwner, sharedEdge, sharedEdge))
+                }
+              >
+                Reset to shared settings
+              </button>
+            )}
+            <fieldset disabled={!editing}>
               <label className="check">
                 <input
                   type="checkbox"
@@ -1435,13 +1491,15 @@ export default function Topology({
             )}
             {!!network.group_links?.length && (
               <>
-                <h4>Node-to-group links</h4>
+                <h4>Group links</h4>
                 <div className="object-list">
                   {network.group_links.map((l) => (
                     <button key={l.id} onClick={() => enter('link', l.id)}>
                       <span>
-                        {network.nodes.find((n) => n.id === l.node)?.name} →{' '}
-                        {network.groups?.find((g) => g.id === l.group)?.name}
+                        {l.source_group
+                          ? network.groups?.find((g) => g.id === l.source_group)?.name
+                          : network.nodes.find((n) => n.id === l.node)?.name}{' '}
+                        → {network.groups?.find((g) => g.id === l.group)?.name}
                         <small>
                           {aggregate(network, childEdges(network, l), statuses, rates, live).label}
                         </small>

@@ -135,3 +135,112 @@ func TestGroupedTopologyRejectsConflicts(t *testing.T) {
 		})
 	}
 }
+
+func groupPairFixture() model.State {
+	s := meshFixture()
+	n := &s.Networks[0]
+	n.Groups = append(n.Groups, model.FullMeshGroup{ID: testutil.ID(103), Name: "Edge", Members: []model.ID{n.Nodes[3].ID, n.Nodes[4].ID}, Transports: []model.Transport{model.UDP}, Methods: model.ConnectionMethods{IPv4Direct: true}})
+	n.GroupLinks = []model.GroupLink{{ID: testutil.ID(104), SourceGroup: n.Groups[1].ID, Group: n.Groups[0].ID, Weight: 5, Enabled: true, Transports: []model.Transport{model.TCP}, Methods: model.ConnectionMethods{IPv4Direct: true}}}
+	return s
+}
+
+func TestGroupToGroupLinkAndOverrides(t *testing.T) {
+	s := groupPairFixture()
+	n := &s.Networks[0]
+	expensive := uint32(1000)
+	disabled := false
+	n.Groups[0].Overrides = []model.EdgeOverride{{A: n.Nodes[1].ID, B: n.Nodes[0].ID, Weight: &expensive}}
+	n.GroupLinks[0].Overrides = []model.EdgeOverride{{A: n.Nodes[2].ID, B: n.Nodes[4].ID, Enabled: &disabled, Transports: []model.Transport{model.QUIC}}}
+	if err := s.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	// 3 + 1 internal edges and 3×2 group-to-group children.
+	edges := n.EffectiveEdges()
+	if len(edges) != 10 {
+		t.Fatalf("expected 10 edges, got %d", len(edges))
+	}
+	for _, e := range edges {
+		switch e.ID {
+		case model.GroupEdgeID(n.Groups[0].ID, n.Nodes[0].ID, n.Nodes[1].ID):
+			if e.Weight != 1000 || !e.Enabled || e.Transports[0] != model.UDP {
+				t.Fatalf("internal override not applied: %+v", e)
+			}
+		case model.GroupEdgeID(n.GroupLinks[0].ID, n.Nodes[4].ID, n.Nodes[2].ID):
+			if e.Enabled || e.Weight != 5 || !slices.Equal(e.Transports, []model.Transport{model.QUIC}) {
+				t.Fatalf("link override not applied: %+v", e)
+			}
+		}
+	}
+	for _, agent := range s.Agents {
+		snapshot, err := Compile(s, agent.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = snapshot.Validate(agent.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A reaches B through C (1+1) rather than over the expensive direct edge.
+	snap, err := Compile(s, s.Agents[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(snap.Networks[0].Routes, func(r model.Route) bool {
+		return r.Destination == n.Nodes[1].ID && r.Cost == 2 && r.NextHop == n.Nodes[2].ID
+	}) {
+		t.Fatalf("expensive override ignored: %+v", snap.Networks[0].Routes)
+	}
+	clone := s.Clone()
+	*clone.Networks[0].Groups[0].Overrides[0].Weight = 1
+	clone.Networks[0].GroupLinks[0].Overrides[0].Transports[0] = model.TCP
+	if *n.Groups[0].Overrides[0].Weight != 1000 || n.GroupLinks[0].Overrides[0].Transports[0] != model.QUIC {
+		t.Fatal("clone aliases overrides")
+	}
+	clone = s.Clone()
+	clone.Networks[0].Nodes = slices.Delete(clone.Networks[0].Nodes, 2, 3)
+	clone.Networks[0].PruneGroups()
+	if len(clone.Networks[0].GroupLinks[0].Overrides) != 0 || clone.Validate() != nil {
+		t.Fatal("stale override survived member deletion")
+	}
+	clone.Networks[0].Nodes = clone.Networks[0].Nodes[:2]
+	clone.Networks[0].PruneGroups()
+	if len(clone.Networks[0].GroupLinks) != 0 {
+		t.Fatal("group-to-group link survived its source group")
+	}
+}
+
+func TestGroupToGroupRejectsConflicts(t *testing.T) {
+	one := uint32(1)
+	cases := map[string]func(*model.Network){
+		"self link":      func(n *model.Network) { n.GroupLinks[0].SourceGroup = n.GroupLinks[0].Group },
+		"node and group": func(n *model.Network) { n.GroupLinks[0].Node = n.Nodes[3].ID },
+		"missing source": func(n *model.Network) { n.GroupLinks[0].SourceGroup = testutil.ID(999) },
+		"reverse duplicate": func(n *model.Network) {
+			l := n.GroupLinks[0]
+			l.ID, l.SourceGroup, l.Group = testutil.ID(105), l.Group, l.SourceGroup
+			n.GroupLinks = append(n.GroupLinks, l)
+		},
+		"overlapping node link": func(n *model.Network) {
+			n.GroupLinks = append(n.GroupLinks, model.GroupLink{ID: testutil.ID(105), Node: n.Nodes[3].ID, Group: n.Groups[0].ID, Weight: 1, Enabled: true, Transports: []model.Transport{model.UDP}, Methods: model.ConnectionMethods{IPv4Direct: true}})
+		},
+		"foreign override": func(n *model.Network) {
+			n.Groups[0].Overrides = []model.EdgeOverride{{A: n.Nodes[0].ID, B: n.Nodes[3].ID, Weight: &one}}
+		},
+		"duplicate override": func(n *model.Network) {
+			o := model.EdgeOverride{A: n.Nodes[0].ID, B: n.Nodes[3].ID, Weight: &one}
+			n.GroupLinks[0].Overrides = []model.EdgeOverride{o, {A: o.B, B: o.A}}
+		},
+		"invalid override value": func(n *model.Network) {
+			n.GroupLinks[0].Overrides = []model.EdgeOverride{{A: n.Nodes[0].ID, B: n.Nodes[3].ID, Transports: []model.Transport{model.WireGuard}}}
+		},
+	}
+	for name, change := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := groupPairFixture()
+			change(&s.Networks[0])
+			if s.Validate() == nil {
+				t.Fatal("accepted invalid topology")
+			}
+		})
+	}
+}

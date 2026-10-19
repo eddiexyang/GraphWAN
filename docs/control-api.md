@@ -429,18 +429,36 @@ with ordinary configuration and obey the same revision checks. A group has:
 }
 ```
 
-A `group_links` entry has `id`, `node` (an external regular node ID), `group`
-(group ID), `weight`, `enabled`, `transports` and `methods`. The methods also
+A `group_links` entry has `id`, either `node` (an external regular node ID) or
+`source_group` (another group ID), `group` (target group ID), `weight`,
+`enabled`, `transports` and `methods`. A node link expands to one edge per
+target member; a group-to-group link expands to every source × target member
+pair. The methods also
 accept `hole_punch_extension`, which requires `hole_punch`. Both group types
 inherit Network encryption. Internal mesh edges are always enabled and share the group's optional `weight`
 (1–4294967295, default 1 when omitted).
 
+Groups and group links accept optional `overrides`, one per expanded pair:
+
+```json
+{"a": "00000000000000000000000000000020", "b": "00000000000000000000000000000021", "weight": 1000}
+```
+
+`a`/`b` are unordered. `weight`, `enabled`, `transports`, `methods` and
+`preferred_candidate` are each optional; an omitted field inherits the owner's
+shared value, so later shared changes still reach the pair. The expanded edge
+keeps its derived ID and is validated like an explicit edge. An override must
+name a pair its owner expands, and each pair may be overridden once.
+
 Groups require at least two regular nodes; membership cannot overlap. Group links
-cannot point back into their own group. Validation rejects all duplicate expanded
+cannot point back into their own group, and two groups may be linked once in
+either direction. A membership change that removes an overridden pair must drop
+that override in the same write. Validation rejects all duplicate expanded
 node pairs, including explicit edges that overlap a group or aggregate, even when
 disabled. API clients must remove conflicting edges in the same Network write;
 the server does not silently discard them. A dissolved group's aggregate links
-must also be removed. Agent deletion prunes memberships and orphaned group links.
+must also be removed. Agent deletion prunes memberships, orphaned group links and
+overrides naming the deleted node.
 
 `edges` contains only explicit edges. Derived edge IDs in snapshots and telemetry
 are the first 16 bytes of SHA-256, lowercase hex, of the UTF-8 string

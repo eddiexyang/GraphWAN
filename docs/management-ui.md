@@ -147,7 +147,7 @@ provides the same controls. Three voting members are needed to keep configuratio
 writes available after one fails. Agent connections and data forwarding remain
 available without write quorum.
 
-## Full mesh groups and node-to-group links
+## Full mesh groups and group links
 
 In a Network's **Edit** mode, choose **Add group**, select at least two regular
 nodes, and choose a shared routing weight, transports and connection methods.
@@ -162,16 +162,22 @@ whole network into actual node-to-node edges, including internal mesh edges and
 aggregate children. It shows no group regions or edge information labels; click
 a node or edge to inspect its details.
 
-Use **Node → group**, or drag a connection between a regular node and a group
-boundary, to create an aggregate link. Its weight, enabled state, transports and
-connection methods apply to every child connection. Click the aggregate edge to
-view its children individually. The external node cannot belong to the target
-group. Group-to-group links are not supported.
+Use **Group link**, or drag a connection from a regular node or group boundary to
+another group boundary, to create an aggregate link. A node link connects the
+node to every member; a group-to-group link connects every member pair across the
+two groups. Its weight, enabled state, transports and connection methods apply to
+every child connection. Click the aggregate edge to view its children
+individually. The external node cannot belong to the target group, and two groups
+can be linked only once.
 
 Aggregate links and individual edges to the same members are mutually exclusive.
 The editor asks before replacing conflicting individual edges with shared policy,
-or replacing an aggregate with one individual edge. Shared edges cannot be edited
-or removed individually: open their shared settings instead. All changes remain a
+or replacing an aggregate with one individual edge. Selecting a shared edge (a group's
+internal edge or an aggregate child) lets you edit its weight, enabled state,
+transports, connection methods and preferred path for that pair only, e.g. to make
+every edge touching one expensive edge router costlier. Fields left equal to the
+shared value keep inheriting it; **Reset to shared settings** drops the override.
+Shared edges cannot be removed individually; disable them instead. All changes remain a
 draft until **Save changes**. Membership changes automatically add/remove derived
 edges; dissolving a group removes its internal edges and aggregate links, while
 preserving its nodes and unrelated individual edges. Removing a node prunes its
