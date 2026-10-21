@@ -123,7 +123,8 @@ func (c *Client) targets(reg Registration) []controlTarget {
 		}
 	}
 	if len(preferred) == 0 {
-		if reg.Directory == nil {
+		// A gateway entrance presents its own public certificate, not a Server identity.
+		if reg.Directory == nil || kind == "https" {
 			preferred = append(preferred, controlTarget{key: c.configuredServer, origin: c.configuredServer, transport: kind})
 		} else {
 			// The new entrance may belong to any admitted Server. Each attempt

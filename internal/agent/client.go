@@ -40,9 +40,11 @@ type Options struct {
 	EnrollmentToken string
 	// Roots authenticates the server before any enrollment token is sent. Nil
 	// uses system roots; callers must explicitly add a self-hosted controller CA.
-	Roots   *x509.CertPool
-	Version string
-	Logger  *slog.Logger
+	Roots *x509.CertPool
+	// GatewayRoots authenticates an "https" gateway entrance. Nil uses system roots.
+	GatewayRoots *x509.CertPool
+	Version      string
+	Logger       *slog.Logger
 }
 
 type Client struct {
@@ -56,6 +58,7 @@ type Client struct {
 	failedTargets       map[string]bool
 	http                *http.Client
 	transport           *http.Transport
+	signer              *challengeSigner
 	mu                  sync.Mutex
 	endpoints           []model.Endpoint
 	endpointsSet        bool
@@ -114,7 +117,11 @@ func NewClient(cache *Cache, runtime Runtime, options Options) (*Client, error) 
 	if len(options.Version) > 128 {
 		return nil, errors.New("version too long")
 	}
-	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: options.Roots, MinVersion: tls.VersionTLS13}, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 15 * time.Second, MaxIdleConnsPerHost: 2}
+	roots := options.Roots
+	if options.ServerTransport == "https" {
+		roots = options.GatewayRoots
+	}
+	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 15 * time.Second, MaxIdleConnsPerHost: 2}
 	transport.DialContext = controltransport.DialContext(options.ServerTransport, options.Roots)
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	last, _ := cache.lastServer()
@@ -138,7 +145,13 @@ func (c *Client) Report() model.AgentReport {
 func (c *Client) updateHTTP() *http.Client {
 	transport := c.transport.Clone()
 	transport.ResponseHeaderTimeout = 20 * time.Minute // a cold Server cache downloads before returning headers
-	return &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, Timeout: 20 * time.Minute}
+	return &http.Client{Transport: c.roundTripper(transport), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, Timeout: 20 * time.Minute}
+}
+func (c *Client) roundTripper(transport *http.Transport) http.RoundTripper {
+	if c.signer == nil {
+		return transport
+	}
+	return &challengeSigner{base: transport, id: c.signer.id, key: c.signer.key}
 }
 
 // SetEndpoints replaces the discovered set. Manual endpoints come exclusively
@@ -581,8 +594,16 @@ func (c *Client) selectTarget() (controlTarget, error) {
 		roots.AppendCertsFromPEM(reg.CA)
 	}
 	c.transport.CloseIdleConnections()
-	c.transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, Certificates: []tls.Certificate{cert}, ServerName: selected.tlsName, MinVersion: tls.VersionTLS13}, DialContext: controltransport.DialContext(selected.transport, roots, selected.tlsName), TLSHandshakeTimeout: 3 * time.Second, ResponseHeaderTimeout: 4 * time.Second, MaxIdleConnsPerHost: 2}
-	c.http.Transport = c.transport
+	c.signer = nil
+	if selected.transport == "https" {
+		// The gateway terminates TLS with a public certificate (system roots), so
+		// the Agent proves its identity per request with a signed challenge.
+		c.transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: c.options.GatewayRoots, MinVersion: tls.VersionTLS13}, DialContext: controltransport.DialContext(selected.transport, nil), TLSHandshakeTimeout: 3 * time.Second, ResponseHeaderTimeout: 4 * time.Second, MaxIdleConnsPerHost: 2}
+		c.signer = &challengeSigner{id: reg.AgentID, key: c.cache.PrivateKey()}
+	} else {
+		c.transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, Certificates: []tls.Certificate{cert}, ServerName: selected.tlsName, MinVersion: tls.VersionTLS13}, DialContext: controltransport.DialContext(selected.transport, roots, selected.tlsName), TLSHandshakeTimeout: 3 * time.Second, ResponseHeaderTimeout: 4 * time.Second, MaxIdleConnsPerHost: 2}
+	}
+	c.http.Transport = c.roundTripper(c.transport)
 	c.server = selected.origin
 	return *selected, nil
 }

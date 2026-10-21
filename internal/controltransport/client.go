@@ -20,10 +20,10 @@ import (
 
 func Validate(kind string) error {
 	switch kind {
-	case "", "tcp", "websocket", "grpc", "wss":
+	case "", "tcp", "websocket", "grpc", "wss", "https":
 		return nil
 	default:
-		return fmt.Errorf("unsupported server transport %q: choose tcp, websocket, grpc or wss", kind)
+		return fmt.Errorf("unsupported server transport %q: choose tcp, websocket, grpc, wss or https", kind)
 	}
 }
 
@@ -36,7 +36,7 @@ func DialContext(kind string, roots *x509.CertPool, serverNames ...string) func(
 			return nil, err
 		}
 		switch kind {
-		case "", "tcp":
+		case "", "tcp", "https":
 			return transport.DialTCP(ctx, &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}, network, addr)
 		case "grpc":
 			return dialGRPC(ctx, addr)

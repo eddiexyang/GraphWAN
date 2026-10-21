@@ -31,18 +31,12 @@ func (s *Server) notify() {
 	}
 }
 
+// authenticatedAgent accepts a verified client certificate on direct TLS, or a
+// signed challenge on plaintext forwarded by a TLS-terminating gateway.
 func (s *Server) authenticatedAgent(r *http.Request) (model.ID, error) {
-	if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.PeerCertificates) == 0 {
-		return "", errors.New("client certificate required")
-	}
-	cert := r.TLS.PeerCertificates[0]
-	id := model.ID(cert.Subject.CommonName)
-	if err := id.Validate(); err != nil {
+	id, pub, err := s.requestAgent(r)
+	if err != nil {
 		return "", err
-	}
-	pub, ok := cert.PublicKey.(ed25519.PublicKey)
-	if !ok {
-		return "", errors.New("invalid certificate key")
 	}
 	state, err := s.db.Read()
 	if err != nil {
@@ -54,6 +48,25 @@ func (s *Server) authenticatedAgent(r *http.Request) (model.ID, error) {
 		}
 	}
 	return "", errors.New("unknown or revoked agent")
+}
+
+func (s *Server) requestAgent(r *http.Request) (model.ID, ed25519.PublicKey, error) {
+	if r.TLS == nil {
+		return s.signedAgent(r)
+	}
+	if len(r.TLS.VerifiedChains) == 0 || len(r.TLS.PeerCertificates) == 0 {
+		return "", nil, errors.New("client certificate required")
+	}
+	cert := r.TLS.PeerCertificates[0]
+	id := model.ID(cert.Subject.CommonName)
+	if err := id.Validate(); err != nil {
+		return "", nil, err
+	}
+	pub, ok := cert.PublicKey.(ed25519.PublicKey)
+	if !ok {
+		return "", nil, errors.New("invalid certificate key")
+	}
+	return id, pub, nil
 }
 
 func (s *Server) agentControl(w http.ResponseWriter, r *http.Request) {

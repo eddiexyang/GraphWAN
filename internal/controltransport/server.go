@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/eWloYW8/GraphWAN/internal/model"
 	"github.com/eWloYW8/GraphWAN/internal/transport"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -55,7 +56,7 @@ func NewServer(listener net.Listener, handler http.Handler, config *tls.Config) 
 				return
 			}
 			s.grpc.ServeHTTP(w, r)
-		case r.TLS != nil || strings.HasPrefix(r.URL.Path, "/assets/"):
+		case r.TLS != nil || plainPath(r.URL.Path):
 			handler.ServeHTTP(w, r)
 		default:
 			http.Error(w, "HTTPS required", http.StatusUpgradeRequired)
@@ -73,6 +74,17 @@ func NewServer(listener net.Listener, handler http.Handler, config *tls.Config) 
 	s.innerHTTP.Protocols = new(http.Protocols)
 	s.innerHTTP.Protocols.SetHTTP1(true)
 	return s
+}
+
+// plainPath lists what a TLS-terminating gateway may forward in plaintext:
+// public assets, token enrollment and Agent routes that then require a signed
+// challenge. Management APIs stay TLS-only.
+func plainPath(path string) bool {
+	switch path {
+	case "/api/v1/enroll", "/api/v1/agent/control", model.AgentChallengePath:
+		return true
+	}
+	return strings.HasPrefix(path, "/assets/") || strings.HasPrefix(path, "/api/v1/agent/update/")
 }
 
 func (s *Server) track(c net.Conn) bool {

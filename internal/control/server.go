@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/eWloYW8/GraphWAN/internal/cluster"
@@ -50,6 +51,8 @@ type Server struct {
 	ca           *pki.Authority
 	log          *slog.Logger
 	mux          *http.ServeMux
+	challengeMu  sync.Mutex
+	challenges   map[string]time.Time
 }
 type Options struct {
 	Updater         SoftwareUpdater
@@ -79,7 +82,7 @@ func New(db *store.Store, options Options) (*Server, error) {
 		reload:   make(chan struct{}), db: db, auth: auth, ca: ca, log: options.Logger, mux: http.NewServeMux(),
 		done: make(chan struct{}), eventClients: map[[32]byte]int{},
 		streams: map[model.ID]*websocket.Conn{}, watchers: map[chan struct{}]bool{},
-		statuses: map[model.ID]model.AgentStatus{},
+		statuses: map[model.ID]model.AgentStatus{}, challenges: map[string]time.Time{},
 	}
 	s.mux.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		if s.cluster != nil && !s.cluster.Ready() {
@@ -115,6 +118,7 @@ func New(db *store.Store, options Options) (*Server, error) {
 	s.mux.HandleFunc("POST /api/v1/enrollment-tokens", auth.require(s.createEnrollmentToken))
 	s.mux.HandleFunc("POST /api/v1/enroll", s.enroll)
 	s.mux.HandleFunc("GET /api/v1/agent/control", s.agentControl)
+	s.mux.HandleFunc("GET "+model.AgentChallengePath, s.agentChallenge)
 	s.mux.HandleFunc("GET /api/v1/telemetry", auth.require(s.getTelemetry))
 	s.mux.HandleFunc("GET /api/v1/events", auth.require(s.events))
 	s.mux.Handle("GET /", webui.Handler())

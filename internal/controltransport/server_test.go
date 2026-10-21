@@ -71,3 +71,45 @@ func TestPlainHTTPStaticAssets(t *testing.T) {
 		t.Fatal("existing TLS handler stopped working")
 	}
 }
+
+func TestPlainHTTPAgentRoutesOnly(t *testing.T) {
+	certificateServer := httptest.NewTLSServer(http.NotFoundHandler())
+	defer certificateServer.Close()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := controltransport.NewServer(listener, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}), certificateServer.TLS)
+	done := make(chan error, 1)
+	go func() { done <- server.Serve() }()
+	t.Cleanup(func() {
+		server.Close()
+		if err := <-done; !controltransport.Closed(err) {
+			t.Error(err)
+		}
+		server.Wait()
+	})
+	client := &http.Client{Timeout: 3 * time.Second}
+	defer client.CloseIdleConnections()
+	for path, want := range map[string]int{
+		"/api/v1/enroll":                    http.StatusTeapot,
+		"/api/v1/agent/challenge":           http.StatusTeapot,
+		"/api/v1/agent/control":             http.StatusTeapot,
+		"/api/v1/agent/update/latest":       http.StatusTeapot,
+		"/api/v1/state":                     http.StatusUpgradeRequired,
+		"/api/v1/login":                     http.StatusUpgradeRequired,
+		"/api/v1/agents/x":                  http.StatusUpgradeRequired,
+		"/api/v1/agent/control/../../state": http.StatusUpgradeRequired,
+	} {
+		response, err := client.Get("http://" + listener.Addr().String() + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != want {
+			t.Errorf("%s: status=%d want %d", path, response.StatusCode, want)
+		}
+	}
+}

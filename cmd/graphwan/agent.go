@@ -47,7 +47,7 @@ func runAgentContext(parent context.Context, args []string) error {
 	if defaultTransport == "" {
 		defaultTransport = "tcp"
 	}
-	serverTransport := fs.String("server-transport", defaultTransport, "preferred controller carrier: tcp, websocket, grpc or wss")
+	serverTransport := fs.String("server-transport", defaultTransport, "preferred controller carrier: tcp, websocket, grpc, wss or https (TLS-terminating gateway)")
 	data := fs.String("data-dir", "./graphwan-agent-data", "private persistent agent directory")
 	name := fs.String("name", "", "agent display name for first enrollment")
 	ca := fs.String("ca", "", "PEM CA certificate to trust for controller HTTPS")
