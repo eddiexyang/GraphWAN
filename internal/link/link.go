@@ -155,7 +155,9 @@ type Link struct {
 	dataGeneration atomic.Uint64
 	// loggedActive tracks selection for logs only. New Links start with an
 	// active data generation, so it cannot be derived from dataGeneration.
-	loggedActive    atomic.Bool
+	loggedActive atomic.Bool
+	// loggedUp records that "link up" was logged: the Link became healthy.
+	loggedUp        atomic.Bool
 	control         chan []byte
 	packets         chan []byte
 	ownedPackets    *packetbuf.Queue
@@ -653,11 +655,11 @@ func (l *Link) readLoop() {
 			}
 			if l.options.Accepted {
 				l.mu.Lock()
-				first := l.peerPing.IsZero()
+				first := l.peerPing.IsZero() && !l.unverified
 				l.peerPing = time.Now()
 				l.mu.Unlock()
 				if first {
-					slog.Info("link up", l.logAttrs()...)
+					l.logUp()
 				}
 			}
 			response := append([]byte{}, raw...)
@@ -843,9 +845,7 @@ func (l *Link) healthLoop() {
 }
 
 func (l *Link) logDown(reason string) {
-	l.mu.Lock()
-	wasUp := !l.lastPong.IsZero() || !l.peerPing.IsZero()
-	l.mu.Unlock()
+	wasUp := l.loggedUp.Load()
 	slog.Info("link down", l.logAttrs("reason", reason, "was_up", wasUp, "age", time.Since(l.started).Round(time.Second).String(), "rx_bytes", l.rx.Load(), "tx_bytes", l.tx.Load())...)
 }
 
@@ -856,7 +856,7 @@ func (l *Link) recordPong(nonce uint64, now time.Time) {
 		l.mu.Unlock()
 		return
 	}
-	first := l.lastPong.IsZero() && !l.options.Accepted
+	first := l.lastPong.IsZero() && !l.options.Accepted && !l.unverified
 	sample := now.Sub(sent)
 	if l.rtt == 0 {
 		l.rtt = sample
@@ -868,7 +868,15 @@ func (l *Link) recordPong(nonce uint64, now time.Time) {
 	l.mu.Unlock()
 	// Log outside the lock so probing and selection are not delayed.
 	if first {
-		slog.Info("link up", l.logAttrs("rtt_ms", sample.Milliseconds())...)
+		l.logUp("rtt_ms", sample.Milliseconds())
+	}
+}
+
+// logUp logs "link up" once, when the Link first becomes healthy: on its first
+// ping exchange, or for a size-probed Link once its probe is also answered.
+func (l *Link) logUp(attrs ...any) {
+	if l.loggedUp.CompareAndSwap(false, true) {
+		slog.Info("link up", l.logAttrs(attrs...)...)
 	}
 }
 

@@ -2,7 +2,6 @@ package link
 
 import (
 	"encoding/binary"
-	"log/slog"
 	"time"
 )
 
@@ -97,11 +96,17 @@ func (l *Link) receiveSizeProbeReply(raw []byte, now time.Time) bool {
 		l.mu.Unlock()
 		return true // a late reply to an expired probe
 	}
-	first := l.unverified
+	// Log the Link up here if its ping exchange already completed.
+	alive := l.peerPing
+	if !l.options.Accepted {
+		alive = l.lastPong
+	}
+	first := l.unverified && !alive.IsZero()
+	rtt := l.rtt
 	l.unverified, l.sizeSent, l.sizeVerified = false, time.Time{}, now
 	l.mu.Unlock()
 	if first {
-		slog.Info("link verified", l.logAttrs("probe_bytes", sizeProbeBytes)...)
+		l.logUp("rtt_ms", rtt.Milliseconds(), "probe_bytes", sizeProbeBytes)
 	}
 	return true
 }

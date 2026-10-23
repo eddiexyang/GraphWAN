@@ -190,6 +190,9 @@ func TestSizeProbeEndToEnd(t *testing.T) {
 		if sentKind(a, sizeProbeMessage) == 0 || sentKind(b, sizeProbeMessage) == 0 {
 			t.Fatal("each side must probe on its own")
 		}
+		if !dialer.loggedUp.Load() || !acceptor.loggedUp.Load() {
+			t.Fatal("verified links were not logged up")
+		}
 	})
 
 	t.Run("older acceptor", func(t *testing.T) {
@@ -204,6 +207,9 @@ func TestSizeProbeEndToEnd(t *testing.T) {
 		if sentKind(a, sizeProbeMessage) != 0 {
 			t.Fatal("dialer probed an acceptor without support")
 		}
+		if !dialer.loggedUp.Load() || !acceptor.loggedUp.Load() {
+			t.Fatal("unprobed links were not logged up")
+		}
 	})
 
 	t.Run("full-size segments lost", func(t *testing.T) {
@@ -216,8 +222,8 @@ func TestSizeProbeEndToEnd(t *testing.T) {
 			case <-time.After(3 * time.Second):
 				t.Fatal("link that loses full-size messages stayed open")
 			}
-			if l.Healthy() {
-				t.Fatal("link that loses full-size messages reported healthy")
+			if l.Healthy() || l.loggedUp.Load() {
+				t.Fatal("link that loses full-size messages reported healthy or logged up")
 			}
 		}
 	})
