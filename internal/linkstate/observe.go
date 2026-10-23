@@ -44,6 +44,16 @@ type View struct {
 	Networks []NetworkView     `json:"networks"`
 	Counters map[string]uint64 `json:"counters"`
 	Events   []Event           `json:"events"`
+	// Held lists edges with a healthy Link that damping keeps down.
+	Held []HeldEdge `json:"held,omitempty"`
+}
+
+// HeldEdge is an edge waiting out its damping hold before it is reported up.
+type HeldEdge struct {
+	Network     model.ID `json:"network"`
+	Edge        model.ID `json:"edge"`
+	Failures    int      `json:"failures"`
+	RemainingMS int64    `json:"remaining_ms"`
 }
 
 type NetworkView struct {

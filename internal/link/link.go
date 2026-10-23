@@ -93,6 +93,10 @@ type Options struct {
 	// after that announcement arrives. Either side accepts them throughout.
 	Compact      CompactHeader
 	CompactHello bool
+	// SizeProbe holds the Link back from traffic until a full-size probe is
+	// answered; see sizeprobe.go. SizeProbeHello is set by the accepting side.
+	SizeProbe      bool
+	SizeProbeHello bool
 }
 
 // CompactHeader writes the omitted packet header into header[:packet.HeaderSize]
@@ -177,6 +181,13 @@ type Link struct {
 	linkStateLost   atomic.Uint64
 	compactOut      atomic.Bool
 	networkWire     [16]byte
+	// Size probe state, guarded by mu. The zero value is a verified Link.
+	sizeMode     sizeProbeMode
+	unverified   bool
+	sizeNonce    uint64
+	sizeSent     time.Time
+	sizeVerified time.Time
+	sizeFailed   bool
 }
 
 func New(parent context.Context, channel Channel, info Info, options Options) (*Link, error) {
@@ -204,6 +215,8 @@ func New(parent context.Context, channel Channel, info Info, options Options) (*
 		l.ownedPackets = packetbuf.NewQueue(queueSize)
 	}
 	l.dataGeneration.Store(1)
+	// The size-probe hello must precede every other message; see sizeprobe.go.
+	l.initSizeProbe()
 	if options.Streams != nil && options.StreamHello && l.tcpBacked() {
 		// The queue is empty here, so the announcement precedes every stream frame.
 		l.control <- []byte{streamHelloMessage, 1}
@@ -463,7 +476,7 @@ func (l *Link) healthy() bool {
 // Healthy avoids allocating formatted telemetry during connection maintenance.
 func (l *Link) Healthy() bool { return l.healthy() }
 func (l *Link) healthyLocked(now time.Time) bool {
-	if l.ctx.Err() != nil {
+	if l.ctx.Err() != nil || l.unverified {
 		return false
 	}
 	if l.options.Accepted {
@@ -571,6 +584,7 @@ func (l *Link) readLoop() {
 			if len(raw) != 2 || l.options.Compact == nil || l.options.CompactHello {
 				return
 			}
+			l.sizeProbeUnsupported()
 			l.compactOut.Store(true)
 		case compactDataMessage:
 			if l.options.Compact == nil || len(raw) <= 2 || len(raw)-2 > packet.MaxPayload {
@@ -608,6 +622,7 @@ func (l *Link) readLoop() {
 			if len(raw) != 2 || l.options.Streams == nil || l.options.StreamHello || !l.tcpBacked() {
 				return
 			}
+			l.sizeProbeUnsupported()
 			if !l.streamsReady.Swap(true) {
 				l.options.Streams.StreamsReady(l)
 			}
@@ -615,6 +630,7 @@ func (l *Link) readLoop() {
 			if len(raw) != 2 || l.options.LinkState == nil || l.options.LinkStateHello {
 				return
 			}
+			l.sizeProbeUnsupported()
 			if !l.linkStateReady.Swap(true) {
 				l.options.LinkState.LinkStateReady(l)
 			}
@@ -670,7 +686,20 @@ func (l *Link) readLoop() {
 				return
 			}
 			nonce := binary.BigEndian.Uint64(raw[1:])
+			l.sizeProbeUnsupported()
 			l.recordPong(nonce, time.Now())
+		case sizeProbeHelloMessage:
+			if !l.receiveSizeProbeHello(raw) {
+				return
+			}
+		case sizeProbeMessage:
+			if !l.answerSizeProbe(raw) {
+				return
+			}
+		case sizeProbeReplyMessage:
+			if !l.receiveSizeProbeReply(raw, time.Now()) {
+				return
+			}
 		default:
 			return
 		}
@@ -797,7 +826,7 @@ func (l *Link) healthLoop() {
 	defer ticker.Stop()
 	for {
 		if !l.heartbeat(now) {
-			l.logDown("timeout")
+			l.logDown(l.failureReason())
 			return
 		}
 		if l.channel.NeedsRekey() {
@@ -876,6 +905,9 @@ func (l *Link) heartbeat(now time.Time) bool {
 		}
 	}
 	if !l.probeSince.IsZero() && now.Sub(l.probeSince) >= l.options.Timeout {
+		return false
+	}
+	if !l.sizeProbeLocked(now) {
 		return false
 	}
 	interval := l.options.Heartbeat

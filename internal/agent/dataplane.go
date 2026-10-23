@@ -53,6 +53,7 @@ type DataPlane struct {
 	discoveryWake chan struct{}
 	repairWake    chan struct{}
 	linkState     *linkstate.Engine
+	damper        *edgeDamper
 }
 
 func NewDataPlane(parent context.Context, identity ed25519.PrivateKey, options DataPlaneOptions) (*DataPlane, error) {

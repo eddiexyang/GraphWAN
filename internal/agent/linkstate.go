@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"time"
+
 	"github.com/eWloYW8/GraphWAN/internal/linkstate"
 	"github.com/eWloYW8/GraphWAN/internal/mesh"
 	"github.com/eWloYW8/GraphWAN/internal/model"
@@ -9,6 +11,7 @@ import (
 // newLinkState routes from advertisements exchanged with neighbours, so
 // forwarding keeps converging whether or not the controller is reachable.
 func (r *DataPlane) newLinkState() *linkstate.Engine {
+	r.damper = newEdgeDamper()
 	return linkstate.New(linkstate.Callbacks{
 		Send: func(network, peer model.ID, raw []byte) {
 			if state := r.state.Load(); state != nil {
@@ -16,7 +19,7 @@ func (r *DataPlane) newLinkState() *linkstate.Engine {
 			}
 		},
 		// An edge is usable here while it has a healthy Link, the condition
-		// the Agent also reports to the controller.
+		// the Agent also reports to the controller, unless damping holds it.
 		Local: func() map[model.ID]map[model.ID]bool {
 			up := map[model.ID]map[model.ID]bool{}
 			for _, s := range r.Report() {
@@ -28,7 +31,7 @@ func (r *DataPlane) newLinkState() *linkstate.Engine {
 				}
 				up[s.NetworkID][s.EdgeID] = true
 			}
-			return up
+			return r.damper.filter(up, time.Now())
 		},
 		Apply: r.ApplyRoutes,
 	})
@@ -51,7 +54,11 @@ func (r *DataPlane) LocalRouting() bool {
 }
 
 // LinkState returns the engine's state for the status command.
-func (r *DataPlane) LinkState() linkstate.View { return r.linkState.View() }
+func (r *DataPlane) LinkState() linkstate.View {
+	v := r.linkState.View()
+	v.Held = r.damper.held(time.Now())
+	return v
+}
 
 // LinkStateReport is reported to the controller while routing locally.
 func (r *DataPlane) LinkStateReport() *model.LinkStateReport {

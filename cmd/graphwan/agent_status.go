@@ -95,6 +95,12 @@ func runAgentStatus(args []string) error {
 			}
 		}
 	}
+	if len(s.Held) > 0 {
+		fmt.Fprintln(w, "\nHELD EDGE\tNETWORK\tFAILURES\tREMAINING")
+		for _, h := range s.Held {
+			fmt.Fprintf(w, "%s\t%s\t%d\t%s\n", h.Edge, h.Network, h.Failures, (time.Duration(h.RemainingMS) * time.Millisecond).Round(time.Second))
+		}
+	}
 	if all || *events {
 		fmt.Fprintln(w, "\nTIME\tEVENT\tNETWORK\tORIGIN\tEDGE\tVALUE")
 		for _, e := range s.Events {

@@ -30,7 +30,12 @@ type introduction struct {
 	LinkState bool `json:"link_state,omitempty"`
 	// CompactData offers data frames without the packet header.
 	CompactData bool `json:"compact_data,omitempty"`
+	// SizeProbe offers full-size probes before the Link carries traffic.
+	SizeProbe bool `json:"size_probe,omitempty"`
 }
+
+// maxIntroduction is the limit every Agent version enforces on receipt.
+const maxIntroduction = 256
 
 func receiveIntroduction(ctx context.Context, channel *peer.Channel) (introduction, error) {
 	raw, err := channel.Receive(ctx)
@@ -38,7 +43,7 @@ func receiveIntroduction(ctx context.Context, channel *peer.Channel) (introducti
 		return introduction{}, err
 	}
 	var intro introduction
-	if len(raw) < 2 || len(raw) > 256 || raw[0] != 0 {
+	if len(raw) < 2 || len(raw) > maxIntroduction || raw[0] != 0 {
 		return intro, errors.New("missing link introduction")
 	}
 	if err := json.Unmarshal(raw[1:], &intro); err != nil {
@@ -263,12 +268,17 @@ func (g *group) connect(ctx context.Context, candidate link.Candidate) (*peer.Ch
 		return nil, linkCaps{}, err
 	}
 	streams := g.mesh.streamsEnabled() && streamTransport(candidate.Endpoint.Transport)
-	offered := linkCaps{streams: streams, linkState: g.mesh.linkStateEnabled(), compact: g.mesh.compactHeader() != nil}
-	intro := introduction{Candidate: candidate.ID, Endpoint: endpointFingerprint(candidate.Endpoint), Scope: link.ScopeIdentity(candidate.Scope), PathExchange: true, TCPStreams: offered.streams, LinkState: offered.linkState, CompactData: offered.compact}
+	offered := linkCaps{streams: streams, linkState: g.mesh.linkStateEnabled(), compact: g.mesh.compactHeader() != nil, sizeProbe: streamTransport(candidate.Endpoint.Transport)}
+	intro := introduction{Candidate: candidate.ID, Endpoint: endpointFingerprint(candidate.Endpoint), Scope: link.ScopeIdentity(candidate.Scope), PathExchange: true, TCPStreams: offered.streams, LinkState: offered.linkState, CompactData: offered.compact, SizeProbe: offered.sizeProbe}
 	if candidate.Target.IsValid() {
 		intro.Target = candidate.Target.String()
 	}
 	encoded, _ := json.Marshal(intro)
+	if offered.sizeProbe && len(encoded)+1 > maxIntroduction {
+		// Older acceptors reject a longer introduction; this Link goes unprobed.
+		offered.sizeProbe, intro.SizeProbe = false, false
+		encoded, _ = json.Marshal(intro)
+	}
 	if err := channel.Send(ctx, append([]byte{0}, encoded...)); err != nil {
 		channel.Close()
 		return nil, linkCaps{}, err
