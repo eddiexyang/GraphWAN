@@ -72,10 +72,14 @@ function FitLayout({ count }: { count: number }) {
   const initialized = useNodesInitialized()
   const width = useStore((s) => s.width)
   const height = useStore((s) => s.height)
+  const fitted = useRef('')
   useEffect(() => {
-    if (!initialized || !count) return
+    if (!initialized || !count || !width || !height) return
+    const key = `${width}/${height}/${count}`
+    if (fitted.current === key) return
     const task = requestAnimationFrame(() => {
-      void fitView({ padding: 0.3, maxZoom: 1 })
+      fitted.current = key
+      void fitView()
     })
     return () => cancelAnimationFrame(task)
   }, [fitView, initialized, width, height, count])
@@ -797,8 +801,6 @@ export default function Topology({
                   ?.getAttribute('data-id')
                 if (target) connect(connection.fromNode.id, target)
               }}
-              fitView
-              fitViewOptions={{ padding: 0.3, maxZoom: 1 }}
               minZoom={0.15}
               maxZoom={2}
               connectionRadius={48}
