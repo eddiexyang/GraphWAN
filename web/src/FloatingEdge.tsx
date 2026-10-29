@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef } from 'react'
 import {
   BaseEdge,
   EdgeLabelRenderer,
@@ -17,6 +18,7 @@ export type FloatingFlowEdge = Edge<
     route: Route
     labelPoint: { x: number; y: number }
     labelScale?: number
+    onLabelSize?: (id: string, size: { width: number; height: number }) => void
     open?: () => void
     focused: boolean
     dimmed: boolean
@@ -24,6 +26,18 @@ export type FloatingFlowEdge = Edge<
   'floating'
 >
 export function FloatingEdge(props: EdgeProps<FloatingFlowEdge>) {
+  const labelRef = useRef<HTMLDivElement>(null)
+  const onLabelSize = props.data?.onLabelSize
+  useLayoutEffect(() => {
+    const element = labelRef.current
+    if (!element || !onLabelSize) return
+    const measure = () =>
+      onLabelSize(props.id, { width: element.offsetWidth, height: element.offsetHeight })
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [props.id, props.label, props.data?.dimmed, props.data?.focused, onLabelSize])
   if (!props.data?.anchors) return null
   const { route, labelPoint, labelScale = 1, focused, dimmed } = props.data
   if (!route) return null
@@ -33,6 +47,7 @@ export function FloatingEdge(props: EdgeProps<FloatingFlowEdge>) {
       {!dimmed && props.label && (
         <EdgeLabelRenderer>
           <div
+            ref={labelRef}
             className={`graph-edge-label nodrag nopan ${focused ? 'focused' : ''}`}
             style={{
               transform: `translate(-50%, -50%) translate(${labelPoint.x}px, ${labelPoint.y}px) scale(${labelScale})`,

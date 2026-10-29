@@ -187,18 +187,22 @@ export function planLabels(
   rectangles: Map<string, Rect>,
   priority: Set<string>,
   labelScale = 1,
+  sizes: Map<string, { width: number; height: number }> = new Map(),
 ) {
-  const width = 188 * labelScale
-  const height = 28 * labelScale
   const labels: Rect[] = []
   const result = new Map<string, Point>()
   const entries = [...routes].sort(
     ([a], [b]) => Number(priority.has(b)) - Number(priority.has(a)) || a.localeCompare(b),
   )
   for (const [id, route] of entries) {
+    const size = sizes.get(id)
+    const width = ((size?.width ?? 188) + 12) * labelScale
+    const height = ((size?.height ?? 28) + 12) * labelScale
     let best = route.points[12],
-      score = Infinity
-    for (const index of [12, 9, 15, 6, 18, 4, 20]) {
+      score = Infinity,
+      nodeHits = Infinity,
+      labelHits = Infinity
+    for (let index = 1; index < route.points.length - 1; index++) {
       const p = route.points[index],
         box = { x: p.x - width / 2, y: p.y - height / 2, width, height }
       const overlaps = (r: Rect) =>
@@ -207,17 +211,25 @@ export function planLabels(
         box.y < r.y + r.height &&
         box.y + box.height > r.y
       let cost = Math.abs(index - 12) * 2
-      for (const r of rectangles.values()) if (overlaps(r)) cost += 10000
-      for (const r of labels) if (overlaps(r)) cost += 3000
+      let nodes = 0,
+        occupied = 0
+      for (const r of rectangles.values()) if (overlaps(r)) nodes++
+      for (const r of labels) if (overlaps(r)) occupied++
       for (const [otherID, other] of routes)
         if (otherID !== id) {
           for (let i = 1; i < other.points.length; i++) {
             if (separation(p, other.points[i - 1], other.points[i]) < 22 * labelScale) cost += 30
           }
         }
-      if (cost < score) {
+      if (
+        nodes < nodeHits ||
+        (nodes === nodeHits &&
+          (occupied < labelHits || (occupied === labelHits && cost < score)))
+      ) {
         best = p
         score = cost
+        nodeHits = nodes
+        labelHits = occupied
       }
     }
     result.set(id, best)

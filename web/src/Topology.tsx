@@ -10,7 +10,7 @@ import {
   aggregate,
   individualConnection,
 } from './groups'
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ReactFlow,
   useReactFlow,
@@ -179,6 +179,14 @@ export default function Topology({
   addEdge: () => void
 }) {
   const [fullscreen, setFullscreen] = useState(false)
+  const [labelSizes, setLabelSizes] = useState(new Map<string, { width: number; height: number }>())
+  const onLabelSize = useCallback((id: string, size: { width: number; height: number }) => {
+    setLabelSizes((previous) => {
+      const old = previous.get(id)
+      if (old?.width === size.width && old.height === size.height) return previous
+      return new Map(previous).set(id, size)
+    })
+  }, [])
   const fullscreenButton = useRef<HTMLButtonElement>(null)
   useEffect(() => {
     if (!fullscreen) return
@@ -479,8 +487,9 @@ export default function Topology({
             ),
             focus,
             labelScale,
+            labelSizes,
           ),
-    [geometry, focusKey, dragging, labelScale],
+    [geometry, focusKey, dragging, labelScale, labelSizes],
   )
   const edges = displayEdges.map((e) => {
     const link = !scope ? network.group_links?.find((l) => l.id === e.id) : undefined
@@ -505,6 +514,7 @@ export default function Topology({
         route: geometry.routes.get(e.id)!,
         labelPoint: labels.get(e.id)!,
         labelScale,
+        onLabelSize,
         focused,
         dimmed,
       },
