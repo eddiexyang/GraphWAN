@@ -181,40 +181,48 @@ export function planRoutes(
 }
 
 // Labels remain on their own curve; spread them along it instead of stacking
-// every label at its midpoint. Focused links get first choice.
+// every label at its midpoint. Reserve the same bounds across display modes and
+// place constrained links first so longer links leave their available space free.
 export function planLabels(
   routes: Map<string, Route>,
   rectangles: Map<string, Rect>,
-  priority: Set<string>,
   labelScale = 1,
-  sizes: Map<string, { width: number; height: number }> = new Map(),
+  labelWidth = 188,
 ) {
+  const width = (labelWidth + 12) * labelScale
+  const height = 44 * labelScale
+  const overlaps = (a: Rect, b: Rect) =>
+    a.x < b.x + b.width &&
+    a.x + a.width > b.x &&
+    a.y < b.y + b.height &&
+    a.y + a.height > b.y
+  const boxAt = (p: Point): Rect => ({ x: p.x - width / 2, y: p.y - height / 2, width, height })
+  const available = new Map(
+    [...routes].map(([id, route]) => [
+      id,
+      route.points.slice(1, -1).filter((p) =>
+        ![...rectangles.values()].some((r) => overlaps(boxAt(p), r)),
+      ).length,
+    ]),
+  )
   const labels: Rect[] = []
   const result = new Map<string, Point>()
   const entries = [...routes].sort(
-    ([a], [b]) => Number(priority.has(b)) - Number(priority.has(a)) || a.localeCompare(b),
+    ([a], [b]) => available.get(a)! - available.get(b)! || a.localeCompare(b),
   )
   for (const [id, route] of entries) {
-    const size = sizes.get(id)
-    const width = ((size?.width ?? 188) + 12) * labelScale
-    const height = ((size?.height ?? 28) + 12) * labelScale
     let best = route.points[12],
       score = Infinity,
       nodeHits = Infinity,
       labelHits = Infinity
     for (let index = 1; index < route.points.length - 1; index++) {
       const p = route.points[index],
-        box = { x: p.x - width / 2, y: p.y - height / 2, width, height }
-      const overlaps = (r: Rect) =>
-        box.x < r.x + r.width &&
-        box.x + box.width > r.x &&
-        box.y < r.y + r.height &&
-        box.y + box.height > r.y
+        box = boxAt(p)
       let cost = Math.abs(index - 12) * 2
       let nodes = 0,
         occupied = 0
-      for (const r of rectangles.values()) if (overlaps(r)) nodes++
-      for (const r of labels) if (overlaps(r)) occupied++
+      for (const r of rectangles.values()) if (overlaps(box, r)) nodes++
+      for (const r of labels) if (overlaps(box, r)) occupied++
       for (const [otherID, other] of routes)
         if (otherID !== id) {
           for (let i = 1; i < other.points.length; i++) {
