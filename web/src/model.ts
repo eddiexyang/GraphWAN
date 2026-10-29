@@ -142,6 +142,8 @@ export type AgentStatus = {
   agent_id: string
   connected: boolean
   last_seen: string
+  reported_at?: string
+  report_epoch?: string
   version: string
   applied_revision: number
   config_error?: string
@@ -158,20 +160,57 @@ export type LinkStateReport = {
 export type Snapshot = { at: string; revision: number; state?: State; agents: AgentStatus[] }
 export type Rates = Record<string, { rx: number; tx: number }>
 export const linkKey = (agent: string, link: string) => `${agent}/${link}`
-export function ratesBetween(previous: AgentStatus[], current: AgentStatus[]): Rates {
+const reportTime = (status: AgentStatus | undefined) => {
+  if (!status?.connected || !status.report_epoch || !status.reported_at) return undefined
+  const time = Date.parse(status.reported_at)
+  return Number.isFinite(time) && time > 0 ? time : undefined
+}
+// Liveness ACKs can refresh last_seen while retaining an older counter sample.
+// Only complete reports in the same control connection establish a rate.
+export function ratesForSnapshot(
+  previous: AgentStatus[],
+  snapshot: Pick<Snapshot, 'at' | 'agents'>,
+  previousRates: Rates,
+): Rates {
   const result: Rates = {}
+  const now = Date.parse(snapshot.at)
+  if (!Number.isFinite(now)) return result
   const before = new Map(previous.map((s) => [s.agent_id, s]))
-  for (const s of current) {
+  for (const s of snapshot.agents) {
     const old = before.get(s.agent_id)
-    const elapsed = old ? (Date.parse(s.last_seen) - Date.parse(old.last_seen)) / 1000 : 0
-    if (!s.connected || !old?.connected || elapsed <= 0 || elapsed > 45) continue
+    const time = reportTime(s)
+    const oldTime = reportTime(old)
+    if (
+      time === undefined ||
+      oldTime === undefined ||
+      !old ||
+      s.report_epoch !== old.report_epoch ||
+      now - time > 45000
+    )
+      continue
+    const elapsed = (time - oldTime) / 1000
+    if (elapsed < 0 || elapsed > 45) continue
     const links = new Map(old.links?.map((l) => [l.link_id, l]))
     for (const l of s.links ?? []) {
       const prev = links.get(l.link_id)
-      if (!prev || l.rx_bytes < prev.rx_bytes || l.tx_bytes < prev.tx_bytes) continue
-      result[linkKey(s.agent_id, l.link_id)] = {
-        rx: ((l.rx_bytes - prev.rx_bytes) * 8) / elapsed,
-        tx: ((l.tx_bytes - prev.tx_bytes) * 8) / elapsed,
+      if (
+        !prev ||
+        ![l.rx_bytes, l.tx_bytes, prev.rx_bytes, prev.tx_bytes].every(
+          (n) => Number.isFinite(n) && n >= 0,
+        ) ||
+        l.rx_bytes < prev.rx_bytes ||
+        l.tx_bytes < prev.tx_bytes
+      )
+        continue
+      const key = linkKey(s.agent_id, l.link_id)
+      if (elapsed === 0) {
+        if (l.rx_bytes === prev.rx_bytes && l.tx_bytes === prev.tx_bytes && previousRates[key])
+          result[key] = previousRates[key]
+      } else {
+        result[key] = {
+          rx: ((l.rx_bytes - prev.rx_bytes) * 8) / elapsed,
+          tx: ((l.tx_bytes - prev.tx_bytes) * 8) / elapsed,
+        }
       }
     }
   }
