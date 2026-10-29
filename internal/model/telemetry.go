@@ -46,6 +46,12 @@ type AgentStatus struct {
 	AgentID   ID        `json:"agent_id"`
 	Connected bool      `json:"connected"`
 	LastSeen  time.Time `json:"last_seen"`
+	// ReportedAt advances only when this controller receives a full AgentReport.
+	// Revision-only acknowledgements update LastSeen without resampling counters.
+	ReportedAt time.Time `json:"reported_at,omitzero"`
+	// ReportEpoch changes on every Agent control connection, so clients never
+	// calculate rates across reconnects or different controllers' clocks.
+	ReportEpoch ID `json:"report_epoch,omitempty"`
 	AgentReport
 }
 

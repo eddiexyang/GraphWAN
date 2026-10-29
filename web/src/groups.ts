@@ -120,6 +120,7 @@ export function aggregate(
   statuses: AgentStatus[],
   rates: Rates,
   live: boolean,
+  showSpeeds = true,
 ) {
   const views = edges.map((e) => edgeView(network, e, statuses, rates, live))
   const connected = views.filter((v) => v.state === 'Connected')
@@ -145,7 +146,7 @@ export function aggregate(
     total: edges.length,
     speed,
     maximum,
-    label: `${rate(speed)} · ${maximum === undefined ? 'RTT unknown' : `max ${maximum.toFixed(1)} ms`} · ${live ? connected.length : '?'}/${edges.length}`,
+    label: `${showSpeeds ? `${rate(speed)} · ` : ''}${maximum === undefined ? 'RTT unknown' : `max ${maximum.toFixed(1)} ms`} · ${live ? connected.length : '?'}/${edges.length}`,
   }
 }
 // Also drops overrides for pairs that membership changes no longer expand.

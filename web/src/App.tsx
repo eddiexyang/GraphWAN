@@ -27,7 +27,7 @@ import {
   newID,
   equal,
   rebase,
-  ratesBetween,
+  ratesForSnapshot,
   createEdge,
   nodeState,
 } from './model'
@@ -178,22 +178,8 @@ export default function App() {
       try {
         const message: Snapshot = JSON.parse((event as MessageEvent).data)
         if (message.state) loadState(message.state)
-        // Events can repeat one Agent sample. Preserve its last computed rate
-        // until a newer report arrives; use each report's time, not UI refresh time.
         const before = previous.current
-        const nextRates = ratesBetween(before, message.agents)
-        setRates((old) => {
-          const result: Rates = {}
-          for (const s of message.agents)
-            for (const l of s.links ?? []) {
-              const key = `${s.agent_id}/${l.link_id}`
-              const prior = before.find((p) => p.agent_id === s.agent_id)
-              if (s.connected && prior?.connected && s.last_seen === prior.last_seen && old[key])
-                result[key] = old[key]
-              else if (nextRates[key]) result[key] = nextRates[key]
-            }
-          return result
-        })
+        setRates((old) => ratesForSnapshot(before, message, old))
         received = performance.now()
         previous.current = message.agents
         setStatuses(message.agents)

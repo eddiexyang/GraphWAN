@@ -238,6 +238,21 @@ export default function Topology({
   useEffect(() => {
     if (scope && !scopeGroup && !scopeLink) setScope(null)
   }, [scope, scopeGroup, scopeLink])
+  const [showSpeeds, setShowSpeeds] = useState(() => {
+    try {
+      return localStorage.getItem('graphwan:show-speeds') !== 'false'
+    } catch {
+      return true
+    }
+  })
+  const chooseShowSpeeds = (show: boolean) => {
+    setShowSpeeds(show)
+    try {
+      localStorage.setItem('graphwan:show-speeds', String(show))
+    } catch {
+      /* Browsing without storage remains supported. */
+    }
+  }
   const [viewStyle, setViewStyle] = useState<LineStyle | 'globe'>(() => {
     try {
       const saved = localStorage.getItem('graphwan:line-style')
@@ -386,7 +401,8 @@ export default function Topology({
             selectable: false,
             data: {
               name: g.name,
-              summary: aggregate(network, internalEdges(g), statuses, rates, live).label,
+              summary: aggregate(network, internalEdges(g), statuses, rates, live, showSpeeds)
+                .label,
               address: '',
               state: '',
               connecting,
@@ -469,7 +485,7 @@ export default function Topology({
   const edges = displayEdges.map((e) => {
     const link = !scope ? network.group_links?.find((l) => l.id === e.id) : undefined
     const summary = link
-      ? aggregate(network, childEdges(network, link), statuses, rates, live)
+      ? aggregate(network, childEdges(network, link), statuses, rates, live, showSpeeds)
       : undefined
     const view = edgeView(network, e, statuses, rates, live)
     if (summary) view.state = summary.state
@@ -498,7 +514,7 @@ export default function Topology({
         : editing
           ? `Weight ${e.weight}`
           : view.state === 'Connected'
-            ? `${view.active!.transport.toUpperCase()} · ${latencyLabel(view.active)} · ↑ ${rate(view.tx)} ↓ ${rate(view.rx)}`
+            ? `${view.active!.transport.toUpperCase()} · ${latencyLabel(view.active)}${showSpeeds ? ` · ↑ ${rate(view.tx)} ↓ ${rate(view.rx)}` : ''}`
             : view.state,
       style: {
         stroke: focused ? '#087b66' : view.state === 'Connected' ? '#278f79' : '#91a3a0',
@@ -631,6 +647,11 @@ export default function Topology({
             </div>
           )}
           <div className="drawing-control">
+            {viewStyle !== 'globe' && (
+              <button aria-pressed={showSpeeds} onClick={() => chooseShowSpeeds(!showSpeeds)}>
+                Show speeds
+              </button>
+            )}
             <button
               ref={fullscreenButton}
               className="icon"

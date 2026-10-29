@@ -91,7 +91,7 @@ func (s *Server) agentControl(w http.ResponseWriter, r *http.Request) {
 	old := s.streams[id]
 	s.streams[id] = conn
 	s.watchers[changed] = true
-	s.statuses[id] = model.AgentStatus{AgentID: id, Connected: true, LastSeen: time.Now()}
+	s.statuses[id] = model.AgentStatus{AgentID: id, Connected: true, LastSeen: time.Now(), ReportEpoch: model.NewID()}
 	s.mu.Unlock()
 	defer s.streamWG.Done()
 	if old != nil {
@@ -209,6 +209,7 @@ func (s *Server) readAgent(ctx context.Context, conn *websocket.Conn, id model.I
 		if err != nil {
 			return err
 		}
+		fullReport := message.Type == "ack"
 		if message.Type == "ack_revision" {
 			if conn.Subprotocol() != model.DeltaSubprotocol || message.Ack == nil {
 				return errors.New("unnegotiated or missing revision acknowledgement")
@@ -265,7 +266,13 @@ func (s *Server) readAgent(ctx context.Context, conn *websocket.Conn, id model.I
 			}
 			s.mu.Lock()
 			if s.streams[id] == conn {
-				s.statuses[id] = model.AgentStatus{AgentID: id, Connected: true, LastSeen: time.Now(), AgentReport: *message.Report}
+				status := s.statuses[id]
+				status.Connected, status.LastSeen = true, time.Now()
+				if fullReport {
+					status.ReportedAt = status.LastSeen
+				}
+				status.AgentReport = *message.Report
+				s.statuses[id] = status
 			}
 			s.mu.Unlock()
 		case "endpoints":
