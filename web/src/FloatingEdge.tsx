@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef } from 'react'
 import {
   BaseEdge,
   EdgeLabelRenderer,
@@ -17,7 +18,7 @@ export type FloatingFlowEdge = Edge<
     route: Route
     labelPoint: { x: number; y: number }
     labelScale?: number
-    labelWidth: number
+    onLabelSize?: (id: string, size: { width: number; height: number }) => void
     open?: () => void
     focused: boolean
     dimmed: boolean
@@ -25,6 +26,17 @@ export type FloatingFlowEdge = Edge<
   'floating'
 >
 export function FloatingEdge(props: EdgeProps<FloatingFlowEdge>) {
+  const labelRef = useRef<HTMLDivElement>(null)
+  const onLabelSize = props.data?.onLabelSize
+  const isFocused = props.data?.focused
+  const textLength = typeof props.label === 'string' ? props.label.length : 0
+  // Measure the unfocused label only when its text length changes, so new
+  // latency digits of the same length do not re-plan every label.
+  useLayoutEffect(() => {
+    const element = labelRef.current
+    if (!element || !onLabelSize || isFocused) return
+    onLabelSize(props.id, { width: element.offsetWidth, height: element.offsetHeight })
+  }, [props.id, textLength, isFocused, props.data?.dimmed, onLabelSize])
   if (!props.data?.anchors) return null
   const { route, labelPoint, labelScale = 1, focused, dimmed } = props.data
   if (!route) return null
@@ -34,13 +46,11 @@ export function FloatingEdge(props: EdgeProps<FloatingFlowEdge>) {
       {!dimmed && props.label && (
         <EdgeLabelRenderer>
           <div
+            ref={labelRef}
             className={`graph-edge-label nodrag nopan ${focused ? 'focused' : ''}`}
             style={{
               transform: `translate(-50%, -50%) translate(${labelPoint.x}px, ${labelPoint.y}px) scale(${labelScale})`,
               zIndex: focused ? 1000 : 10,
-              maxWidth: props.data.labelWidth,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
               pointerEvents: props.data.open ? 'all' : 'none',
               cursor: props.data.open ? 'pointer' : undefined,
             }}

@@ -181,28 +181,29 @@ export function planRoutes(
 }
 
 // Labels remain on their own curve; spread them along it instead of stacking
-// every label at its midpoint. Reserve the same bounds across display modes and
-// place constrained links first so longer links leave their available space free.
+// every label at its midpoint. Each label reserves its measured size plus a small
+// gap; constrained links are placed first so longer links leave their space free.
 export function planLabels(
   routes: Map<string, Route>,
   rectangles: Map<string, Rect>,
   labelScale = 1,
-  labelWidth = 188,
+  sizes: Map<string, { width: number; height: number }> = new Map(),
 ) {
-  const width = (labelWidth + 12) * labelScale
-  const height = 44 * labelScale
+  const gap = 8
   const overlaps = (a: Rect, b: Rect) =>
-    a.x < b.x + b.width &&
-    a.x + a.width > b.x &&
-    a.y < b.y + b.height &&
-    a.y + a.height > b.y
-  const boxAt = (p: Point): Rect => ({ x: p.x - width / 2, y: p.y - height / 2, width, height })
+    a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
+  const boxAt = (id: string, p: Point): Rect => {
+    const size = sizes.get(id) ?? { width: 120, height: 30 }
+    const width = (size.width + gap) * labelScale,
+      height = (size.height + gap) * labelScale
+    return { x: p.x - width / 2, y: p.y - height / 2, width, height }
+  }
   const available = new Map(
     [...routes].map(([id, route]) => [
       id,
-      route.points.slice(1, -1).filter((p) =>
-        ![...rectangles.values()].some((r) => overlaps(boxAt(p), r)),
-      ).length,
+      route.points
+        .slice(1, -1)
+        .filter((p) => ![...rectangles.values()].some((r) => overlaps(boxAt(id, p), r))).length,
     ]),
   )
   const labels: Rect[] = []
@@ -217,7 +218,7 @@ export function planLabels(
       labelHits = Infinity
     for (let index = 1; index < route.points.length - 1; index++) {
       const p = route.points[index],
-        box = boxAt(p)
+        box = boxAt(id, p)
       let cost = Math.abs(index - 12) * 2
       let nodes = 0,
         occupied = 0
@@ -231,8 +232,7 @@ export function planLabels(
         }
       if (
         nodes < nodeHits ||
-        (nodes === nodeHits &&
-          (occupied < labelHits || (occupied === labelHits && cost < score)))
+        (nodes === nodeHits && (occupied < labelHits || (occupied === labelHits && cost < score)))
       ) {
         best = p
         score = cost
@@ -241,7 +241,7 @@ export function planLabels(
       }
     }
     result.set(id, best)
-    labels.push({ x: best.x - width / 2, y: best.y - height / 2, width, height })
+    labels.push(boxAt(id, best))
   }
   return result
 }
