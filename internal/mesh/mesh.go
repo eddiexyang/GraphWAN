@@ -464,6 +464,7 @@ type group struct {
 	retained          map[string]link.Candidate
 	suppressed        map[string]string
 	retiring          map[string]*retirement
+	draining          map[string]time.Time // disallowed Links kept until replaced
 	keepers           map[link.Path]string
 	wg                sync.WaitGroup
 }
@@ -482,6 +483,7 @@ func (m *Mesh) newGroup(cfg *policy) *group {
 	g.policy.Store(cfg)
 	g.suppressed = map[string]string{}
 	g.retiring = map[string]*retirement{}
+	g.draining = map[string]time.Time{}
 	g.keepers = map[link.Path]string{}
 	// IDs differ in parity so both Agents can open streams without coordination.
 	g.mux = newMux(g, cfg.self < cfg.peer.Node.ID, func(s *muxStream) { m.acceptMuxStream(g, s) })

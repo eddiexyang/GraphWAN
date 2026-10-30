@@ -62,6 +62,7 @@ func (g *group) schedule() {
 		g.edge.Tick()
 		g.deduplicate()
 		g.retireSessions()
+		g.drain()
 		g.mux.maintain()
 		cfg := g.policy.Load()
 		candidates := g.candidates(cfg, true)

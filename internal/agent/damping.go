@@ -10,12 +10,16 @@ import (
 	"github.com/eWloYW8/GraphWAN/internal/model"
 )
 
-// Edge damping keeps a flapping edge out of link-state. After an edge has
-// gone down, it must stay up for a hold time before it is reported up again.
-// The hold doubles with every further failure, including one during the hold,
-// and resets once the edge has been reported up for dampStable. The first up
+// Edge damping keeps a flapping edge out of link-state. An edge that goes
+// down is withdrawn at once, but the outage only counts as a failure once it
+// lasts dampGrace; a quicker recovery, such as a Link replaced or redialled
+// within a second, is reported up again immediately. After a failure the edge
+// must stay up for a hold time before it is reported up again. The hold
+// doubles with every further failure, including one during the hold, and
+// resets once the edge has been reported up for dampStable. The first up
 // after the Agent starts is not held, so a restart does not cost a hold.
 const (
+	dampGrace  = 6 * time.Second // the default Link health timeout
 	dampHold   = 30 * time.Second
 	dampMax    = 10 * time.Minute
 	dampStable = 10 * time.Minute
@@ -28,7 +32,9 @@ type dampEdge struct {
 	seen      bool      // reported up at least once since start
 	upSince   time.Time // raw up since; zero while raw down
 	reportAt  time.Time // when reporting began
-	downAt    time.Time // last reported or raw failure
+	downAt    time.Time // last counted failure
+	downSince time.Time // raw down not yet counted as a failure
+	resume    bool      // reported up when downSince began
 	failures  int
 	hold      time.Duration
 	announced bool // the current hold has been logged
@@ -63,6 +69,14 @@ func (d *edgeDamper) filter(raw map[model.ID]map[model.ID]bool, now time.Time) m
 	out := map[model.ID]map[model.ID]bool{}
 	for key, e := range d.edges {
 		if raw[key.network][key.edge] {
+			if !e.downSince.IsZero() {
+				if now.Sub(e.downSince) >= dampGrace {
+					e.fail(e.downSince)
+				} else if e.resume {
+					e.reported = true // recovered within the grace period
+				}
+				e.downSince, e.resume = time.Time{}, false
+			}
 			if e.upSince.IsZero() {
 				e.upSince = now
 			}
@@ -86,18 +100,27 @@ func (d *edgeDamper) filter(raw map[model.ID]map[model.ID]bool, now time.Time) m
 			}
 			continue
 		}
-		// Raw down: a failure if the edge was reported up or was being held.
-		if e.reported || !e.upSince.IsZero() && e.seen {
-			e.failures++
-			e.hold = holdFor(e.failures)
-			e.downAt, e.announced = now, false
+		// Raw down: withdraw at once. It becomes a failure once it lasts
+		// dampGrace, if the edge was reported up or was being held.
+		if e.downSince.IsZero() && (e.reported || !e.upSince.IsZero() && e.seen) {
+			e.downSince, e.resume = now, e.reported
+		}
+		if !e.downSince.IsZero() && now.Sub(e.downSince) >= dampGrace {
+			e.fail(e.downSince)
+			e.downSince, e.resume = time.Time{}, false
 		}
 		e.reported, e.upSince = false, time.Time{}
-		if !e.seen || e.failures == 0 || now.Sub(e.downAt) >= dampStable+e.hold {
+		if e.downSince.IsZero() && (!e.seen || e.failures == 0 || now.Sub(e.downAt) >= dampStable+e.hold) {
 			delete(d.edges, key) // forget edges that are gone or long quiet
 		}
 	}
 	return out
+}
+
+func (e *dampEdge) fail(at time.Time) {
+	e.failures++
+	e.hold = holdFor(e.failures)
+	e.downAt, e.announced = at, false
 }
 
 // held lists edges with a healthy Link that are not yet reported up.
