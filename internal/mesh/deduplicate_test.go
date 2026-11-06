@@ -33,11 +33,22 @@ func (c *memoryChannel) LocalAddr() net.Addr  { return c.local }
 func (c *memoryChannel) RemoteAddr() net.Addr { return c.remote }
 func (c *memoryChannel) Close() error         { c.cancel(); return nil }
 func (c *memoryChannel) Send(ctx context.Context, raw []byte) error {
-	if raw[0] == 3 {
-		time.Sleep(c.delay)
-	}
 	// Lose the first retirement ACK, after the follower has closed the loser.
 	if raw[0] == 10 && c.dropACK.CompareAndSwap(false, true) {
+		return nil
+	}
+	if raw[0] == 3 {
+		// Delay pongs in flight, not in the sender: sleeping here would also
+		// hold this side's own pings behind them, adding several milliseconds
+		// of noise to RTT samples that differ by 1 ms between paths.
+		raw = bytes.Clone(raw)
+		go func() {
+			time.Sleep(c.delay)
+			select {
+			case <-c.peer.ctx.Done():
+			case c.peer.in <- raw:
+			}
+		}()
 		return nil
 	}
 	select {
