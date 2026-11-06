@@ -29,6 +29,20 @@ const ConnectTimeout = 10 * time.Second
 // smaller packet-count queue can drop a local burst before socket backpressure.
 const accessPacketQueue = 2048
 
+// Remote serves an accepted access connection: it relays it over a graph
+// stream, or carries it as a session.
+type Remote interface {
+	Serve(ctx context.Context, local Conn) error
+	Close() error
+}
+
+// Pipe relays an access connection over one graph stream.
+func Pipe(conn Conn) Remote { return pipe{conn} }
+
+type pipe struct{ Conn }
+
+func (p pipe) Serve(ctx context.Context, local Conn) error { return Relay(ctx, local, p.Conn) }
+
 // Engine owns only access-side TCP. output emits packets to the local TUN or
 // authenticated WireGuard leaf; open returns the graph's application byte stream.
 type Engine struct {
@@ -39,7 +53,7 @@ type Engine struct {
 	cancel      context.CancelFunc
 	output      func([]byte) error
 	outputBatch func([][]byte) error
-	open        func(context.Context, netip.AddrPort, netip.AddrPort) (Conn, error)
+	open        func(context.Context, netip.AddrPort, netip.AddrPort) (Remote, error)
 	mu          sync.Mutex
 	closed      bool
 	slots       chan struct{}
@@ -119,7 +133,7 @@ func (l *accessLink) inject(p *stack.PacketBuffer) {
 	l.mu.Unlock()
 }
 
-func NewEngine(parent context.Context, mtu int, output func([]byte) error, open func(context.Context, netip.AddrPort, netip.AddrPort) (Conn, error), batches ...func([][]byte) error) (*Engine, error) {
+func NewEngine(parent context.Context, mtu int, output func([]byte) error, open func(context.Context, netip.AddrPort, netip.AddrPort) (Remote, error), batches ...func([][]byte) error) (*Engine, error) {
 	var batch func([][]byte) error
 	if len(batches) > 0 {
 		batch = batches[0]
@@ -127,14 +141,14 @@ func NewEngine(parent context.Context, mtu int, output func([]byte) error, open 
 	return newEngine(parent, mtu, output, open, batch, nil)
 }
 
-func NewOffloadEngine(parent context.Context, mtu int, output func([]byte) error, open func(context.Context, netip.AddrPort, netip.AddrPort) (Conn, error), outputGSO func(*stack.PacketBuffer) error) (*Engine, error) {
+func NewOffloadEngine(parent context.Context, mtu int, output func([]byte) error, open func(context.Context, netip.AddrPort, netip.AddrPort) (Remote, error), outputGSO func(*stack.PacketBuffer) error) (*Engine, error) {
 	if outputGSO == nil {
 		return nil, errors.New("TCP offload callback is required")
 	}
 	return newEngine(parent, mtu, output, open, nil, outputGSO)
 }
 
-func newEngine(parent context.Context, mtu int, output func([]byte) error, open func(context.Context, netip.AddrPort, netip.AddrPort) (Conn, error), batch func([][]byte) error, outputGSO func(*stack.PacketBuffer) error) (*Engine, error) {
+func newEngine(parent context.Context, mtu int, output func([]byte) error, open func(context.Context, netip.AddrPort, netip.AddrPort) (Remote, error), batch func([][]byte) error, outputGSO func(*stack.PacketBuffer) error) (*Engine, error) {
 	if output == nil || open == nil {
 		return nil, errors.New("TCP callbacks are required")
 	}
@@ -236,7 +250,7 @@ func (e *Engine) forward(request *tcp.ForwarderRequest) {
 		return
 	}
 	local = &accessConn{TCPConn: gonet.NewTCPConn(&queue, endpoint), endpoint: endpoint, queue: &queue}
-	Relay(e.ctx, local, remote)
+	remote.Serve(e.ctx, local)
 }
 
 func addr(a tcpip.Address) netip.Addr {

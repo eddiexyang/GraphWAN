@@ -21,6 +21,10 @@ type LinkStatus struct {
 	Loss               float64   `json:"loss"`
 	RXBytes            uint64    `json:"rx_bytes"`
 	TXBytes            uint64    `json:"tx_bytes"`
+	// Resumable TCP sessions whose next hop is this Edge's peer, by carriage:
+	// the Edge's streams or its carrier. They are counted on the active Link.
+	StreamSessions  uint32 `json:"stream_sessions,omitempty"`
+	CarrierSessions uint32 `json:"carrier_sessions,omitempty"`
 }
 type AgentReport struct {
 	Update          *UpdateStatus  `json:"update,omitempty"`

@@ -292,6 +292,71 @@ credit threshold, FIN acknowledgements and Link-change acknowledgements remain
 in use. Unchanged idle streams emit no periodic ACK. The wire format is
 unchanged; the receiving Agent needs the update for timely small-message ACKs.
 
+### Resumable TCP sessions
+
+Between current Agents an access TCP connection is a session. Only its ingress,
+which terminates the client's TCP, and its egress, which connects to the server,
+hold the original tuple. The bytes travel on a chain of hops along the current
+routes. A hop is a stream when its Edge's Links carry streams, otherwise a
+carrier (below); each hop keeps its own loss recovery and flow control.
+
+A chain's request is the stream request with four more fields: `conn`, a random
+128-bit session ID chosen by the ingress; `epoch`, the chain's number; `up` and
+`down`, the offsets each direction starts from. Every hop answers with one status
+byte: 0 accepted, 1 refused, 2 a hop does not support sessions, 3 the egress has
+no such session. Each direction is then a sequence of records, a 1-byte type and
+2-byte length followed by the payload:
+
+| Type | Payload | Meaning |
+| --- | --- | --- |
+| 1 data | 8-byte offset, bytes | the bytes at that offset |
+| 2 fin | 8-byte offset | the direction ends there |
+| 3 report | 8-byte offset | the other direction is delivered to here, plus 1 once its fin is |
+| 4 abort | none | the connection was reset |
+| 5 notify | none | toward the ingress: a hop's route changed |
+
+A hop's write half closing means only that this chain no longer carries that
+direction.
+
+Each end keeps the bytes it sent until the other end reports them delivered, at
+most 32 MiB; reading its socket waits while the retention is full. It reports
+after 256 KiB of progress, 20 ms after smaller progress, and at once for a fin.
+Each end merges what it receives from all its chains by offset, discarding bytes
+it already has.
+
+When the ingress's first hop changes, when a relay's next hop changes and the
+relay sends notify, or when a chain fails, the ingress opens a chain with the
+next epoch. That chain resends from the egress's last report and asks for the
+egress's direction from what the ingress has delivered. The chain with the
+highest epoch takes over both directions, and the older ones close once they
+have carried what was in flight. A hop whose Agent fails loses only bytes that
+the two ends still retain, so the connection continues without reset or gap.
+Without any path, a connection waits as IP would. After two minutes without a
+working chain, either end resets it. The egress remembers an ended session for
+ten minutes and answers late chains for it with status 3.
+
+A connection ends when each end has delivered the other's fin. Abort travels on
+the newest chain and resets the other end. When the stack still holds unsent
+bytes or the FIN of a closed access connection, that flow stays captured until
+the stack finishes, up to a minute.
+
+The dialer offers `resume` in its Link introduction, and the acceptor confirms
+it with a resume hello message. A hop toward an Agent that did not confirm it
+uses the earlier stream protocol, and the ingress then opens the connection
+without a session, as before.
+
+A carrier carries session hops on an Edge whose Links carry no streams, such as
+UDP or QUIC. It is a TCP between the two Agents, at `fd47:57::1` and `fd47:57::2`
+by Node ID order, in a gVisor stack owned by the Edge. It uses SACK and receive
+buffer auto-tuning up to 16 MiB. Its IP packets are carrier messages, `[21]`
+followed by one packet of at most 1280 bytes, on the Edge's selected Link. They
+therefore cross exactly that Edge and never reach the overlay or a host stack. A
+full Link queue drops them like data packets. On Edges with sessions, ingress
+Agents terminate all access TCP; transit Agents forward TCP packets unchanged.
+
+Each active Link reports `stream_sessions` and `carrier_sessions`: the sessions
+whose next hop is the Edge's peer, on its streams or its carrier.
+
 ## Link control inside the authenticated channel
 
 After Ready, the dialer sends a type-0 plaintext message containing a JSON

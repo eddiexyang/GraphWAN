@@ -34,6 +34,9 @@ type DataPlaneOptions struct {
 	// outbound of a proxy client: it manages no host gateway rules and listens
 	// on an ephemeral port instead of the configured one.
 	Embedded bool
+	// legacyStreams makes this Agent carry streams without TCP sessions, as
+	// older versions do. Tests use it for mixed versions.
+	legacyStreams bool
 }
 type runtimeState struct {
 	snapshot model.Snapshot
@@ -58,6 +61,7 @@ type DataPlane struct {
 	repairWake    chan struct{}
 	linkState     *linkstate.Engine
 	damper        *edgeDamper
+	sessions      sessions
 }
 
 func NewDataPlane(parent context.Context, identity ed25519.PrivateKey, options DataPlaneOptions) (*DataPlane, error) {
@@ -76,7 +80,9 @@ func NewDataPlane(parent context.Context, identity ed25519.PrivateKey, options D
 	ctx, cancel := context.WithCancel(parent)
 	runtime := &DataPlane{identity: append(ed25519.PrivateKey{}, identity...), options: options, ctx: ctx, cancel: cancel, discoveryWake: make(chan struct{}, 1), repairWake: make(chan struct{}, 1)}
 	runtime.linkState = runtime.newLinkState()
-	runtime.wg.Add(2)
+	runtime.sessions.init()
+	runtime.wg.Add(3)
+	go runtime.rerouteLoop()
 	go runtime.repairLoop()
 	go func() { defer runtime.wg.Done(); runtime.linkState.Run(ctx) }()
 	if options.Endpoints != nil {
@@ -183,6 +189,9 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 		}
 		next.mesh.EnableWireGuard(r.receiveWireGuard)
 		next.mesh.EnableStreams(r.acceptTCP)
+		if r.options.legacyStreams {
+			next.mesh.DisableResume()
+		}
 		next.mesh.EnableLinkState(r.linkStateHandler())
 		next.mesh.EnableCompact(r.compactHeader)
 		newMesh = true
@@ -192,7 +201,6 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 	if err != nil {
 		return err
 	}
-	router.SetTCPIntercept(r.interceptTCP)
 	next.router = router
 	for _, network := range snapshot.Networks {
 		fingerprint := tcpFingerprint(network)
@@ -251,6 +259,7 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 	default:
 	}
 	committed = true
+	r.routesChanged()
 	r.options.Logger.Info("configuration applied", "revision", snapshot.Revision, "networks", len(snapshot.Networks), "listen_port", snapshot.ListenPort)
 	for id, device := range next.devices {
 		if previous == nil || previous.devices[id] != device {
@@ -314,7 +323,9 @@ func (r *DataPlane) Report() []model.LinkStatus {
 	if state == nil {
 		return nil
 	}
-	return state.mesh.Report()
+	links := state.mesh.Report()
+	r.countSessions(state, links)
+	return links
 }
 func (r *DataPlane) Close() error {
 	r.applyMu.Lock()

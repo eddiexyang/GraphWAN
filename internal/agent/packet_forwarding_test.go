@@ -94,8 +94,8 @@ func countingPacketProxy(t *testing.T, upstream string) (string, *atomic.Int32) 
 }
 
 func TestTCPPacketsReuseConvergedTunnels(t *testing.T) {
-	// Edges whose Links carry streams terminate TCP into byte streams
-	// (tcp_test.go). Packets stay unchanged on Edges without streams.
+	// Edges with streams or session carriers terminate TCP (tcp_test.go,
+	// session_test.go). Packets stay unchanged toward Agents with neither.
 	for _, carrier := range []model.Transport{model.UDP} {
 		t.Run(string(carrier), func(t *testing.T) { testTCPPacketsReuseConvergedTunnels(t, carrier) })
 	}
@@ -135,7 +135,8 @@ func testTCPPacketsReuseConvergedTunnels(t *testing.T, carrier model.Transport) 
 		seed := make([]byte, ed25519.SeedSize)
 		seed[0] = byte(i + 1)
 		agent, err := NewDataPlane(ctx, ed25519.NewKeyFromSeed(seed), DataPlaneOptions{
-			BindHost: "127.0.0.1",
+			BindHost:      "127.0.0.1",
+			legacyStreams: true,
 			TunnelFactory: func(config tunnel.Config) (tunnel.Device, error) {
 				devices[i] = &packetTestTUN{config: config, in: make(chan []byte, 128), out: make(chan []byte, 128), done: make(chan struct{})}
 				return devices[i], nil

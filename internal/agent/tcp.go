@@ -86,8 +86,9 @@ func (f *tcpFlows) has(source, destination netip.AddrPort) bool {
 }
 
 // captureTCP chooses the carriage per Edge. A connection is terminated here
-// only when the Edge toward its destination carries streams; otherwise its
-// packets are forwarded as they are. next is empty when not yet routed.
+// when the Edge toward its destination carries streams or session carriers;
+// toward an older Agent without either, its packets are forwarded as they are.
+// next is empty when not yet routed.
 func (r *DataPlane) captureTCP(state *runtimeState, network model.ID, raw []byte, next model.ID) bool {
 	tcp := state.tcp[network]
 	if tcp == nil {
@@ -110,20 +111,10 @@ func (r *DataPlane) captureTCP(state *runtimeState, network model.ID, raw []byte
 		}
 		next = hop
 	}
-	if !state.mesh.StreamsAvailable(network, next) {
+	if !state.mesh.StreamsAvailable(network, next) && !state.mesh.CarrierAvailable(network, next) {
 		return false
 	}
 	tcp.flows.add(source, destination, false)
-	return true
-}
-
-// interceptTCP takes transit TCP that should enter a stream on its next Edge.
-func (r *DataPlane) interceptTCP(network model.ID, raw []byte, next model.ID) bool {
-	state := r.state.Load()
-	if state == nil || !r.captureTCP(state, network, raw, next) {
-		return false
-	}
-	state.tcp[network].engine.Inject(raw)
 	return true
 }
 
@@ -195,7 +186,7 @@ func (r *DataPlane) newTCP(network model.ID, fingerprint string, mtu int, offloa
 		}
 		return state.router.TCPOutput(r.ctx, network, raw)
 	}
-	open := func(ctx context.Context, from, to netip.AddrPort) (streamproxy.Conn, error) {
+	open := func(ctx context.Context, from, to netip.AddrPort) (streamproxy.Remote, error) {
 		state := r.state.Load()
 		if state == nil || state.tcp[network] == nil || state.tcp[network].engine != engine {
 			return nil, net.ErrClosed
@@ -204,7 +195,16 @@ func (r *DataPlane) newTCP(network model.ID, fingerprint string, mtu int, offloa
 		if err != nil {
 			return nil, err
 		}
-		return r.openTCP(ctx, request, "")
+		// A session survives route changes and failed hops; it needs every
+		// hop to support them, else the connection uses a plain stream.
+		if session, err := r.startSession(ctx, request); session != nil || err != nil {
+			return session, err
+		}
+		conn, err := r.openTCP(ctx, request, "")
+		if err != nil {
+			return nil, err
+		}
+		return streamproxy.Pipe(conn), nil
 	}
 	batch := func(packets [][]byte) error {
 		state := r.state.Load()
@@ -360,15 +360,28 @@ func (c *flowConn) Abort() {
 func (r *DataPlane) acceptTCP(parent context.Context, network, remote model.ID, s streamproxy.Conn) {
 	ctx, cancel := context.WithTimeout(parent, streamproxy.ConnectTimeout)
 	defer cancel()
-	var target streamproxy.Conn
+	var request streamproxy.Request
 	err := streamproxy.During(ctx, s, func() error {
-		request, err := streamproxy.ReadRequest(s)
+		var err error
+		request, err = streamproxy.ReadRequest(s)
 		if err != nil {
 			return err
 		}
 		if request.Network != network {
 			return errors.New("stream network disagrees with authenticated channel")
 		}
+		return nil
+	})
+	if err != nil {
+		return
+	}
+	if request.Resumable() {
+		r.acceptChain(parent, ctx, network, remote, s, request)
+		return
+	}
+	var target streamproxy.Conn
+	err = streamproxy.During(ctx, s, func() error {
+		var err error
 		target, err = r.openTCP(ctx, request, remote)
 		if err != nil {
 			s.Write([]byte{1})

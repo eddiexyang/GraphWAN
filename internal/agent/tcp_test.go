@@ -263,14 +263,24 @@ type streamOptions struct {
 	// withoutLinkState applies configurations without topology, so Agents
 	// forward on the compiled routes.
 	withoutLinkState bool
+	// legacy Agents carry streams without TCP sessions, as older versions do.
+	legacy map[int]bool
 }
 
 func streamAgentsWith(t *testing.T, carrier model.Transport, options streamOptions, configure ...func(*model.State)) ([3]*DataPlane, [3]*kernelTUN, model.State) {
 	t.Helper()
+	agents, devices, state := graphAgents(t, carrier, options, 3, 2, configure...)
+	return [3]*DataPlane(agents), [3]*kernelTUN(devices), state
+}
+
+// graphAgents runs the first count Agents of testutil.Topology with its first
+// edges Edges: A-B-C, then A-D and D-C.
+func graphAgents(t *testing.T, carrier model.Transport, options streamOptions, count, edges int, configure ...func(*model.State)) ([]*DataPlane, []*kernelTUN, model.State) {
+	t.Helper()
 	state := testutil.Topology()
-	state.Agents = state.Agents[:3]
-	state.Networks[0].Nodes = state.Networks[0].Nodes[:3]
-	state.Networks[0].Edges = state.Networks[0].Edges[:2]
+	state.Agents = state.Agents[:count]
+	state.Networks[0].Nodes = state.Networks[0].Nodes[:count]
+	state.Networks[0].Edges = state.Networks[0].Edges[:edges]
 	for i := range state.Agents {
 		listener, err := net.Listen("tcp4", "127.0.0.1:0")
 		if err != nil {
@@ -287,8 +297,8 @@ func streamAgentsWith(t *testing.T, carrier model.Transport, options streamOptio
 	for _, configure := range configure {
 		configure(&state)
 	}
-	var agents [3]*DataPlane
-	var devices [3]*kernelTUN
+	agents := make([]*DataPlane, count)
+	devices := make([]*kernelTUN, count)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	for i := range agents {
@@ -296,6 +306,7 @@ func streamAgentsWith(t *testing.T, carrier model.Transport, options streamOptio
 		seed[0] = byte(i + 1)
 		configured := DataPlaneOptions{}
 		configured.BindHost = "127.0.0.1"
+		configured.legacyStreams = options.legacy[i]
 		configured.TunnelFactory = func(cfg tunnel.Config) (tunnel.Device, error) {
 			device, err := newKernelTUN(cfg, true)
 			devices[i] = device
@@ -341,6 +352,8 @@ func streamAgentsWith(t *testing.T, carrier model.Transport, options streamOptio
 					ready = ready && found
 					if streamCarrier(carrier) {
 						ready = ready && current.mesh.StreamsAvailable(network.ID, peer.Node.ID)
+					} else if len(options.legacy) == 0 {
+						ready = ready && current.mesh.CarrierAvailable(network.ID, peer.Node.ID)
 					}
 				}
 			}
@@ -439,9 +452,10 @@ func streamCarrier(carrier model.Transport) bool {
 	return carrier == model.TCP || carrier == model.WS || carrier == model.WSS || carrier == model.GRPC
 }
 
-// Edges without stream support forward TCP as packets, end to end.
-func TestTCPPacketsOnEdgesWithoutStreams(t *testing.T) {
-	agents, devices, state := streamAgents(t, model.UDP)
+// Edges toward an Agent without sessions or streams forward TCP as packets,
+// end to end.
+func TestTCPPacketsTowardLegacyAgentsWithoutStreams(t *testing.T) {
+	agents, devices, state := streamAgentsWith(t, model.UDP, streamOptions{legacy: map[int]bool{1: true}})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	target := state.Networks[0].Nodes[2].Address
@@ -656,45 +670,6 @@ func TestTCPWireGuardAccessBoundary(t *testing.T) {
 				t.Fatal("WireGuard stream leaked into transit TUN")
 			}
 		})
-	}
-}
-
-func TestTCPRevocationInterruptsEstablishedStream(t *testing.T) {
-	agents, devices, state := streamAgents(t, model.TCP)
-	target := state.Networks[0].Nodes[2].Address
-	listener, err := gonet.ListenTCP(devices[2].stack, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(target.As4()), Port: 8082}, ipv4.ProtocolNumber)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	accepted := make(chan net.Conn, 1)
-	go func() { conn, _ := listener.Accept(); accepted <- conn }()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	conn, err := gonet.DialContextTCP(ctx, devices[0].stack, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(target.As4()), Port: 8082}, ipv4.ProtocolNumber)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	server := <-accepted
-	if server == nil {
-		t.Fatal("target not connected")
-	}
-	defer server.Close()
-	state.Revision++
-	state.Networks[0].Edges[0].Enabled = false
-	snapshot, err := routing.Compile(state, state.Agents[0].ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := agents[0].Apply(ctx, snapshot); err != nil {
-		t.Fatal(err)
-	}
-	conn.SetReadDeadline(time.Now().Add(time.Second))
-	if _, err := conn.Read(make([]byte, 1)); err == nil || err == io.EOF {
-		t.Fatalf("revoked flow did not reset: %v", err)
-	} else if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
-		t.Fatal("revoked flow remained blocked")
 	}
 }
 

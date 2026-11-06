@@ -76,10 +76,10 @@ func TestEngineCloseInterruptsIncompleteAccessHandshake(t *testing.T) {
 		default:
 		}
 		return nil
-	}, func(context.Context, netip.AddrPort, netip.AddrPort) (Conn, error) {
+	}, func(context.Context, netip.AddrPort, netip.AddrPort) (Remote, error) {
 		a, b := net.Pipe()
 		b.Close()
-		return halfPipe{a}, nil
+		return Pipe(halfPipe{a}), nil
 	})
 	if err != nil {
 		t.Fatal(err)

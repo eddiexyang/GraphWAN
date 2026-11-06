@@ -91,14 +91,6 @@ func TestTCPPacketsAndTransitIntercept(t *testing.T) {
 	if err := router.FromPeer(context.Background(), a, frame); err != nil || len(sentTo) != 1 || sentTo[0] != c {
 		t.Fatal("transit TCP packet", sentTo, err)
 	}
-	var offered model.ID
-	router.SetTCPIntercept(func(network model.ID, packet []byte, next model.ID) bool {
-		offered = next
-		return network == n.ID && bytes.Equal(packet, raw)
-	})
-	if err := router.FromPeer(context.Background(), a, frame); err != nil || len(sentTo) != 1 || offered != c {
-		t.Fatal("intercepted TCP packet was forwarded", sentTo, offered, err)
-	}
 	if next, local, err := router.NextHop(n.ID, netip.MustParseAddr("10.42.0.3")); err != nil || local || next != c {
 		t.Fatal("next hop", next, local, err)
 	}
