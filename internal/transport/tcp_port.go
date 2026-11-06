@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"github.com/eWloYW8/GraphWAN/internal/sockets"
 	"net"
 	"net/netip"
 	"sync"
@@ -11,7 +12,7 @@ import (
 // ListenTCP retains owned listeners while allowing outgoing TCP connections
 // from its source port. This is required for TCP mapping discovery and punching.
 func ListenTCP(ctx context.Context, address string) (*TCP, error) {
-	config := net.ListenConfig{Control: reuseTCPPort}
+	config := net.ListenConfig{Control: sockets.Control(ctx, reuseTCPPort)}
 	listeners, err := listenIP(address, func(family, address string) (net.Listener, net.Addr, error) {
 		listener, err := config.Listen(ctx, "tcp"+family, address)
 		if err != nil {
@@ -101,6 +102,6 @@ func DialTCPPort(ctx context.Context, local *net.TCPAddr, remote netip.AddrPort)
 		bind.IP = nil
 		bind.Zone = ""
 	}
-	dialer := net.Dialer{LocalAddr: bind, Control: reuseTCPPort}
+	dialer := net.Dialer{LocalAddr: bind, Control: sockets.Control(ctx, reuseTCPPort)}
 	return DialTCP(ctx, &dialer, family, remote.String())
 }

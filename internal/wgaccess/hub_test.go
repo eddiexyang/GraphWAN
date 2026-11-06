@@ -29,7 +29,7 @@ import (
 // isolation, source admission, session retention and revocation without OS TUNs.
 func TestSharedPortWireGuard(t *testing.T) {
 	_, identity, _ := ed25519.GenerateKey(rand.Reader)
-	udp, _, err := transport.ListenUDPQUIC("127.0.0.1:0", identity)
+	udp, _, err := transport.ListenUDPQUIC(context.Background(), "127.0.0.1:0", identity)
 	if err != nil {
 		t.Fatal(err)
 	}

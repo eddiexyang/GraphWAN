@@ -21,7 +21,7 @@ func listenTransports(ctx context.Context, identity ed25519.PrivateKey, host str
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		udp, quic, err := transport.ListenUDPQUIC(tcp.Addr().String(), identity)
+		udp, quic, err := transport.ListenUDPQUIC(ctx, tcp.Addr().String(), identity)
 		if err == nil {
 			return tcp, udp, quic, nil
 		}

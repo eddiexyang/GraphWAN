@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/x509"
 	"errors"
+	"github.com/eWloYW8/GraphWAN/internal/sockets"
 	"net"
 	"net/netip"
 	"net/url"
@@ -135,13 +136,15 @@ func DialGRPCAt(ctx context.Context, endpoint model.Endpoint, family int, identi
 	// authority; the verification callback still checks the original hostname.
 	tlsConfig.ServerName = ""
 	dialer := &net.Dialer{}
+	hooks := sockets.From(ctx)
 	// The resolver target is a URI path, unlike HTTP authority. Escape the
 	// percent sign in a scoped IPv6 literal before grpc-go parses that URI.
 	client, err := grpc.NewClient("passthrough:///"+url.PathEscape(parsed.Host),
 		grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)),
 		grpc.WithAuthority(parsed.Host),
-		grpc.WithContextDialer(func(ctx context.Context, address string) (net.Conn, error) {
-			return DialTCP(ctx, dialer, "tcp"+strconv.Itoa(family), dialAddress)
+		// grpc-go dials with its own context; carry the caller's socket hooks.
+		grpc.WithContextDialer(func(dialCtx context.Context, address string) (net.Conn, error) {
+			return DialTCP(sockets.With(dialCtx, hooks), dialer, "tcp"+strconv.Itoa(family), dialAddress)
 		}),
 		grpc.WithNoProxy(), grpc.WithDisableRetry(), grpc.WithDisableServiceConfig(),
 		grpc.WithMaxHeaderListSize(8192),

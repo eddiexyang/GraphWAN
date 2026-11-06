@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"github.com/eWloYW8/GraphWAN/internal/sockets"
 	"net"
 )
 
@@ -12,7 +13,7 @@ const TCPNotSentLowWater = 64 * 1024
 
 // DialTCP applies the same backlog policy before any TLS/HTTP framing is added.
 func DialTCP(ctx context.Context, dialer *net.Dialer, network, address string) (net.Conn, error) {
-	conn, err := dialer.DialContext(ctx, network, address)
+	conn, err := sockets.Dial(ctx, dialer, network, address)
 	if err != nil {
 		return nil, err
 	}

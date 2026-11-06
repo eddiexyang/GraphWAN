@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"github.com/eWloYW8/GraphWAN/internal/sockets"
 	"net"
 	"net/netip"
 	"net/url"
@@ -189,7 +190,7 @@ func (m *Mesh) dialTCPPunch(ctx context.Context, candidate link.Candidate, ident
 	}
 	addresses := []netip.Addr{target}
 	if !target.IsValid() {
-		addresses, err = net.DefaultResolver.LookupNetIP(ctx, "ip"+strconv.Itoa(candidate.Family), u.Hostname())
+		addresses, err = sockets.LookupNetIP(ctx, "ip"+strconv.Itoa(candidate.Family), u.Hostname())
 		if err != nil {
 			return nil, err
 		}

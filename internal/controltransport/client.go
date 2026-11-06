@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"github.com/eWloYW8/GraphWAN/internal/sockets"
 	"net"
 	"net/http"
 	"net/url"
@@ -94,11 +95,13 @@ func grpcConn(stream messageStream, closeTransport func(), local, remote net.Add
 }
 
 func dialGRPC(ctx context.Context, addr string) (net.Conn, error) {
+	hooks := sockets.From(ctx)
 	cc, err := grpc.NewClient("passthrough:///"+addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithNoProxy(), grpc.WithDisableServiceConfig(),
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-			return transport.DialTCP(ctx, &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}, "tcp", addr)
+		// grpc-go dials with its own context; carry the caller's socket hooks.
+		grpc.WithContextDialer(func(dialCtx context.Context, _ string) (net.Conn, error) {
+			return transport.DialTCP(sockets.With(dialCtx, hooks), &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}, "tcp", addr)
 		}),
 		grpc.WithMaxHeaderListSize(8192),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxChunk+4), grpc.MaxCallSendMsgSize(maxChunk+4)))
