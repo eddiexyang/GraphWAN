@@ -3,6 +3,7 @@ package link
 import (
 	"context"
 	"encoding/binary"
+	"sync"
 	"testing"
 	"time"
 )
@@ -117,5 +118,81 @@ func TestAcceptedLinkLiveness(t *testing.T) {
 	answer(l, start)
 	if l.healthyLocked(start.Add(time.Second)) || l.heartbeat(start.Add(o.Timeout)) {
 		t.Fatal("accepted link survived without dialer pings")
+	}
+}
+
+// A reply that arrives after the health deadline must not revive the Link:
+// selection may already have dropped it, and nothing would select it again.
+func TestLateReplyCannotReviveLink(t *testing.T) {
+	o := (Options{}).defaults()
+	start := time.Unix(1000, 0)
+	l := &Link{ctx: context.Background(), options: o, control: make(chan []byte, 8), pending: map[uint64]time.Time{}}
+	l.heartbeat(start)
+	l.recordPong(l.nextPing, start.Add(time.Millisecond))
+	l.heartbeat(start.Add(o.Heartbeat))
+	late := l.probeSince.Add(o.Timeout)
+	l.recordPong(l.nextPing, late)
+	if l.healthyLocked(late) || l.heartbeat(late) {
+		t.Fatal("a reply after the deadline revived the Link")
+	}
+
+	a := (Options{Accepted: true}).defaults()
+	acceptor := &Link{ctx: context.Background(), options: a, control: make(chan []byte, 8), pending: map[uint64]time.Time{}, started: start, peerPing: start}
+	if !acceptor.expiredLocked(start.Add(a.Timeout)) || acceptor.expiredLocked(start.Add(a.Timeout-time.Millisecond)) {
+		t.Fatal("accepted deadline is not one timeout after the last ping")
+	}
+}
+
+// The health loop closes a Link at its deadline instead of the next heartbeat.
+func TestLinkClosesAtHealthDeadline(t *testing.T) {
+	options := Options{Heartbeat: 300 * time.Millisecond, Timeout: 700 * time.Millisecond}
+	a, b := pipePair()
+	var mute sync.Mutex
+	muted := false
+	// Answer pings until muted, like a peer whose path then goes silent.
+	go func() {
+		for {
+			raw, err := b.Receive(context.Background())
+			if err != nil {
+				return
+			}
+			mute.Lock()
+			silent := muted
+			mute.Unlock()
+			if raw[0] == pingMessage && !silent {
+				reply := append([]byte{}, raw...)
+				reply[0] = pongMessage
+				b.Send(context.Background(), reply)
+			}
+		}
+	}()
+	l := newCompactTestLink(t, a, options)
+	deadline := time.Now().Add(3 * time.Second)
+	for !l.Healthy() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !l.Healthy() {
+		t.Fatal("link did not become healthy")
+	}
+	mute.Lock()
+	muted = true
+	mute.Unlock()
+	// Let a reply already in flight land first.
+	time.Sleep(50 * time.Millisecond)
+	var since time.Time
+	for since.IsZero() {
+		l.mu.Lock()
+		since = l.probeSince
+		l.mu.Unlock()
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-l.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("silent link was not closed")
+	}
+	// Closing on the following heartbeat would take up to Timeout+Heartbeat.
+	if elapsed := time.Since(since); elapsed > options.Timeout+options.Heartbeat/2 {
+		t.Fatalf("link closed %v after its first unanswered probe, want about %v", elapsed, options.Timeout)
 	}
 }
