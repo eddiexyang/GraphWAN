@@ -62,7 +62,11 @@ func (l *Link) receiveSizeProbeHello(raw []byte) bool {
 		return false
 	}
 	l.sizeMode = sizeProbeOn
-	return true
+	// Probe now rather than on the next heartbeat. The acceptor probed when
+	// the Link was created, so until this probe is answered the Link would be
+	// healthy at the acceptor but not here, and selection proposed on it by
+	// the acceptor would be ignored for up to a heartbeat.
+	return l.sizeProbeLocked(time.Now())
 }
 
 func (l *Link) answerSizeProbe(raw []byte) bool {
