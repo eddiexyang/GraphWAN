@@ -90,8 +90,10 @@ func NewClient(cache *Cache, runtime Runtime, options Options) (*Client, error) 
 		} else if options.ServerTransport == "" {
 			options.ServerTransport = existing.Transport
 		}
-		if _, err := cache.TLSCertificate(*existing); err != nil {
-			return nil, err
+		if !existing.KeyOnly() {
+			if _, err := cache.TLSCertificate(*existing); err != nil {
+				return nil, err
+			}
 		}
 		if err := validateDirectory(*existing, existing.Directory); err != nil {
 			return nil, err
@@ -193,7 +195,7 @@ func (c *Client) registration(ctx context.Context) (*Registration, error) {
 		return reg, nil
 	}
 	if c.options.EnrollmentToken == "" {
-		return nil, errors.New("new agent requires an enrollment token")
+		return c.keyRegistration(ctx)
 	}
 	csr, err := c.cache.CSR()
 	if err != nil {
@@ -584,9 +586,13 @@ func (c *Client) selectTarget() (controlTarget, error) {
 		clear(c.failedTargets)
 		selected = &list[0]
 	}
-	cert, err := c.cache.TLSCertificate(*reg)
-	if err != nil {
-		return controlTarget{}, err
+	var certificates []tls.Certificate
+	if !reg.KeyOnly() {
+		cert, err := c.cache.TLSCertificate(*reg)
+		if err != nil {
+			return controlTarget{}, err
+		}
+		certificates = []tls.Certificate{cert}
 	}
 	roots := c.options.Roots
 	if len(reg.CA) > 0 {
@@ -601,7 +607,11 @@ func (c *Client) selectTarget() (controlTarget, error) {
 		c.transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: c.options.GatewayRoots, MinVersion: tls.VersionTLS13}, DialContext: controltransport.DialContext(selected.transport, nil), TLSHandshakeTimeout: 3 * time.Second, ResponseHeaderTimeout: 4 * time.Second, MaxIdleConnsPerHost: 2}
 		c.signer = &challengeSigner{id: reg.AgentID, key: c.cache.PrivateKey()}
 	} else {
-		c.transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, Certificates: []tls.Certificate{cert}, ServerName: selected.tlsName, MinVersion: tls.VersionTLS13}, DialContext: controltransport.DialContext(selected.transport, roots, selected.tlsName), TLSHandshakeTimeout: 3 * time.Second, ResponseHeaderTimeout: 4 * time.Second, MaxIdleConnsPerHost: 2}
+		c.transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, Certificates: certificates, ServerName: selected.tlsName, MinVersion: tls.VersionTLS13}, DialContext: controltransport.DialContext(selected.transport, roots, selected.tlsName), TLSHandshakeTimeout: 3 * time.Second, ResponseHeaderTimeout: 4 * time.Second, MaxIdleConnsPerHost: 2}
+		if reg.KeyOnly() {
+			// Without a certificate the Agent proves its key per request.
+			c.signer = &challengeSigner{id: reg.AgentID, key: c.cache.PrivateKey()}
+		}
 	}
 	c.http.Transport = c.roundTripper(c.transport)
 	c.server = selected.origin

@@ -19,6 +19,8 @@ type challengeSigner struct {
 	base http.RoundTripper
 	id   model.ID
 	key  ed25519.PrivateKey
+	// byKey identifies the Agent by public key, before it knows its ID.
+	byKey bool
 }
 
 func (s *challengeSigner) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -30,9 +32,16 @@ func (s *challengeSigner) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 	signed := req.Clone(req.Context())
-	signed.Header.Set(model.AgentIDHeader, string(s.id))
+	message := model.AgentChallengeMessage(s.id, challenge)
+	if s.byKey {
+		public := s.key.Public().(ed25519.PublicKey)
+		signed.Header.Set(model.AgentKeyHeader, model.EncodeAgentKey(public))
+		message = model.AgentKeyChallengeMessage(public, challenge)
+	} else {
+		signed.Header.Set(model.AgentIDHeader, string(s.id))
+	}
 	signed.Header.Set(model.AgentChallengeHeader, challenge)
-	signed.Header.Set(model.AgentSignatureHeader, base64.RawURLEncoding.EncodeToString(ed25519.Sign(s.key, model.AgentChallengeMessage(s.id, challenge))))
+	signed.Header.Set(model.AgentSignatureHeader, base64.RawURLEncoding.EncodeToString(ed25519.Sign(s.key, message)))
 	return s.base.RoundTrip(signed)
 }
 
