@@ -128,7 +128,14 @@ func (e *Edge) sendLinkLocked() *Link {
 func (e *Edge) Report() []model.LinkStatus {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	active := e.selectLocked(time.Now())
+	var active *Link
+	if e.selection != nil {
+		// Reading status must not advance coordinated selection; Tick and
+		// received messages drive it.
+		active = e.links[e.active]
+	} else {
+		active = e.selectLocked(time.Now())
+	}
 	result := make([]model.LinkStatus, 0, len(e.links))
 	for _, link := range e.links {
 		stats := link.Stats()
