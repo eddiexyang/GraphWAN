@@ -50,11 +50,14 @@ func (s *Server) authenticatedAgent(r *http.Request) (model.ID, error) {
 	return "", errors.New("unknown or revoked agent")
 }
 
+// requestAgent accepts a verified client certificate, or a signed challenge
+// when no certificate is presented: behind a TLS-terminating gateway, or from
+// an Agent registered by public key, which has no certificate.
 func (s *Server) requestAgent(r *http.Request) (model.ID, ed25519.PublicKey, error) {
-	if r.TLS == nil {
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 		return s.signedAgent(r)
 	}
-	if len(r.TLS.VerifiedChains) == 0 || len(r.TLS.PeerCertificates) == 0 {
+	if len(r.TLS.VerifiedChains) == 0 {
 		return "", nil, errors.New("client certificate required")
 	}
 	cert := r.TLS.PeerCertificates[0]

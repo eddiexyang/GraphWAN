@@ -32,6 +32,7 @@ Successful mutations return the committed state and new ETag.
 | POST | `/networks` | Network; omitted ID, MTU and cipher receive defaults |
 | PUT | `/networks/{id}` | Complete Network, including Nodes and Edges |
 | DELETE | `/networks/{id}` | Removes network and all memberships/edges |
+| POST | `/agents` | `name` and `public_key` (base64 Ed25519): registers an Agent by public key |
 | PATCH | `/agents/{id}` | Optional `name`, `listen_port`, `revoked`, `manual_endpoints`, `stun_servers`, `exclude_container_ips` |
 | DELETE | `/agents/{id}` | Removes agent, memberships and incident edges |
 
@@ -119,6 +120,22 @@ a different identity or request cannot reuse it.
 
 The CA must already be trusted when making the enrollment HTTPS request; a CA
 returned in a response is not a substitute for authenticating the server.
+
+### Registration by public key
+
+Instead of enrolling, an operator can register an Agent by its public key with
+`POST /agents`. `graphwan agent key --data-dir PATH` creates the Agent identity
+if needed and prints its public key. Public keys are unique among Agents.
+
+Start that Agent with `--server` and `--ca` and no enrollment token. It calls
+`GET /agent/registration`, signing a challenge from `GET /agent/challenge` with
+its key: `X-GraphWAN-Agent-Key` carries the base64url public key and
+`X-GraphWAN-Signature` signs `graphwan agent key challenge v1\n<key>\n<challenge>`.
+The response contains `agent_id`, `ca_certificate` and the controller directory,
+as enrollment would, but no certificate. The Agent then signs every request with
+its ID, as behind a TLS-terminating gateway. The controller accepts a signed
+challenge on direct TLS connections that present no client certificate.
+Revocation applies as for enrolled Agents.
 
 ## Agent connection
 
