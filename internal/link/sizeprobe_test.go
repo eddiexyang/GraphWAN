@@ -228,3 +228,25 @@ func TestSizeProbeEndToEnd(t *testing.T) {
 		}
 	})
 }
+
+// The dialer probes as soon as the acceptor announces size probes, not on its
+// next heartbeat. Otherwise the Link is healthy at the acceptor, which may
+// propose it for selection, while the dialer still ignores it for up to a
+// heartbeat.
+func TestDialerProbesWhenHelloArrives(t *testing.T) {
+	defaults := (Options{}).defaults()
+	dialerOptions, acceptorOptions := Options{SizeProbe: true}, Options{Accepted: true, SizeProbe: true, SizeProbeHello: true}
+	a, b := pipePair()
+	start := time.Now()
+	dialer := newCompactTestLink(t, a, dialerOptions)
+	acceptor := newCompactTestLink(t, b, acceptorOptions)
+	for !(dialer.Healthy() && acceptor.Healthy()) {
+		if time.Since(start) > defaults.Heartbeat {
+			t.Fatalf("dialer healthy=%v acceptor healthy=%v after a heartbeat", dialer.Healthy(), acceptor.Healthy())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if elapsed := time.Since(start); elapsed > defaults.Heartbeat/4 {
+		t.Fatalf("both ends verified only after %v", elapsed)
+	}
+}
