@@ -47,14 +47,22 @@ func (s *Server) consumeChallenge(challenge string) bool {
 	return ok && time.Now().Before(expires)
 }
 
+// signedAgent identifies the Agent by ID, or by public key for an Agent that
+// was registered by key and has not learned its ID yet.
 func (s *Server) signedAgent(r *http.Request) (model.ID, ed25519.PublicKey, error) {
-	id := model.ID(r.Header.Get(model.AgentIDHeader))
 	challenge := r.Header.Get(model.AgentChallengeHeader)
 	signature, err := base64.RawURLEncoding.DecodeString(r.Header.Get(model.AgentSignatureHeader))
 	if err != nil || challenge == "" || len(signature) != ed25519.SignatureSize {
 		return "", nil, errors.New("agent signature required")
 	}
-	if err := id.Validate(); err != nil {
+	id := model.ID(r.Header.Get(model.AgentIDHeader))
+	var key ed25519.PublicKey
+	if raw := r.Header.Get(model.AgentKeyHeader); raw != "" {
+		var ok bool
+		if key, ok = model.ParseAgentKey(raw); !ok || id != "" {
+			return "", nil, errors.New("invalid agent key")
+		}
+	} else if err := id.Validate(); err != nil {
 		return "", nil, err
 	}
 	if !s.consumeChallenge(challenge) {
@@ -65,9 +73,23 @@ func (s *Server) signedAgent(r *http.Request) (model.ID, ed25519.PublicKey, erro
 		return "", nil, err
 	}
 	for _, a := range state.Agents {
-		if a.ID == id && len(a.PublicKey) == ed25519.PublicKeySize && ed25519.Verify(ed25519.PublicKey(a.PublicKey), model.AgentChallengeMessage(id, challenge), signature) {
-			return id, ed25519.PublicKey(a.PublicKey), nil
+		if len(a.PublicKey) != ed25519.PublicKeySize {
+			continue
 		}
+		pub := ed25519.PublicKey(a.PublicKey)
+		message := model.AgentChallengeMessage(a.ID, challenge)
+		if key != nil {
+			if !key.Equal(pub) {
+				continue
+			}
+			message = model.AgentKeyChallengeMessage(key, challenge)
+		} else if a.ID != id {
+			continue
+		}
+		if ed25519.Verify(pub, message, signature) {
+			return a.ID, pub, nil
+		}
+		break
 	}
 	return "", nil, errors.New("invalid agent signature")
 }
