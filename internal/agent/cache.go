@@ -42,7 +42,19 @@ type Cache struct {
 	key ed25519.PrivateKey
 }
 
-func OpenCache(path string) (*Cache, error) {
+func OpenCache(path string) (*Cache, error) { return openCache(path, nil) }
+
+// OpenCacheWithKey opens a cache for an identity kept by the caller, for
+// example in an embedding application's configuration. A cache created for a
+// different identity is refused.
+func OpenCacheWithKey(path string, identity ed25519.PrivateKey) (*Cache, error) {
+	if len(identity) != ed25519.PrivateKeySize || !bytes.Equal(ed25519.NewKeyFromSeed(identity.Seed()), identity) {
+		return nil, errors.New("invalid private identity")
+	}
+	return openCache(path, identity)
+}
+
+func openCache(path string, identity ed25519.PrivateKey) (*Cache, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return nil, err
 	}
@@ -65,14 +77,18 @@ func OpenCache(path string) (*Cache, error) {
 			if !bytes.Equal(derived, key) {
 				return errors.New("corrupted private identity")
 			}
+			if identity != nil && !bytes.Equal(key, identity) {
+				return errors.New("cache belongs to a different identity")
+			}
 			cache.key = bytes.Clone(key)
 			return nil
 		}
 		if b.Get([]byte("registration")) != nil || b.Get([]byte("desired")) != nil {
 			return errors.New("agent identity is missing from existing cache")
 		}
-		_, key, err = ed25519.GenerateKey(rand.Reader)
-		if err != nil {
+		if identity != nil {
+			key = bytes.Clone(identity)
+		} else if _, key, err = ed25519.GenerateKey(rand.Reader); err != nil {
 			return err
 		}
 		cache.key = bytes.Clone(key)

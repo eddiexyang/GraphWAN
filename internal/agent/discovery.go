@@ -30,7 +30,7 @@ func (r *DataPlane) discover() {
 		if state == nil {
 			continue
 		}
-		endpoints, err := discovery.InterfacesWithOptions(r.identity.Public().(ed25519.PublicKey), state.snapshot.ListenPort, discovery.InterfaceOptions{ExcludeContainerIPs: state.snapshot.ExcludeContainerIPs})
+		endpoints, err := discovery.InterfacesWithOptions(r.identity.Public().(ed25519.PublicKey), state.mesh.Port(), discovery.InterfaceOptions{ExcludeContainerIPs: state.snapshot.ExcludeContainerIPs})
 		if err != nil {
 			r.options.Logger.Warn("interface discovery failed", "error", err)
 			continue
