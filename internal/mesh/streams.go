@@ -17,6 +17,20 @@ func (m *Mesh) EnableStreams(handler StreamHandler) {
 	m.mu.Unlock()
 }
 
+// DisableResume carries streams without TCP sessions, as Agents before them
+// did. It is called before this Mesh is published to the dataplane.
+func (m *Mesh) DisableResume() {
+	m.mu.Lock()
+	m.noResume = true
+	m.mu.Unlock()
+}
+
+func (m *Mesh) resumeEnabled() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.streamHandler != nil && !m.noResume
+}
+
 func (m *Mesh) streamsEnabled() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -36,6 +50,15 @@ func (m *Mesh) StreamsAvailable(network, remote model.ID) bool {
 	return g != nil && g.mux.Available()
 }
 
+// ResumeAvailable reports whether a stream to remote can carry a resumable TCP
+// session: both Agents support them.
+func (m *Mesh) ResumeAvailable(network, remote model.ID) bool {
+	m.mu.Lock()
+	g := m.groups[key{network, remote}]
+	m.mu.Unlock()
+	return g != nil && g.mux.Resumable()
+}
+
 // OpenStream starts a stream on the Edge's current Link. It sends nothing until
 // the caller writes, and never dials, handshakes or probes candidates.
 func (m *Mesh) OpenStream(ctx context.Context, network, remote model.ID) (streamproxy.Conn, error) {
@@ -48,12 +71,19 @@ func (m *Mesh) OpenStream(ctx context.Context, network, remote model.ID) (stream
 	return g.mux.Open(ctx)
 }
 
-func (m *Mesh) acceptMuxStream(g *group, s *muxStream) {
+func (m *Mesh) acceptMuxStream(g *group, s *muxStream) { m.acceptHop(g, s) }
+
+// acceptHop hands a stream or carrier connection from the Edge's peer to the
+// stream handler, and closes it when the handler returns.
+func (m *Mesh) acceptHop(g *group, s streamproxy.Conn) {
 	m.mu.Lock()
 	handler := m.streamHandler
 	if handler == nil || m.closed {
 		m.mu.Unlock()
-		s.Abort()
+		if a, ok := s.(interface{ Abort() }); ok {
+			a.Abort()
+		}
+		s.Close()
 		return
 	}
 	m.wg.Add(1)

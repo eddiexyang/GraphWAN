@@ -39,6 +39,11 @@ const (
 	// [compactDataMessage][hop limit][IP packet]. The receiver rebuilds it.
 	compactHelloMessage = 15
 	compactDataMessage  = 16
+	// The acceptor confirms resumable TCP sessions offered in the introduction;
+	// see Options.Resume. Carrier messages then hold one IP packet of the
+	// Edge's carrier TCP: [carrierMessage][packet].
+	resumeHelloMessage = 20
+	carrierMessage     = 21
 	// Leave room for multiple kernel GSO bursts while writers process bounded
 	// batches. The queue is still finite; control messages use a separate queue.
 	queueSize = 512
@@ -83,6 +88,13 @@ type Options struct {
 	// side enables streams when that announcement arrives.
 	Streams     StreamHandler
 	StreamHello bool
+	// Resume offers (dialer) or confirms (acceptor) resumable TCP sessions,
+	// carried on the streams or, without them, by a TCP between the Agents'
+	// overlay addresses. The acceptor confirms with a hello message.
+	Resume bool
+	// Carrier receives the carrier TCP's packets; the packet is only valid
+	// during the call.
+	Carrier func(*Link, []byte)
 	// LinkState carries link-state advertisements; LinkStateHello is set by
 	// the accepting side, as for streams. Any transport may carry them.
 	LinkState      LinkStateHandler
@@ -177,6 +189,7 @@ type Link struct {
 	sent, lost      uint64
 	rx, tx, dropped atomic.Uint64
 	streamsReady    atomic.Bool
+	resume          atomic.Bool
 	streamWake      chan struct{}
 	linkStateReady  atomic.Bool
 	linkStateOut    chan []byte
@@ -223,6 +236,10 @@ func New(parent context.Context, channel Channel, info Info, options Options) (*
 		// The queue is empty here, so the announcement precedes every stream frame.
 		l.control <- []byte{streamHelloMessage, 1}
 		l.streamsReady.Store(true)
+	}
+	if options.Resume && options.Accepted {
+		l.control <- []byte{resumeHelloMessage, 1}
+		l.resume.Store(true)
 	}
 	if options.LinkState != nil && options.LinkStateHello {
 		l.control <- []byte{linkStateHelloMessage, 1}
@@ -296,6 +313,9 @@ func (l *Link) logAttrs(extra ...any) []any {
 }
 func (l *Link) ID() string         { return l.channel.ID() }
 func (l *Link) StreamsReady() bool { return l.streamsReady.Load() }
+
+// Resume reports whether both ends carry resumable TCP sessions.
+func (l *Link) Resume() bool { return l.resume.Load() }
 
 func (l *Link) LinkStateReady() bool { return l.linkStateReady.Load() }
 
@@ -425,6 +445,35 @@ func (l *Link) enqueue(ctx context.Context, frames [][]byte, owners []*packetbuf
 		l.dropped.Add(uint64(len(frames) - accepted))
 		return ErrQueueFull
 	}
+	return nil
+}
+
+// SendCarrier queues one packet of the carrier TCP like a data packet. A full
+// queue drops it; the carrier recovers as TCP does.
+func (l *Link) SendCarrier(raw []byte) error {
+	if !l.resume.Load() || len(raw) == 0 || len(raw) > packet.MaxPayload {
+		return ErrUnavailable
+	}
+	l.queueMu.Lock()
+	defer l.queueMu.Unlock()
+	if l.ctx.Err() != nil {
+		return net.ErrClosed
+	}
+	generation := l.dataGeneration.Load()
+	if generation%2 == 0 {
+		return ErrUnavailable
+	}
+	if l.dataCount == len(l.data) || l.tcpBacked() && l.dataBytes+len(raw)+1 > tcpQueueBytes {
+		l.dropped.Add(1)
+		return ErrQueueFull
+	}
+	buffer := packetbuf.Get(len(raw) + 1)
+	buffer.Data[0] = carrierMessage
+	copy(buffer.Data[1:], raw)
+	l.data[(l.dataHead+l.dataCount)%len(l.data)] = queuedPacket{generation: generation, raw: buffer.Data, buffer: buffer}
+	l.dataCount++
+	l.dataBytes += len(buffer.Data)
+	l.notifyData()
 	return nil
 }
 
@@ -628,6 +677,12 @@ func (l *Link) readLoop() {
 			if !l.streamsReady.Swap(true) {
 				l.options.Streams.StreamsReady(l)
 			}
+		case resumeHelloMessage:
+			if len(raw) != 2 || !l.options.Resume || l.options.Accepted {
+				return
+			}
+			l.sizeProbeUnsupported()
+			l.resume.Store(true)
 		case linkStateHelloMessage:
 			if len(raw) != 2 || l.options.LinkState == nil || l.options.LinkStateHello {
 				return
@@ -641,6 +696,14 @@ func (l *Link) readLoop() {
 				return
 			}
 			l.options.LinkState.ReceiveLinkState(l, raw[1:])
+		case carrierMessage:
+			if !l.resume.Load() || len(raw) < 2 || len(raw) > packet.MaxPayload+1 {
+				return
+			}
+			l.rx.Add(uint64(len(raw) - 1))
+			if l.options.Carrier != nil {
+				l.options.Carrier(l, raw[1:])
+			}
 		case streamMessage:
 			if !l.streamsReady.Load() {
 				return
@@ -801,7 +864,7 @@ func (l *Link) writeLoop() {
 		}
 		for i, raw := range messages[:count] {
 			switch raw[0] {
-			case dataMessage, streamMessage:
+			case dataMessage, streamMessage, carrierMessage:
 				l.tx.Add(uint64(len(raw) - 1))
 			case compactDataMessage:
 				l.tx.Add(uint64(len(raw) - 2 + packet.HeaderSize))

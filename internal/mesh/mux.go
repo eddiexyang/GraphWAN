@@ -125,6 +125,13 @@ func (m *mux) Available() bool {
 	return !m.closed && m.current != nil
 }
 
+// Resumable reports whether new streams can carry resumable TCP sessions.
+func (m *mux) Resumable() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return !m.closed && m.current != nil && m.current.Resume()
+}
+
 func (m *mux) Open(ctx context.Context) (*muxStream, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

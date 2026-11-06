@@ -39,6 +39,7 @@ type policy struct {
 }
 type Mesh struct {
 	streamHandler  StreamHandler
+	noResume       bool
 	linkState      atomic.Pointer[LinkStateHandler]
 	compact        link.CompactHeader
 	extensionMu    sync.Mutex
@@ -427,10 +428,11 @@ func (m *Mesh) accept(conn transport.Conn, kind model.Transport) {
 		}
 		// The acceptor confirms each offered capability in band.
 		streams := introduction.TCPStreams && m.streamsEnabled() && streamTransport(kind)
+		resume := introduction.TCPResume && m.resumeEnabled()
 		linkState := introduction.LinkState && m.linkStateEnabled()
 		compact := introduction.CompactData && m.compactHeader() != nil
 		sizeProbe := introduction.SizeProbe && streamTransport(kind)
-		selected.register(channel, *candidate, introduction.PathExchange, linkCaps{streams: streams, streamHello: true, linkState: linkState, linkStateHello: true, compact: compact, compactHello: true, sizeProbe: sizeProbe, sizeProbeHello: true, accepted: true})
+		selected.register(channel, *candidate, introduction.PathExchange, linkCaps{streams: streams, resume: resume, streamHello: true, linkState: linkState, linkStateHello: true, compact: compact, compactHello: true, sizeProbe: sizeProbe, sizeProbeHello: true, accepted: true})
 	}()
 }
 func addressFamily(address net.Addr) int {
@@ -450,6 +452,7 @@ func addressFamily(address net.Addr) int {
 
 type group struct {
 	mux               *mux
+	carrier           *carrier // guarded by mu; started on first use
 	extensionInflight int
 	extensionStart    time.Time
 	mesh              *Mesh
@@ -496,6 +499,13 @@ func (g *group) close() {
 	g.mux.close()
 	g.cancel()
 	g.mu.Lock()
+	carrier := g.carrier
+	g.carrier = nil
+	g.mu.Unlock()
+	if carrier != nil {
+		carrier.close()
+	}
+	g.mu.Lock()
 	links := make([]*link.Link, 0, len(g.links))
 	for _, l := range g.links {
 		links = append(links, l)
@@ -511,6 +521,7 @@ func (g *group) close() {
 // offer (acceptor, which announces each with a hello message).
 type linkCaps struct {
 	streams, streamHello, linkState, linkStateHello bool
+	resume                                          bool
 	compact, compactHello                           bool
 	sizeProbe, sizeProbeHello                       bool
 	accepted                                        bool
@@ -544,6 +555,10 @@ func (g *group) register(channel *peer.Channel, candidate link.Candidate, pathEx
 		options.Compact, options.CompactHello = g.mesh.compactHeader(), caps.compactHello
 	}
 	options.SizeProbe, options.SizeProbeHello = caps.sizeProbe, caps.sizeProbeHello
+	options.Resume = caps.resume
+	if caps.resume {
+		options.Carrier = g.receiveCarrier
+	}
 	l, err := link.New(g.ctx, channel, link.Info{NetworkID: cfg.network, EdgeID: cfg.peer.Edge.ID, PeerID: cfg.peer.Node.ID, CandidateID: candidate.ID, Transport: candidate.Endpoint.Transport}, options)
 	if err != nil {
 		g.mu.Unlock()
