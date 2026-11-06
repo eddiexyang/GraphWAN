@@ -85,8 +85,14 @@ func TestClientReachesServicesThroughTheNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	// The controller first knows another key for D, so the client's first
+	// registration fails; it must recover once the right key is registered.
+	initial := state
+	initial.Agents = append([]model.Agent(nil), state.Agents...)
+	_, otherKey, _ := ed25519.GenerateKey(rand.Reader)
+	initial.Agents[3].PublicKey = otherKey.Public().(ed25519.PublicKey)
 	current, _ := db.Read()
-	if _, err := db.Update(current.Revision, func(s *model.State) error { *s = state; return nil }); err != nil {
+	if _, err := db.Update(current.Revision, func(s *model.State) error { *s = initial; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	server, err := control.New(db, control.Options{Password: "test-password-123"})
@@ -127,6 +133,11 @@ func TestClientReachesServicesThroughTheNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
+	time.Sleep(500 * time.Millisecond)
+	current, _ = db.Read()
+	if _, err := db.Update(current.Revision, func(s *model.State) error { s.Agents[3].PublicKey = state.Agents[3].PublicKey; return nil }); err != nil {
+		t.Fatal(err)
+	}
 
 	serve := func(s *netstack, port uint16) {
 		l, err := gonet.ListenTCP(s.stack, fullAddress(netip.AddrPortFrom(s.address(), port)), s.protocol())
