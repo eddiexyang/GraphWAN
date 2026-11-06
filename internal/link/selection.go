@@ -23,9 +23,6 @@ type selectionState struct {
 	target              string
 	accepted, confirmed bool
 	retry               time.Time
-	// backoff spaces resends to a peer that does not answer, such as one
-	// still waiting for the previous leader's Links to leave.
-	backoff time.Duration
 	// A Link belongs to exactly one leader incarnation. This also bounds memory
 	// by live Links rather than accumulating all historical negotiation terms.
 	terms map[string][16]byte
@@ -33,14 +30,6 @@ type selectionState struct {
 
 // NewCoordinatedEdge elects the lexicographically smaller Node ID as selector.
 // Both endpoints must have distinct validated Node IDs from the same Edge.
-// Selection resends start at selectionRetry and double up to selectionRetryMax,
-// the heartbeat interval: an unanswered negotiation costs at most one message
-// per heartbeat instead of one per Edge tick.
-const (
-	selectionRetry    = 100 * time.Millisecond
-	selectionRetryMax = 2 * time.Second
-)
-
 func NewCoordinatedEdge(local, remote model.ID, preferred string) *Edge {
 	e := newEdge(preferred)
 	e.selection = &selectionState{leader: local < remote, terms: map[string][16]byte{}}
@@ -84,7 +73,7 @@ func (e *Edge) advanceLocked(now time.Time) {
 	}
 	if best.ID() != s.target {
 		s.sequence++
-		s.target, s.accepted, s.confirmed, s.retry, s.backoff = best.ID(), false, false, time.Time{}, 0
+		s.target, s.accepted, s.confirmed, s.retry = best.ID(), false, false, time.Time{}
 	}
 	if s.confirmed || now.Before(s.retry) {
 		return
@@ -94,12 +83,7 @@ func (e *Edge) advanceLocked(now time.Time) {
 		kind = commitMessage
 	}
 	best.sendSelection(kind, s.term, s.sequence)
-	s.retryLater(now)
-}
-
-func (s *selectionState) retryLater(now time.Time) {
-	s.backoff = min(max(2*s.backoff, selectionRetry), selectionRetryMax)
-	s.retry = now.Add(s.backoff)
+	s.retry = now.Add(100 * time.Millisecond)
 }
 
 // HandleSelection never trusts an announcement from another Edge, an unhealthy
@@ -119,12 +103,11 @@ func (e *Edge) HandleSelection(l *Link, message Selection) {
 		switch message.kind {
 		case acceptMessage:
 			if !s.accepted {
-				// The commit is a new phase: resend it promptly.
-				s.accepted, s.backoff = true, 0
+				s.accepted = true
 				e.activateLocked(l, now)
 			}
 			l.sendSelection(commitMessage, s.term, s.sequence)
-			s.retryLater(now)
+			s.retry = now.Add(100 * time.Millisecond)
 		case confirmMessage:
 			if s.accepted {
 				s.confirmed = true
