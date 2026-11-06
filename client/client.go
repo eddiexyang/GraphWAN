@@ -138,8 +138,23 @@ func Start(ctx context.Context, cfg Config) (*Client, error) {
 	c.control = control
 	go func() {
 		defer close(c.done)
-		if err := control.Run(c.ctx); err != nil && c.ctx.Err() == nil {
-			cfg.Logger.Error("graphwan client stopped", "error", err)
+		// An Agent process exits on a registration error and its service
+		// manager restarts it. Nothing restarts an embedded node, so retry
+		// here: the controller may be briefly unreachable, or the key not yet
+		// registered.
+		delay := time.Second
+		for {
+			err := control.Run(c.ctx)
+			if c.ctx.Err() != nil {
+				return
+			}
+			cfg.Logger.Warn("graphwan client node restarting", "error", err, "retry_in", delay)
+			select {
+			case <-c.ctx.Done():
+				return
+			case <-time.After(delay):
+			}
+			delay = min(2*delay, time.Minute)
 		}
 	}()
 	return c, nil
