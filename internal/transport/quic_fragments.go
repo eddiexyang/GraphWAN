@@ -46,7 +46,17 @@ func (r *quicReassembler) receive(fragment []byte, now time.Time) []byte {
 	record := r.pending[id]
 	if record == nil {
 		if len(r.pending) >= quicReassemblies {
-			return nil
+			// Give the slot of the oldest incomplete message to this one.
+			// Rejecting it instead would leave its later fragments to start a
+			// record that can never complete, so after a burst of losses the
+			// table would stay full and drop every fragmented message.
+			var oldest uint64
+			for other, pending := range r.pending {
+				if oldest == 0 || pending.expires.Before(r.pending[oldest].expires) {
+					oldest = other
+				}
+			}
+			delete(r.pending, oldest)
 		}
 		record = &quicAssembly{raw: make([]byte, total), expires: now.Add(quicAssemblyLifetime)}
 		r.pending[id] = record
