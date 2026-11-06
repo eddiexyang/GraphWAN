@@ -37,7 +37,8 @@ func (q *queue) Pop() any     { a := *q; v := a[len(a)-1]; *q = a[:len(a)-1]; re
 
 // shortest assumes a validated graph. Positive weights make equal-cost next-hop
 // tie breaking deterministic and keep independently compiled routes loop free.
-func shortest(n model.Network, source model.ID, excluded map[model.ID]bool) []model.Route {
+// Client nodes are destinations or the source, never transit hops.
+func shortest(n model.Network, source model.ID, excluded map[model.ID]bool, clients map[model.ID]bool) []model.Route {
 	adjacency := map[model.ID][]arc{}
 	for _, e := range n.EffectiveEdges() {
 		if !e.Enabled || excluded[e.A] || excluded[e.B] {
@@ -51,6 +52,9 @@ func shortest(n model.Network, source model.ID, excluded map[model.ID]bool) []mo
 	for q.Len() > 0 {
 		current := heap.Pop(q).(item)
 		if best[current.node] != current {
+			continue
+		}
+		if current.node != source && clients[current.node] {
 			continue
 		}
 		for _, a := range adjacency[current.node] {
@@ -76,6 +80,17 @@ func shortest(n model.Network, source model.ID, excluded map[model.ID]bool) []mo
 	return routes
 }
 
+// ClientNodes lists a Network's client nodes, which routes never transit.
+func ClientNodes(n model.Network) map[model.ID]bool {
+	clients := map[model.ID]bool{}
+	for _, node := range n.Nodes {
+		if node.Client {
+			clients[node.ID] = true
+		}
+	}
+	return clients
+}
+
 // LocalRoutes computes an Agent's forwarding table over the edges usable
 // reports, with the same metric and tie breaking as the controller.
 func LocalRoutes(config model.NetworkConfig, usable func(model.TopologyEdge) bool) []model.Route {
@@ -85,7 +100,11 @@ func LocalRoutes(config model.NetworkConfig, usable func(model.TopologyEdge) boo
 			n.Edges = append(n.Edges, model.Edge{ID: e.ID, A: e.A, B: e.B, Weight: e.Weight, Enabled: true})
 		}
 	}
-	return shortest(n, config.Self.ID, nil)
+	clients := map[model.ID]bool{}
+	for _, d := range config.Directory {
+		clients[d.NodeID] = d.Client
+	}
+	return shortest(n, config.Self.ID, nil, clients)
 }
 
 func Compile(state model.State, agentID model.ID) (model.Snapshot, error) {
@@ -124,7 +143,7 @@ func Compile(state model.State, agentID model.ID) (model.Snapshot, error) {
 		if me.ID == "" {
 			continue
 		}
-		config := model.NetworkConfig{ID: network.ID, Name: network.Name, CIDR: network.CIDR, MTU: network.MTU, Cipher: network.Cipher, Self: me, Directory: []model.Destination{}, Peers: []model.Peer{}, Routes: shortest(network, me.ID, excluded)}
+		config := model.NetworkConfig{ID: network.ID, Name: network.Name, CIDR: network.CIDR, MTU: network.MTU, Cipher: network.Cipher, Self: me, Directory: []model.Destination{}, Peers: []model.Peer{}, Routes: shortest(network, me.ID, excluded, ClientNodes(network))}
 		for _, e := range network.EffectiveEdges() {
 			if e.Enabled && !excluded[e.A] && !excluded[e.B] {
 				config.Topology = append(config.Topology, model.TopologyEdge{ID: e.ID, A: e.A, B: e.B, Weight: e.Weight})
@@ -133,7 +152,7 @@ func Compile(state model.State, agentID model.ID) (model.Snapshot, error) {
 		slices.SortFunc(config.Topology, func(a, b model.TopologyEdge) int { return cmp.Compare(a.ID, b.ID) })
 		for _, node := range network.Nodes {
 			if !excluded[node.ID] {
-				config.Directory = append(config.Directory, model.Destination{NodeID: node.ID, Address: node.Address, AdvertisedSubnets: append([]model.AdvertisedSubnet(nil), node.AdvertisedSubnets...)})
+				config.Directory = append(config.Directory, model.Destination{NodeID: node.ID, Address: node.Address, AdvertisedSubnets: append([]model.AdvertisedSubnet(nil), node.AdvertisedSubnets...), Client: node.Client})
 			}
 		}
 		for _, edge := range network.EffectiveEdges() {

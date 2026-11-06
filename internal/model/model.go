@@ -90,7 +90,11 @@ type WireGuardNode struct {
 }
 
 type Node struct {
-	WireGuard         *WireGuardNode     `json:"wireguard,omitempty"`
+	WireGuard *WireGuardNode `json:"wireguard,omitempty"`
+	// Client marks an Agent node that only originates and receives its own
+	// traffic, such as an outbound embedded in a proxy client. Routes never
+	// pass through it, and it advertises no subnets.
+	Client            bool               `json:"client,omitempty"`
 	AdvertisedSubnets []AdvertisedSubnet `json:"advertised_subnets,omitempty"`
 	ID                ID                 `json:"id"`
 	AgentID           ID                 `json:"agent_id"`

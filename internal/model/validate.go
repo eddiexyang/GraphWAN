@@ -249,6 +249,9 @@ func (s State) Validate() error {
 			if err := validateName(node.Name); err != nil {
 				return fmt.Errorf("node %s: %w", node.ID, err)
 			}
+			if node.Client && (node.WireGuard != nil || len(node.AdvertisedSubnets) != 0) {
+				return fmt.Errorf("node %s: client nodes cannot be WireGuard nodes or advertise subnets", node.ID)
+			}
 			if node.WireGuard != nil {
 				if node.AgentID != "" || len(node.AdvertisedSubnets) != 0 {
 					return fmt.Errorf("WireGuard nodes cannot have an agent identity or advertised subnets")
@@ -289,9 +292,11 @@ func (s State) Validate() error {
 			nodes[node.ID] = true
 		}
 		wgNodes := map[ID]bool{}
+		clientNodes := map[ID]bool{}
 		degrees := map[ID]int{}
 		for _, node := range n.Nodes {
 			wgNodes[node.ID] = node.WireGuard != nil
+			clientNodes[node.ID] = node.Client
 		}
 		if err := n.validateGroups(addID); err != nil {
 			return err
@@ -315,6 +320,9 @@ func (s State) Validate() error {
 			pairs[pair] = true
 			degrees[e.A]++
 			degrees[e.B]++
+			if clientNodes[e.A] && (clientNodes[e.B] || wgNodes[e.B]) || clientNodes[e.B] && wgNodes[e.A] {
+				return fmt.Errorf("edge %s: client nodes connect only to regular Agent nodes", e.ID)
+			}
 			if wgNodes[e.A] || wgNodes[e.B] {
 				if wgNodes[e.A] && wgNodes[e.B] {
 					return fmt.Errorf("WireGuard nodes require a regular Agent neighbor")

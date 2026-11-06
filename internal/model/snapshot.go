@@ -41,8 +41,10 @@ type TopologyEdge struct {
 
 type Destination struct {
 	AdvertisedSubnets []AdvertisedSubnet `json:"advertised_subnets,omitempty"`
-	NodeID            ID                 `json:"node_id"`
-	Address           netip.Addr         `json:"address"`
+	// Client destinations are never transit hops; see Node.Client.
+	Client  bool       `json:"client,omitempty"`
+	NodeID  ID         `json:"node_id"`
+	Address netip.Addr `json:"address"`
 }
 
 type Peer struct {
