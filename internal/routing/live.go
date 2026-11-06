@@ -94,7 +94,7 @@ func LiveRoutes(state model.State, snapshot model.Snapshot, up map[EdgeKey]bool)
 			for _, node := range n.Nodes {
 				excluded[node.ID] = revoked[node.AgentID]
 			}
-			out.Networks = append(out.Networks, model.NetworkRoutes{ID: n.ID, Routes: shortest(n, config.Self.ID, excluded)})
+			out.Networks = append(out.Networks, model.NetworkRoutes{ID: n.ID, Routes: shortest(n, config.Self.ID, excluded, ClientNodes(n))})
 			break
 		}
 	}
