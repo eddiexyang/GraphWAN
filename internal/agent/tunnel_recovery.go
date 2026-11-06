@@ -126,7 +126,7 @@ func (r *DataPlane) repairTunnels(now time.Time) {
 		next := *state
 		next.devices = maps.Clone(state.devices)
 		next.devices[network.ID] = replacement
-		if err := r.gateway.Apply(r.ctx, state.snapshot.AgentID, gatewayEntries(&next)); err != nil {
+		if err := r.applyGateway(r.ctx, state.snapshot.AgentID, gatewayEntries(&next)); err != nil {
 			device.Close()
 			old.retryAt = time.Now().Add(old.backoff)
 			old.failure.Store(&tunnelFailure{err: fmt.Errorf("restore gateway: %w", err)})

@@ -30,6 +30,10 @@ type DataPlaneOptions struct {
 	BindHost      string
 	Logger        *slog.Logger
 	Endpoints     func([]model.Endpoint) error
+	// Embedded runs the data plane inside another application, such as an
+	// outbound of a proxy client: it manages no host gateway rules and listens
+	// on an ephemeral port instead of the configured one.
+	Embedded bool
 	// legacyStreams makes this Agent carry streams without TCP sessions, as
 	// older versions do. Tests use it for mixed versions.
 	legacyStreams bool
@@ -129,7 +133,7 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 				tcp.engine.Close()
 			}
 			if gatewayChanged {
-				if err := r.gateway.Apply(context.Background(), snapshot.AgentID, gatewayEntries(previous)); err != nil {
+				if err := r.applyGateway(context.Background(), snapshot.AgentID, gatewayEntries(previous)); err != nil {
 					r.options.Logger.Error("gateway rollback failed", "error", err)
 				}
 			}
@@ -177,11 +181,15 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 		prepared = append(prepared, device)
 		next.devices[network.ID] = newRuntimeTunnel(device)
 	}
-	if previous != nil && previous.snapshot.ListenPort == snapshot.ListenPort {
+	if previous != nil && (r.options.Embedded || previous.snapshot.ListenPort == snapshot.ListenPort) {
 		next.mesh = previous.mesh
 	} else {
 		var err error
-		next.mesh, err = mesh.New(r.ctx, r.identity, r.options.BindHost, snapshot.ListenPort, r.receive, r.receiveBatch)
+		port := snapshot.ListenPort
+		if r.options.Embedded {
+			port = 0
+		}
+		next.mesh, err = mesh.New(r.ctx, r.identity, r.options.BindHost, port, r.receive, r.receiveBatch)
 		if err != nil {
 			return fmt.Errorf("listen for peers: %w", err)
 		}
@@ -233,7 +241,7 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 		}
 		updatedTunnels++
 	}
-	if err := r.gateway.Apply(ctx, snapshot.AgentID, gatewayEntries(next)); err != nil {
+	if err := r.applyGateway(ctx, snapshot.AgentID, gatewayEntries(next)); err != nil {
 		return fmt.Errorf("configure gateway: %w", err)
 	}
 	gatewayChanged = true
@@ -283,6 +291,40 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 	}
 	return nil
 }
+
+// applyGateway leaves host rules alone when embedded; client nodes have no
+// gateway subnets.
+func (r *DataPlane) applyGateway(ctx context.Context, id model.ID, entries []gateway.Entry) error {
+	if r.options.Embedded {
+		return nil
+	}
+	return r.gateway.Apply(ctx, id, entries)
+}
+
+// ErrNotConfigured is returned before the first configuration is applied.
+var ErrNotConfigured = errors.New("agent runtime is not configured")
+
+// NetworkFor returns the Network whose forwarding table can carry traffic to
+// destination from this node, and this node's address in it: another node
+// owns the destination and a route exists.
+func (r *DataPlane) NetworkFor(destination netip.Addr) (model.ID, netip.Addr, error) {
+	state := r.state.Load()
+	if state == nil {
+		return "", netip.Addr{}, ErrNotConfigured
+	}
+	var last error = forwarding.ErrDestination
+	for _, n := range state.snapshot.Networks {
+		_, local, err := state.router.NextHop(n.ID, destination)
+		if err == nil && !local {
+			return n.ID, n.Self.Address, nil
+		}
+		if err != nil && !errors.Is(err, forwarding.ErrDestination) {
+			last = err
+		}
+	}
+	return "", netip.Addr{}, last
+}
+
 func (r *DataPlane) Report() []model.LinkStatus {
 	state := r.state.Load()
 	if state == nil {
@@ -312,7 +354,10 @@ func (r *DataPlane) Close() error {
 	r.closed = true
 	r.cancel()
 	state := r.state.Swap(nil)
-	gatewayErr := r.gateway.Close()
+	var gatewayErr error
+	if !r.options.Embedded {
+		gatewayErr = r.gateway.Close()
+	}
 	if gatewayErr != nil {
 		r.options.Logger.Error("gateway cleanup failed", "error", gatewayErr)
 	}
