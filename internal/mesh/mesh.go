@@ -487,6 +487,7 @@ func (m *Mesh) newGroup(cfg *policy) *group {
 	g.keepers = map[link.Path]string{}
 	// IDs differ in parity so both Agents can open streams without coordination.
 	g.mux = newMux(g, cfg.self < cfg.peer.Node.ID, func(s *muxStream) { m.acceptMuxStream(g, s) })
+	g.mux.active = g.edge.Active
 	g.wg.Add(1)
 	go g.schedule()
 	return g

@@ -63,7 +63,10 @@ type muxFrame struct {
 }
 
 type mux struct {
-	g         *group
+	g *group
+	// active reports the Edge's selected Link. Streams follow it, so they use
+	// the same Link as the Edge's packets and move when selection moves.
+	active    func() *link.Link
 	even      bool
 	handler   func(*muxStream)
 	mu        sync.Mutex
@@ -224,12 +227,20 @@ func (m *mux) switchLocked(l *link.Link) {
 	}
 }
 
-// maintain runs on the Edge scheduler. A Link stays in use while healthy and
-// not due for renewal, so streams do not move between Links needlessly.
+// maintain runs on the Edge scheduler. Streams follow the Edge's selected
+// Link when it carries streams. Otherwise a Link stays in use while healthy
+// and not due for renewal, so streams do not move between Links needlessly.
 func (m *mux) maintain() {
+	var active *link.Link
+	if m.active != nil {
+		active = m.active()
+	}
 	m.mu.Lock()
 	var wake *link.Link
-	if m.current == nil || !m.current.Healthy() || m.current.RenewalDue() {
+	if active != nil && active != m.current && m.ready[active] {
+		m.switchLocked(active)
+		wake = active
+	} else if m.current == nil || !m.current.Healthy() || m.current.RenewalDue() {
 		if best := m.bestLocked(); best != nil && best != m.current && (m.current == nil || !m.current.Healthy() || !best.RenewalDue()) {
 			m.switchLocked(best)
 			wake = best
