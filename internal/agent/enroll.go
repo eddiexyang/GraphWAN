@@ -27,8 +27,10 @@ func Enroll(ctx context.Context, cache *Cache, invite model.AgentInvitation, nam
 		if existing.Directory == nil || existing.Directory.ClusterID != invite.Directory.ClusterID || !bytes.Equal(existing.CA, invite.Directory.CA) {
 			return nil, errors.New("agent is already registered with a different cluster; identity was not changed")
 		}
-		if _, err := cache.TLSCertificate(*existing); err != nil {
-			return nil, err
+		if !existing.KeyOnly() {
+			if _, err := cache.TLSCertificate(*existing); err != nil {
+				return nil, err
+			}
 		}
 		return existing, nil
 	}

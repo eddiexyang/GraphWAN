@@ -24,13 +24,18 @@ var agentBucket = []byte("agent-v1")
 const maxSnapshotBytes = 8 << 20
 
 type Registration struct {
-	CA          []byte                 `json:"ca,omitempty"`
-	Transport   string                 `json:"transport,omitempty"`
-	Directory   *model.ServerDirectory `json:"directory,omitempty"`
-	AgentID     model.ID               `json:"agent_id"`
-	Server      string                 `json:"server"`
-	Certificate []byte                 `json:"certificate"`
+	CA        []byte                 `json:"ca,omitempty"`
+	Transport string                 `json:"transport,omitempty"`
+	Directory *model.ServerDirectory `json:"directory,omitempty"`
+	AgentID   model.ID               `json:"agent_id"`
+	Server    string                 `json:"server"`
+	// Certificate is empty for an Agent registered by public key; it signs
+	// controller challenges instead of presenting a client certificate.
+	Certificate []byte `json:"certificate"`
 }
+
+// KeyOnly reports a registration by public key, without a certificate.
+func (r Registration) KeyOnly() bool { return len(r.Certificate) == 0 }
 
 type Cache struct {
 	db  *bolt.DB
@@ -104,7 +109,11 @@ func (c *Cache) SaveRegistration(reg Registration) error {
 	if _, err := serverURL(reg.Server); err != nil {
 		return err
 	}
-	if _, err := c.TLSCertificate(reg); err != nil {
+	if reg.KeyOnly() {
+		if len(reg.CA) == 0 {
+			return errors.New("registration by public key requires the controller CA")
+		}
+	} else if _, err := c.TLSCertificate(reg); err != nil {
 		return err
 	}
 	if err := validateDirectory(reg, reg.Directory); err != nil {

@@ -37,6 +37,8 @@ func runAgentContext(parent context.Context, args []string) error {
 			return runAgentEnroll(args[1:])
 		case "status":
 			return runAgentStatus(args[1:])
+		case "key":
+			return runAgentKey(args[1:])
 		case "run":
 			args = args[1:]
 		}
@@ -92,7 +94,7 @@ func runAgentContext(parent context.Context, args []string) error {
 		}
 	}
 	if reg == nil && *server == "" {
-		return errors.New("first enrollment requires --server")
+		return errors.New("first start requires --server (enrollment or registration by public key)")
 	}
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
@@ -181,5 +183,25 @@ func runAgentEnroll(args []string) error {
 		return err
 	}
 	fmt.Printf("Agent registered: %s\nData directory: %s\n", reg.AgentID, *data)
+	return nil
+}
+
+// runAgentKey prints the Agent's public key, creating its identity on first
+// use. An operator registers this key on the controller instead of enrolling.
+func runAgentKey(args []string) error {
+	fs := flag.NewFlagSet("agent key", flag.ContinueOnError)
+	data := fs.String("data-dir", "./graphwan-agent-data", "private persistent agent directory")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if len(fs.Args()) != 0 {
+		return errors.New("unexpected positional arguments")
+	}
+	cache, err := agent.OpenCache(filepath.Join(*data, "agent.db"))
+	if err != nil {
+		return err
+	}
+	defer cache.Close()
+	fmt.Println(model.EncodeAgentKey(cache.PublicKey()))
 	return nil
 }
