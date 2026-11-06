@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"github.com/eWloYW8/GraphWAN/internal/sockets"
 	"net"
 	"net/netip"
 	"net/url"
@@ -39,17 +40,18 @@ type QUICHub struct {
 
 // ListenUDPQUIC shares each address family's data socket between native UDP,
 // STUN and QUIC. Both families share peer and connection admission limits.
-func ListenUDPQUIC(address string, identity ed25519.PrivateKey) (*UDP, *QUICHub, error) {
+// The sockets use the hooks of ctx.
+func ListenUDPQUIC(ctx context.Context, address string, identity ed25519.PrivateKey) (*UDP, *QUICHub, error) {
 	tlsConfig, err := PeerServerTLS(identity)
 	if err != nil {
 		return nil, nil, err
 	}
 	tlsConfig.NextProtos = []string{quicProtocol}
-	sockets, err := listenUDPSockets(address)
+	udpSockets, err := listenUDPSockets(ctx, address)
 	if err != nil {
 		return nil, nil, err
 	}
-	udp, err := newUDP(sockets, false)
+	udp, err := newUDP(udpSockets, false)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -70,7 +72,7 @@ func ListenUDPQUIC(address string, identity ed25519.PrivateKey) (*UDP, *QUICHub,
 		h.wg.Wait()
 		return nil
 	}
-	for _, socket := range sockets {
+	for _, socket := range udpSockets {
 		engine := &quic.Transport{
 			Conn:                  &quicSocket{PacketConn: socket, socket: socket, hub: udp},
 			ConnectionIDGenerator: quicIDs{}, StatelessResetKey: &resetKey,
@@ -190,7 +192,7 @@ func (h *QUICHub) DialAt(ctx context.Context, endpoint model.Endpoint, family in
 	addresses := []netip.Addr{target}
 	var err error
 	if !target.IsValid() {
-		addresses, err = net.DefaultResolver.LookupNetIP(ctx, "ip"+strconv.Itoa(family), u.Hostname())
+		addresses, err = sockets.LookupNetIP(ctx, "ip"+strconv.Itoa(family), u.Hostname())
 		if err != nil {
 			return nil, err
 		}

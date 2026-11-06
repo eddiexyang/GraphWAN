@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"github.com/eWloYW8/GraphWAN/internal/sockets"
 	"math/rand/v2"
 	"net"
 	"net/netip"
@@ -45,7 +46,7 @@ func Observe(ctx context.Context, identity []byte, servers []string, bind Bindin
 			kind, service, _ := model.ParseSTUNServer(server)
 			host, port, _ := net.SplitHostPort(service)
 			n, _ := strconv.ParseUint(port, 10, 16)
-			addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+			addresses, err := sockets.LookupNetIP(ctx, "ip", host)
 			if err != nil {
 				addError(err)
 				return

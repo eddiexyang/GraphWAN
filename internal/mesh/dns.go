@@ -3,6 +3,7 @@ package mesh
 import (
 	"context"
 	"errors"
+	"github.com/eWloYW8/GraphWAN/internal/sockets"
 	"net"
 	"net/netip"
 	"net/url"
@@ -32,7 +33,7 @@ type endpointDNS struct {
 }
 
 func newEndpointDNS() *endpointDNS {
-	return &endpointDNS{entries: map[string]*dnsEntry{}, slots: make(chan struct{}, 4), lookup: net.DefaultResolver.LookupNetIP, refresh: 30 * time.Second}
+	return &endpointDNS{entries: map[string]*dnsEntry{}, slots: make(chan struct{}, 4), lookup: sockets.LookupNetIP, refresh: 30 * time.Second}
 }
 
 func (d *endpointDNS) configure(hosts map[string]bool) {

@@ -1,7 +1,9 @@
 package transport
 
 import (
+	"context"
 	"errors"
+	"github.com/eWloYW8/GraphWAN/internal/sockets"
 	"io"
 	"net"
 	"net/netip"
@@ -61,17 +63,19 @@ func listenIP[T io.Closer](address string, bind func(family, address string) (T,
 	panic("unreachable IP bind retry")
 }
 
-func listenUDPSockets(address string) ([]*net.UDPConn, error) {
+func listenUDPSockets(ctx context.Context, address string) ([]*net.UDPConn, error) {
+	config := net.ListenConfig{Control: sockets.Control(ctx, nil)}
 	return listenIP(address, func(family, address string) (*net.UDPConn, net.Addr, error) {
 		network := "udp" + family
 		addr, err := net.ResolveUDPAddr(network, address)
 		if err != nil {
 			return nil, nil, err
 		}
-		socket, err := net.ListenUDP(network, addr)
+		packet, err := config.ListenPacket(ctx, network, addr.String())
 		if err != nil {
 			return nil, nil, err
 		}
+		socket := packet.(*net.UDPConn)
 		return socket, socket.LocalAddr(), nil
 	})
 }
