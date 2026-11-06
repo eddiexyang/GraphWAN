@@ -92,7 +92,7 @@ func (l *Link) receiveSizeProbeReply(raw []byte, now time.Time) bool {
 		l.mu.Unlock()
 		return false
 	}
-	if l.sizeSent.IsZero() || nonce != l.sizeNonce {
+	if l.sizeSent.IsZero() || nonce != l.sizeNonce || l.expiredLocked(now) {
 		l.mu.Unlock()
 		return true // a late reply to an expired probe
 	}

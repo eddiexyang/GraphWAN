@@ -655,8 +655,13 @@ func (l *Link) readLoop() {
 			}
 			if l.options.Accepted {
 				l.mu.Lock()
+				now := time.Now()
+				if l.expiredLocked(now) {
+					l.mu.Unlock()
+					continue
+				}
 				first := l.peerPing.IsZero() && !l.unverified
-				l.peerPing = time.Now()
+				l.peerPing = now
 				l.mu.Unlock()
 				if first {
 					l.logUp()
@@ -820,12 +825,17 @@ func (l *Link) pullStreams(dst [][]byte) int {
 	}
 	return count
 }
+
+// healthLoop also wakes at the health deadline, so a Link closes as soon as it
+// stops being healthy. Waiting for the next heartbeat let a late reply revive a
+// Link that selection had already dropped.
 func (l *Link) healthLoop() {
 	defer l.wg.Done()
 	defer l.stop()
 	now := time.Now()
-	ticker := time.NewTicker(l.options.Heartbeat)
-	defer ticker.Stop()
+	next := now
+	timer := time.NewTimer(0)
+	defer timer.Stop()
 	for {
 		if !l.heartbeat(now) {
 			l.logDown(l.failureReason())
@@ -835,13 +845,55 @@ func (l *Link) healthLoop() {
 			l.logDown("rekey")
 			return
 		}
+		for !next.After(now) {
+			next = next.Add(l.options.Heartbeat)
+		}
+		wake := next
+		l.mu.Lock()
+		if deadline := l.deadlineLocked(); !deadline.IsZero() && deadline.Before(wake) {
+			wake = deadline
+		}
+		l.mu.Unlock()
+		timer.Reset(max(time.Until(wake), 0))
 		select {
 		case <-l.ctx.Done():
 			l.logDown("closed")
 			return
-		case now = <-ticker.C:
+		case now = <-timer.C:
 		}
 	}
+}
+
+// deadlineLocked is the earliest time at which heartbeat reports failure, or
+// zero when no response is awaited.
+func (l *Link) deadlineLocked() time.Time {
+	var deadline time.Time
+	earliest := func(t time.Time) {
+		if deadline.IsZero() || t.Before(deadline) {
+			deadline = t
+		}
+	}
+	if !l.probeSince.IsZero() {
+		earliest(l.probeSince.Add(l.options.Timeout))
+	}
+	if l.options.Accepted {
+		heard := l.started
+		if l.peerPing.After(heard) {
+			heard = l.peerPing
+		}
+		earliest(heard.Add(l.options.Timeout))
+	}
+	if l.sizeMode == sizeProbeOn && !l.sizeSent.IsZero() {
+		earliest(l.sizeSent.Add(l.options.Timeout))
+	}
+	return deadline
+}
+
+// expiredLocked reports a Link past its health deadline. Responses arriving
+// then are ignored: the Link is closing and must not become healthy again.
+func (l *Link) expiredLocked(now time.Time) bool {
+	deadline := l.deadlineLocked()
+	return !deadline.IsZero() && !now.Before(deadline)
 }
 
 func (l *Link) logDown(reason string) {
@@ -852,7 +904,7 @@ func (l *Link) logDown(reason string) {
 func (l *Link) recordPong(nonce uint64, now time.Time) {
 	l.mu.Lock()
 	sent, ok := l.pending[nonce]
-	if !ok {
+	if !ok || l.expiredLocked(now) {
 		l.mu.Unlock()
 		return
 	}
