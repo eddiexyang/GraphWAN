@@ -8,8 +8,6 @@ import (
 	"net"
 	"net/netip"
 	"time"
-
-	"github.com/pion/stun/v3"
 )
 
 type tcpBinding struct {
@@ -86,11 +84,11 @@ func (t *TCP) STUNBinding(parent context.Context, server netip.AddrPort) (mapped
 		return mapped, err
 	}
 	defer cleanup()
-	request, err := stun.Build(stun.TransactionID, stun.BindingRequest, stun.Fingerprint)
+	request, id, err := stunRequest()
 	if err != nil {
 		return mapped, err
 	}
-	if err := writeFull(conn, request.Raw); err != nil {
+	if err := writeFull(conn, request); err != nil {
 		return mapped, ctxError(ctx, err)
 	}
 	var header [20]byte
@@ -98,7 +96,7 @@ func (t *TCP) STUNBinding(parent context.Context, server netip.AddrPort) (mapped
 		return mapped, ctxError(ctx, err)
 	}
 	size := int(binary.BigEndian.Uint16(header[2:4]))
-	if size > 2028 || size%4 != 0 || [12]byte(header[8:20]) != request.TransactionID {
+	if size > 2028 || size%4 != 0 || [12]byte(header[8:20]) != id {
 		return mapped, errors.New("invalid TCP STUN response")
 	}
 	raw := make([]byte, 20+size)

@@ -117,9 +117,8 @@ closes its sessions.
 
 ## STUN admission and limits
 
-The implementation uses [Pion STUN](https://github.com/pion/stun) for RFC 8489
-message encoding and decoding. Binding requests use random 96-bit transaction
-IDs and fingerprints. A response must match both an outstanding ID and the exact
+GraphWAN encodes and decodes the RFC 8489 Binding messages it needs itself.
+Binding requests use random 96-bit transaction IDs and fingerprints. A response must match both an outstanding ID and the exact
 resolved service address. Replies are bounded to 2048 bytes and checked for valid
 lengths, fingerprints when present, supported required attributes, response type,
 and a unicast XOR-MAPPED-ADDRESS of the queried family. IPv4-mapped addresses are

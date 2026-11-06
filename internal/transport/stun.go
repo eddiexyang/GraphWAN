@@ -4,12 +4,9 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"net"
 	"net/netip"
 	"time"
-
-	"github.com/pion/stun/v3"
 )
 
 const maxSTUNTransactions = 32
@@ -31,7 +28,7 @@ func (h *UDP) STUNBinding(ctx context.Context, server netip.AddrPort) (netip.Add
 	if !server.IsValid() || server.Port() == 0 || !stunUnicast(server.Addr()) {
 		return netip.AddrPort{}, errors.New("invalid STUN server address")
 	}
-	request, err := stun.Build(stun.TransactionID, stun.BindingRequest, stun.Fingerprint)
+	request, id, err := stunRequest()
 	if err != nil {
 		return netip.AddrPort{}, err
 	}
@@ -44,16 +41,16 @@ func (h *UDP) STUNBinding(ctx context.Context, server netip.AddrPort) (netip.Add
 	if h.stunPending == nil {
 		h.stunPending = make(map[[12]byte]*stunTransaction)
 	}
-	h.stunPending[request.TransactionID] = transaction
+	h.stunPending[id] = transaction
 	h.stunMu.Unlock()
-	defer func() { h.stunMu.Lock(); delete(h.stunPending, request.TransactionID); h.stunMu.Unlock() }()
+	defer func() { h.stunMu.Lock(); delete(h.stunPending, id); h.stunMu.Unlock() }()
 	for attempt := range 7 {
 		select {
 		case <-h.done:
 			return netip.AddrPort{}, net.ErrClosed
 		default:
 		}
-		if err := h.writeDatagram(ctx, request.Raw, server); err != nil {
+		if err := h.writeDatagram(ctx, request, server); err != nil {
 			return netip.AddrPort{}, err
 		}
 		wait := 500 * time.Millisecond << attempt
@@ -107,44 +104,6 @@ func (h *UDP) receiveSTUN(raw []byte, remote netip.AddrPort) bool {
 		}
 	}
 	return true
-}
-
-func parseSTUNResponse(raw []byte, ipv4 bool) (stunResult, bool) {
-	message := stun.NewWithOptions(stun.WithStrict(true))
-	message.Raw = raw
-	if err := message.Decode(); err != nil {
-		return stunResult{}, false
-	}
-	if message.Contains(stun.AttrFingerprint) {
-		if message.Attributes[len(message.Attributes)-1].Type != stun.AttrFingerprint || stun.Fingerprint.Check(message) != nil {
-			return stunResult{}, false
-		}
-	}
-	for _, attribute := range message.Attributes {
-		if attribute.Type.Required() && !attribute.Type.Known() {
-			return stunResult{err: errors.New("unknown required STUN attribute")}, true
-		}
-	}
-	if message.Type == stun.BindingError {
-		var code stun.ErrorCodeAttribute
-		if code.GetFrom(message) != nil {
-			return stunResult{}, false
-		}
-		return stunResult{err: fmt.Errorf("STUN binding rejected: %d", code.Code)}, true
-	}
-	if message.Type != stun.BindingSuccess {
-		return stunResult{}, false
-	}
-	var mapped stun.XORMappedAddress
-	if mapped.GetFrom(message) != nil {
-		return stunResult{}, false
-	}
-	ip, ok := netip.AddrFromSlice(mapped.IP)
-	ip = ip.Unmap()
-	if !ok || !stunUnicast(ip) || ip.Is4() != ipv4 || mapped.Port <= 0 || mapped.Port > 65535 {
-		return stunResult{}, false
-	}
-	return stunResult{address: netip.AddrPortFrom(ip, uint16(mapped.Port))}, true
 }
 
 func stunUnicast(ip netip.Addr) bool {
