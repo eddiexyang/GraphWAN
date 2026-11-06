@@ -697,3 +697,54 @@ func TestTCPRevocationInterruptsEstablishedStream(t *testing.T) {
 		t.Fatal("revoked flow remained blocked")
 	}
 }
+
+// A closed access connection keeps its flow while the stack still sends its
+// last bytes and FIN to a slow reader: their ACKs must keep reaching it.
+func TestTCPSlowReaderReceivesLastBytes(t *testing.T) {
+	_, devices, state := streamAgents(t, model.TCP)
+	target := state.Networks[0].Nodes[2].Address
+	listener, err := gonet.ListenTCP(devices[2].stack, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(target.As4()), Port: 8083}, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	payload := make([]byte, 2<<20)
+	rand.Read(payload)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		conn.Write(payload)
+		conn.Close()
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	conn, err := gonet.DialContextTCP(ctx, devices[0].stack, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(target.As4()), Port: 8083}, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// With both directions closed the relay ends while the stack still holds
+	// unsent bytes.
+	if err := conn.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	conn.SetDeadline(time.Now().Add(20 * time.Second))
+	var got bytes.Buffer
+	buf := make([]byte, 64<<10)
+	for {
+		n, err := conn.Read(buf)
+		got.Write(buf[:n])
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("after %d bytes: %v", got.Len(), err)
+		}
+		time.Sleep(20 * time.Millisecond) // about 3 MiB/s
+	}
+	if !bytes.Equal(got.Bytes(), payload) {
+		t.Fatalf("received %d of %d bytes", got.Len(), len(payload))
+	}
+}
