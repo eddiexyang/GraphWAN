@@ -212,7 +212,15 @@ func (e *Engine) forward(request *tcp.ForwarderRequest) {
 	id := request.ID()
 	from, to := netip.AddrPortFrom(addr(id.RemoteAddress), id.RemotePort), netip.AddrPortFrom(addr(id.LocalAddress), id.LocalPort)
 	e.flow(from, to, true)
-	defer e.flow(from, to, false)
+	var local *accessConn
+	defer func() {
+		// The stack may still be sending the last bytes and the FIN after the
+		// relay closed the connection; their ACKs must keep reaching it.
+		if local != nil {
+			local.waitClosed(e.ctx)
+		}
+		e.flow(from, to, false)
+	}()
 	ctx, cancel := context.WithTimeout(e.ctx, ConnectTimeout)
 	remote, err := e.open(ctx, from, to)
 	cancel()
@@ -227,7 +235,7 @@ func (e *Engine) forward(request *tcp.ForwarderRequest) {
 	if tcpErr != nil {
 		return
 	}
-	local := &accessConn{TCPConn: gonet.NewTCPConn(&queue, endpoint), endpoint: endpoint, queue: &queue}
+	local = &accessConn{TCPConn: gonet.NewTCPConn(&queue, endpoint), endpoint: endpoint, queue: &queue}
 	Relay(e.ctx, local, remote)
 }
 
@@ -312,6 +320,34 @@ type accessConn struct {
 	endpoint tcpip.Endpoint
 	queue    *waiter.Queue
 }
+
+// closedLinger bounds how long a closed connection's flow is kept for the
+// stack to finish sending, as a host's FIN_WAIT timeout would.
+const closedLinger = time.Minute
+
+// waitClosed waits until the stack has finished a closed connection: its
+// remaining bytes and FIN were acknowledged, or it was reset.
+func (c *accessConn) waitClosed(ctx context.Context) {
+	deadline := time.Now().Add(closedLinger)
+	for {
+		switch tcp.EndpointState(c.endpoint.State()) {
+		case tcp.StateClose, tcp.StateTimeWait, tcp.StateError, tcp.StateInitial:
+			return
+		}
+		if time.Now().After(deadline) {
+			c.Abort()
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// WaitClosed is waitClosed for connections dialed by Engine.Dial.
+func (c *accessConn) WaitClosed(ctx context.Context) { c.waitClosed(ctx) }
 
 func (c *accessConn) Abort() {
 	if endpoint, ok := c.endpoint.(interface{ Abort() }); ok {

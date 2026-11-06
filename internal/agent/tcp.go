@@ -340,6 +340,14 @@ type flowConn struct {
 
 func (c *flowConn) Close() error {
 	err := c.Conn.Close()
+	// Keep the flow until the stack has sent its last bytes and FIN.
+	if closing, ok := c.Conn.(interface{ WaitClosed(context.Context) }); ok {
+		go func() {
+			closing.WaitClosed(context.Background())
+			c.done()
+		}()
+		return err
+	}
 	c.done()
 	return err
 }
