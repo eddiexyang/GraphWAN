@@ -163,7 +163,9 @@ type Link struct {
 	// active data generation, so it cannot be derived from dataGeneration.
 	loggedActive atomic.Bool
 	// loggedUp records that "link up" was logged: the Link became healthy.
+	// up, set by its Edge, then runs once.
 	loggedUp        atomic.Bool
+	up              atomic.Pointer[func()]
 	control         chan []byte
 	packets         chan []byte
 	ownedPackets    *packetbuf.Queue
@@ -956,6 +958,9 @@ func (l *Link) recordPong(nonce uint64, now time.Time) {
 func (l *Link) logUp(attrs ...any) {
 	if l.loggedUp.CompareAndSwap(false, true) {
 		slog.Info("link up", l.logAttrs(attrs...)...)
+		if up := l.up.Load(); up != nil {
+			(*up)()
+		}
 	}
 }
 

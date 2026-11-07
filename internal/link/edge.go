@@ -68,6 +68,14 @@ func (e *Edge) Add(link *Link) {
 		link.setActive(false)
 	}
 	e.links[link.ID()] = link
+	if e.selection != nil {
+		// Propose a new Link as soon as it is healthy, not on the next Tick.
+		up := e.Tick
+		link.up.Store(&up)
+		if link.loggedUp.Load() {
+			e.advanceLocked(time.Now())
+		}
+	}
 }
 func (e *Edge) Remove(id string) {
 	e.mu.Lock()
