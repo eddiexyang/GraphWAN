@@ -378,8 +378,8 @@ Network with different settings, such as during a configuration change, thus
 keep their Links. Changing the setting re-establishes the Network's Links. Edge
 damping counts an outage as a failure once it lasts the Network's timeout.
 
-Measured on loopback (UDP payload of one idle Edge, both directions): 750 ms
-sends 300 B/s, the default 52 B/s. Rerouting after a neighbour went silent
+Measured on loopback (UDP payload of one idle Edge with one Link, both
+directions): 750 ms sends 300–322 B/s, the default 63 B/s. Rerouting after a neighbour went silent
 took 1.16 s at 750 ms and 8.17 s by default.
 
 Probes have priority over queued user frames. Standby Links run the same probes;

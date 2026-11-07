@@ -24,11 +24,18 @@ var (
 	ErrPeer        = errors.New("packet arrived from an unconfigured neighbor")
 	ErrUnreachable = errors.New("no route to destination")
 	ErrMTU         = errors.New("packet exceeds network MTU")
+	// ErrTCPOverTCP drops a TCP packet whose next Edge sends on a TCP-backed
+	// Link; its sender receives a reset.
+	ErrTCPOverTCP = errors.New("TCP packet refused: its next Edge carries TCP only as streams")
 )
 
 // TCPIntercept may take a transit TCP packet before it is sent to next. It must
 // copy raw if it keeps it, and return true only when it consumed the packet.
 type TCPIntercept func(network model.ID, raw []byte, next model.ID) bool
+
+// TCPCarrier reports whether the Edge to next sends on a TCP, WS, WSS or gRPC
+// Link, which carries TCP only as streams.
+type TCPCarrier func(network, next model.ID) bool
 
 type Send func(context.Context, model.ID, model.ID, []byte) error
 type Deliver func(context.Context, model.ID, []byte) error
@@ -88,7 +95,50 @@ type Router struct {
 	sendBatch      func(context.Context, model.ID, model.ID, [][]byte) error
 	sendOwnedBatch func(context.Context, model.ID, model.ID, []*packetbuf.Buffer) error
 	tcpIntercept   atomic.Pointer[TCPIntercept]
+	tcpCarrier     atomic.Pointer[TCPCarrier]
 	sticky         stickyFlows
+}
+
+// SetTCPCarrier installs or removes (nil) the check that keeps TCP packets
+// off TCP-backed Links.
+func (r *Router) SetTCPCarrier(carrier TCPCarrier) {
+	if carrier == nil {
+		r.tcpCarrier.Store(nil)
+		return
+	}
+	r.tcpCarrier.Store(&carrier)
+}
+
+func (r *Router) carriesTCP(network, next model.ID) bool {
+	carrier := r.tcpCarrier.Load()
+	return carrier != nil && (*carrier)(network, next)
+}
+
+// refuseTCP drops a TCP packet that would cross a TCP-backed Link and resets
+// its sender, so the connection ends instead of running TCP over TCP: through
+// the local TCP stack when it owns the connection, to the TUN when the sender
+// is local (from is nil), or back toward the source Node from, unless that
+// path also starts on a TCP-backed Link.
+func (r *Router) refuseTCP(ctx context.Context, n *network, raw []byte, from, to *node) error {
+	reset := packet.TCPReset(raw)
+	if reset == nil {
+		return ErrTCPOverTCP
+	}
+	if intercept := r.tcpIntercept.Load(); intercept != nil && (*intercept)(n.id, reset, "") {
+		return ErrTCPOverTCP
+	}
+	if from == nil {
+		return errors.Join(ErrTCPOverTCP, r.deliver(ctx, n.id, reset))
+	}
+	next, ok := n.next(from.id, func() uint64 { info, _ := packet.InspectIP(reset); return info.Flow })
+	if !ok || r.carriesTCP(n.id, next) {
+		return ErrTCPOverTCP
+	}
+	frame, err := (packet.Packet{Header: packet.Header{Network: n.id, Source: to.id, Destination: from.id, HopLimit: packet.DefaultHopLimit}, Payload: reset}).MarshalBinary()
+	if err != nil {
+		return errors.Join(ErrTCPOverTCP, err)
+	}
+	return errors.Join(ErrTCPOverTCP, r.send(ctx, n.id, next, frame))
 }
 
 // SetTCPIntercept installs or removes (nil) the transit TCP hook.
@@ -278,6 +328,12 @@ func (r *Router) encapsulateSource(ctx context.Context, n *network, raw []byte, 
 	if !ok {
 		return nil, "", ErrUnreachable
 	}
+	if packet.IsTCP(raw) && r.carriesTCP(n.id, nextHop) {
+		if client != nil {
+			return nil, "", ErrTCPOverTCP
+		}
+		return nil, "", r.refuseTCP(ctx, n, raw, nil, nil)
+	}
 	if client != nil && packet.IPHopLimit(raw) <= 1 {
 		return nil, "", r.timeExceeded(ctx, n, raw)
 	}
@@ -389,6 +445,9 @@ func (r *Router) fromPeer(ctx context.Context, peerID model.ID, frame []byte, de
 	}
 	if intercept := r.tcpIntercept.Load(); intercept != nil && packet.IsTCP(p.Payload) && (*intercept)(n.id, p.Payload, nextHop) {
 		return nil
+	}
+	if packet.IsTCP(p.Payload) && r.carriesTCP(n.id, nextHop) {
+		return r.refuseTCP(ctx, n, p.Payload, source, destination)
 	}
 	if packet.IPHopLimit(p.Payload) <= 1 {
 		return r.timeExceeded(ctx, n, p.Payload)

@@ -346,3 +346,59 @@ func TestTCPSessionResetsOnPacketPath(t *testing.T) {
 	}
 	assertNoTCPOverTCP(t, agents)
 }
+
+// A connection opened as packets on a UDP path ends with a reset when its
+// route moves to TCP Links, which carry TCP only as streams: never TCP over
+// TCP.
+func TestTCPPacketFlowResetsOnTCPPath(t *testing.T) {
+	agents, devices, state := graphAgents(t, model.TCP, streamOptions{}, 4, 4, func(s *model.State) {
+		for i := range s.Agents {
+			endpoint := s.Agents[i].Endpoints[0]
+			endpoint.ID, endpoint.Transport = testutil.ID(60+i), model.UDP
+			endpoint.URL = strings.Replace(endpoint.URL, "tcp://", "udp://", 1)
+			s.Agents[i].Endpoints = append(s.Agents[i].Endpoints, endpoint)
+		}
+		s.Networks[0].Edges[2].Transports = []model.Transport{model.UDP} // A-D
+		s.Networks[0].Edges[3].Transports = []model.Transport{model.UDP} // D-C
+		s.Networks[0].Edges[0].Weight = 100                              // A-D-C first
+	})
+	address := state.Networks[0].Nodes[2].Address
+	listener, err := gonet.ListenTCP(devices[2].stack, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(address.As4()), Port: 8093}, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() { conn, _ := listener.Accept(); accepted <- conn }()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	conn, err := gonet.DialContextTCP(ctx, devices[0].stack, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(address.As4()), Port: 8093}, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	server := <-accepted
+	defer server.Close()
+	go io.Copy(io.Discard, server)
+	if ingressCount(agents[0]) != 0 {
+		t.Fatal("a session on a UDP path")
+	}
+	state.Revision++
+	state.Networks[0].Edges[0].Weight = 10
+	state.Networks[0].Edges[2].Weight = 100 // now A-B-C, all TCP
+	applyAll(t, agents, state)
+	waitFor(t, 5*time.Second, "the route through B", func() bool { return nextHopToC(agents[0], state) == state.Networks[0].Nodes[1].ID })
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	var writeErr error
+	for i := 0; i < 1024 && writeErr == nil; i++ {
+		_, writeErr = conn.Write(make([]byte, 16384))
+		time.Sleep(time.Millisecond)
+	}
+	if writeErr == nil {
+		_, writeErr = conn.Read(make([]byte, 1))
+	}
+	if timeout, ok := writeErr.(net.Error); writeErr == nil || ok && timeout.Timeout() {
+		t.Fatalf("connection on the TCP path was not reset: %v", writeErr)
+	}
+	assertNoTCPOverTCP(t, agents)
+}

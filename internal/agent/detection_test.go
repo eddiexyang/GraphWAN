@@ -124,16 +124,16 @@ func newCountingRelay(t *testing.T, target int) *countingRelay {
 func (r *countingRelay) port() int { return r.listener.LocalAddr().(*net.UDPAddr).Port }
 
 // idleBytes measures what two idle Agents on one UDP Edge exchange per second.
+// Only B dials, through a relay in front of A, so the Edge has one Link.
 func idleBytes(t *testing.T, detection uint32) float64 {
 	t.Helper()
 	var relays []*countingRelay
 	agents, _, _ := graphAgents(t, model.UDP, streamOptions{}, 2, 1, func(s *model.State) {
 		s.Networks[0].FailureDetection = detection
-		for i := range s.Agents {
-			relay := newCountingRelay(t, int(s.Agents[i].ListenPort))
-			relays = append(relays, relay)
-			s.Agents[i].Endpoints[0].URL = fmt.Sprintf("udp://127.0.0.1:%d", relay.port())
-		}
+		relay := newCountingRelay(t, int(s.Agents[0].ListenPort))
+		relays = append(relays, relay)
+		s.Agents[0].Endpoints[0].URL = fmt.Sprintf("udp://127.0.0.1:%d", relay.port())
+		s.Agents[1].Endpoints = []model.Endpoint{}
 	})
 	waitFor(t, 10*time.Second, "a healthy Link", func() bool {
 		for _, l := range agents[0].Report() {

@@ -208,6 +208,7 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 		return err
 	}
 	router.SetTCPIntercept(r.interceptTCP)
+	router.SetTCPCarrier(next.mesh.TCPCarrier)
 	next.router = router
 	for _, network := range snapshot.Networks {
 		fingerprint := tcpFingerprint(network)

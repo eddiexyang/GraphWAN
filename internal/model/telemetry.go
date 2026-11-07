@@ -22,8 +22,9 @@ type LinkStatus struct {
 	RXBytes            uint64    `json:"rx_bytes"`
 	TXBytes            uint64    `json:"tx_bytes"`
 	// Dropped counts packets a full send queue discarded. TCPPackets counts TCP
-	// packets sent on a TCP-backed Link, which must stay zero. StreamSessions
-	// counts the Edge's streams, on its active Link.
+	// packets a TCP-backed Link refused to carry; a route sent TCP that was not
+	// in a stream toward it. StreamSessions counts the Edge's streams, on its
+	// active Link.
 	Dropped        uint64 `json:"dropped,omitempty"`
 	TCPPackets     uint64 `json:"tcp_packets,omitempty"`
 	StreamSessions uint32 `json:"stream_sessions,omitempty"`

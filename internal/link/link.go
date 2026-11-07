@@ -52,6 +52,10 @@ const (
 )
 
 var ErrQueueFull = errors.New("link packet queue is full")
+
+// ErrTCPOverTCP refuses TCP packets on a TCP, WS, WSS or gRPC Link: TCP
+// crosses those Links only as streams.
+var ErrTCPOverTCP = errors.New("TCP packets are not sent on a TCP-backed Link")
 var ErrUnavailable = errors.New("edge has no healthy link")
 
 type Channel interface {
@@ -192,8 +196,8 @@ type Link struct {
 	linkStateLost   atomic.Uint64
 	compactOut      atomic.Bool
 	networkWire     [16]byte
-	// tcpPackets counts TCP packets queued on a TCP-backed Link: TCP over TCP,
-	// which access TCP termination exists to prevent.
+	// tcpPackets counts TCP packets refused on a TCP-backed Link: TCP over
+	// TCP, which access TCP termination exists to prevent.
 	tcpPackets atomic.Uint64
 	// Size probe state, guarded by mu. The zero value is a verified Link.
 	sizeMode     sizeProbeMode
@@ -388,10 +392,10 @@ func (l *Link) SendOwnedBatch(ctx context.Context, buffers []*packetbuf.Buffer) 
 }
 
 func (l *Link) enqueue(ctx context.Context, frames [][]byte, owners []*packetbuf.Buffer) error {
-	accepted := 0
+	accepted, refused, consumed := 0, 0, 0
 	defer func() {
 		if owners != nil {
-			packetbuf.ReleaseAll(owners[accepted:])
+			packetbuf.ReleaseAll(owners[consumed:])
 		}
 	}()
 	if len(frames) == 0 || len(frames) > 128 {
@@ -417,11 +421,16 @@ func (l *Link) enqueue(ctx context.Context, frames [][]byte, owners []*packetbuf
 	limit := min(len(frames), len(l.data)-l.dataCount)
 	tcpBacked := l.tcpBacked()
 	for i, frame := range frames[:limit] {
-		if tcpBacked && l.dataBytes+len(frame)+1 > tcpQueueBytes {
-			break
-		}
 		if tcpBacked && packet.IsTCP(frame[packet.HeaderSize:]) {
 			l.tcpPackets.Add(1)
+			if owners != nil {
+				owners[i].Release()
+			}
+			refused, consumed = refused+1, i+1
+			continue
+		}
+		if tcpBacked && l.dataBytes+len(frame)+1 > tcpQueueBytes {
+			break
 		}
 		var buffer *packetbuf.Buffer
 		if l.compactOut.Load() {
@@ -439,14 +448,17 @@ func (l *Link) enqueue(ctx context.Context, frames [][]byte, owners []*packetbuf
 		l.data[(l.dataHead+l.dataCount)%len(l.data)] = queuedPacket{generation: generation, raw: buffer.Data, buffer: buffer}
 		l.dataCount++
 		l.dataBytes += len(buffer.Data)
-		accepted++
+		accepted, consumed = accepted+1, i+1
 	}
 	if l.dataCount > 0 {
 		l.notifyData()
 	}
-	if accepted != len(frames) {
-		l.dropped.Add(uint64(len(frames) - accepted))
+	if accepted+refused != len(frames) {
+		l.dropped.Add(uint64(len(frames) - accepted - refused))
 		return ErrQueueFull
+	}
+	if refused > 0 {
+		return ErrTCPOverTCP
 	}
 	return nil
 }
@@ -466,6 +478,9 @@ func compactFrame(frame []byte, owners []*packetbuf.Buffer, i int) *packetbuf.Bu
 	copy(buffer.Data[2:], frame[packet.HeaderSize:])
 	return buffer
 }
+
+// TCPBacked reports a TCP, WS, WSS or gRPC Link.
+func (l *Link) TCPBacked() bool { return l.tcpBacked() }
 
 func (l *Link) tcpBacked() bool {
 	switch l.info.Transport {

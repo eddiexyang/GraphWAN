@@ -59,6 +59,19 @@ func (m *Mesh) PacketsOnly(network, remote model.ID) bool {
 	return g != nil && g.edge.Active() != nil && !g.mux.Available()
 }
 
+// TCPCarrier reports whether the Edge to remote sends on a TCP, WS, WSS or
+// gRPC Link, which carries TCP only as streams, never as packets.
+func (m *Mesh) TCPCarrier(network, remote model.ID) bool {
+	m.mu.Lock()
+	g := m.groups[key{network, remote}]
+	m.mu.Unlock()
+	if g == nil {
+		return false
+	}
+	active := g.edge.Active()
+	return active != nil && active.TCPBacked()
+}
+
 // ResumeAvailable reports whether a stream to remote can carry a resumable TCP
 // session: both Agents support them.
 func (m *Mesh) ResumeAvailable(network, remote model.ID) bool {

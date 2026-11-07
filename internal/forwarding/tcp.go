@@ -193,6 +193,9 @@ func (r *Router) TCPOutput(ctx context.Context, networkID model.ID, raw []byte) 
 	if !ok {
 		return ErrUnreachable
 	}
+	if r.carriesTCP(networkID, next) {
+		return r.refuseTCP(ctx, n, raw, nil, nil)
+	}
 	frame, err := (packet.Packet{Header: packet.Header{Network: networkID, Source: source.id, Destination: dest.id, HopLimit: packet.DefaultHopLimit}, Payload: raw}).MarshalBinary()
 	if err != nil {
 		return err
