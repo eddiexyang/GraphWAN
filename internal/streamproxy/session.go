@@ -484,6 +484,9 @@ func (e *End) current() Hop {
 	for !e.done && e.hop == nil {
 		e.cond.Wait()
 	}
+	if e.done {
+		return nil
+	}
 	return e.hop
 }
 
