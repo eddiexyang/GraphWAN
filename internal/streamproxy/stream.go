@@ -23,7 +23,17 @@ type Request struct {
 	From        netip.AddrPort `json:"from"`
 	To          netip.AddrPort `json:"to"`
 	Hops        uint8          `json:"hops"`
+	// A chain of a resumable session names the session and its generation;
+	// its downstream bytes start at Down and its upstream bytes at Up. See
+	// session.go.
+	Conn SessionID `json:"conn,omitzero"`
+	Gen  uint32    `json:"gen,omitempty"`
+	Down uint64    `json:"down,omitempty"`
+	Up   uint64    `json:"up,omitempty"`
 }
+
+// Resumable reports whether the request opens a chain of a session.
+func (r Request) Resumable() bool { return r.Conn != SessionID{} }
 
 func (r Request) Validate() error {
 	for _, id := range []model.ID{r.Network, r.Source, r.Destination} {

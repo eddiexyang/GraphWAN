@@ -30,6 +30,9 @@ type DataPlaneOptions struct {
 	BindHost      string
 	Logger        *slog.Logger
 	Endpoints     func([]model.Endpoint) error
+	// legacyStreams makes this Agent carry streams without TCP sessions, as
+	// older versions do. Tests use it for mixed versions.
+	legacyStreams bool
 }
 type runtimeState struct {
 	snapshot model.Snapshot
@@ -37,6 +40,9 @@ type runtimeState struct {
 	mesh     *mesh.Mesh
 	devices  map[model.ID]*runtimeTunnel
 	tcp      map[model.ID]*runtimeTCP
+	// selfAddress is this Agent's overlay address per network, for replay
+	// requests of its TCP sessions.
+	selfAddress map[model.ID]netip.Addr
 }
 
 type DataPlane struct {
@@ -54,6 +60,7 @@ type DataPlane struct {
 	repairWake    chan struct{}
 	linkState     *linkstate.Engine
 	damper        *edgeDamper
+	sessions      sessions
 }
 
 func NewDataPlane(parent context.Context, identity ed25519.PrivateKey, options DataPlaneOptions) (*DataPlane, error) {
@@ -72,7 +79,9 @@ func NewDataPlane(parent context.Context, identity ed25519.PrivateKey, options D
 	ctx, cancel := context.WithCancel(parent)
 	runtime := &DataPlane{identity: append(ed25519.PrivateKey{}, identity...), options: options, ctx: ctx, cancel: cancel, discoveryWake: make(chan struct{}, 1), repairWake: make(chan struct{}, 1)}
 	runtime.linkState = runtime.newLinkState()
-	runtime.wg.Add(2)
+	runtime.sessions.init()
+	runtime.wg.Add(3)
+	go runtime.rerouteLoop()
 	go runtime.repairLoop()
 	go func() { defer runtime.wg.Done(); runtime.linkState.Run(ctx) }()
 	if options.Endpoints != nil {
@@ -97,7 +106,10 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 	if previous != nil && (previous.snapshot.AgentID != snapshot.AgentID || previous.snapshot.Revision > snapshot.Revision) {
 		return errors.New("runtime identity change or revision rollback")
 	}
-	next := &runtimeState{snapshot: snapshot.Clone(), devices: map[model.ID]*runtimeTunnel{}, tcp: map[model.ID]*runtimeTCP{}}
+	next := &runtimeState{snapshot: snapshot.Clone(), devices: map[model.ID]*runtimeTunnel{}, tcp: map[model.ID]*runtimeTCP{}, selfAddress: map[model.ID]netip.Addr{}}
+	for _, network := range snapshot.Networks {
+		next.selfAddress[network.ID] = network.Self.Address
+	}
 	prepared := []tunnel.Device{}
 	var preparedTCP []*runtimeTCP
 	type tunnelUpdate struct {
@@ -175,6 +187,9 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 		}
 		next.mesh.EnableWireGuard(r.receiveWireGuard)
 		next.mesh.EnableStreams(r.acceptTCP)
+		if r.options.legacyStreams {
+			next.mesh.DisableResume()
+		}
 		next.mesh.EnableLinkState(r.linkStateHandler())
 		next.mesh.EnableCompact(r.compactHeader)
 		newMesh = true
@@ -243,6 +258,7 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 	default:
 	}
 	committed = true
+	r.routesChanged()
 	r.options.Logger.Info("configuration applied", "revision", snapshot.Revision, "networks", len(snapshot.Networks), "listen_port", snapshot.ListenPort)
 	for id, device := range next.devices {
 		if previous == nil || previous.devices[id] != device {
@@ -281,7 +297,11 @@ func (r *DataPlane) Counters() map[string]uint64 {
 	if state == nil {
 		return nil
 	}
-	return state.mesh.Counters()
+	counters := state.mesh.Counters()
+	for k, v := range r.sessionCounters() {
+		counters[k] = v
+	}
+	return counters
 }
 func (r *DataPlane) Close() error {
 	r.applyMu.Lock()
@@ -353,6 +373,9 @@ func (r *DataPlane) deliver(ctx context.Context, network model.ID, raw []byte) e
 	state := r.state.Load()
 	if state == nil {
 		return errors.New("agent runtime is not configured")
+	}
+	if r.replayRequest(state, network, raw) {
+		return nil
 	}
 	device := state.devices[network]
 	if device == nil {
@@ -470,6 +493,22 @@ func (r *DataPlane) deliverBatch(ctx context.Context, network model.ID, packets 
 	state := r.state.Load()
 	if state == nil {
 		return errors.New("agent runtime is not configured")
+	}
+	// Replay requests of this Agent's TCP sessions never reach the TUN.
+	var kept [][]byte
+	for i, raw := range packets {
+		if r.replayRequest(state, network, raw) {
+			if kept == nil {
+				kept = append(make([][]byte, 0, len(packets)), packets[:i]...)
+			}
+		} else if kept != nil {
+			kept = append(kept, raw)
+		}
+	}
+	if kept != nil {
+		if packets = kept; len(packets) == 0 {
+			return nil
+		}
 	}
 	device := state.devices[network]
 	if device == nil {

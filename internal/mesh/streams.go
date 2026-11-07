@@ -17,6 +17,20 @@ func (m *Mesh) EnableStreams(handler StreamHandler) {
 	m.mu.Unlock()
 }
 
+// DisableResume carries streams without TCP sessions, as Agents before them
+// did. It is called before this Mesh is published to the dataplane.
+func (m *Mesh) DisableResume() {
+	m.mu.Lock()
+	m.noResume = true
+	m.mu.Unlock()
+}
+
+func (m *Mesh) resumeEnabled() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.streamHandler != nil && !m.noResume
+}
+
 func (m *Mesh) streamsEnabled() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -34,6 +48,24 @@ func (m *Mesh) StreamsAvailable(network, remote model.ID) bool {
 	g := m.groups[key{network, remote}]
 	m.mu.Unlock()
 	return g != nil && g.mux.Available()
+}
+
+// PacketsOnly reports whether the Edge to remote has a selected Link that
+// carries no streams, such as UDP or QUIC: TCP crosses it only as packets.
+func (m *Mesh) PacketsOnly(network, remote model.ID) bool {
+	m.mu.Lock()
+	g := m.groups[key{network, remote}]
+	m.mu.Unlock()
+	return g != nil && g.edge.Active() != nil && !g.mux.Available()
+}
+
+// ResumeAvailable reports whether a stream to remote can carry a resumable TCP
+// session: both Agents support them.
+func (m *Mesh) ResumeAvailable(network, remote model.ID) bool {
+	m.mu.Lock()
+	g := m.groups[key{network, remote}]
+	m.mu.Unlock()
+	return g != nil && g.mux.Resumable()
 }
 
 // OpenStream starts a stream on the Edge's current Link. It sends nothing until

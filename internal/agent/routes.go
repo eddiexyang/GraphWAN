@@ -55,6 +55,7 @@ func (r *DataPlane) applyRoutesLocked(update model.RouteUpdate) error {
 	if err = state.router.Configure(next); err != nil {
 		return err
 	}
+	r.routesChanged()
 	// Keep an owned copy for same-revision TUN repair; never recreate peer Links.
 	owned := model.RouteUpdate{Revision: update.Revision, Networks: []model.NetworkRoutes{}}
 	for _, n := range next.Networks {

@@ -672,7 +672,9 @@ func TestTCPWireGuardAccessBoundary(t *testing.T) {
 	}
 }
 
-func TestTCPRevocationInterruptsEstablishedStream(t *testing.T) {
+// Without any path a connection waits, as IP does, instead of being reset.
+// It resumes when the path returns and never uses a revoked Edge.
+func TestTCPRevokedEdgeStallsAndResumes(t *testing.T) {
 	agents, devices, state := streamAgents(t, model.TCP)
 	target := state.Networks[0].Nodes[2].Address
 	listener, err := gonet.ListenTCP(devices[2].stack, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(target.As4()), Port: 8082}, ipv4.ProtocolNumber)
@@ -682,7 +684,7 @@ func TestTCPRevocationInterruptsEstablishedStream(t *testing.T) {
 	defer listener.Close()
 	accepted := make(chan net.Conn, 1)
 	go func() { conn, _ := listener.Accept(); accepted <- conn }()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	conn, err := gonet.DialContextTCP(ctx, devices[0].stack, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(target.As4()), Port: 8082}, ipv4.ProtocolNumber)
 	if err != nil {
@@ -694,20 +696,32 @@ func TestTCPRevocationInterruptsEstablishedStream(t *testing.T) {
 		t.Fatal("target not connected")
 	}
 	defer server.Close()
-	state.Revision++
-	state.Networks[0].Edges[0].Enabled = false
-	snapshot, err := routing.Compile(state, state.Agents[0].ID)
-	if err != nil {
-		t.Fatal(err)
+	revoke := func(enabled bool) {
+		state.Revision++
+		state.Networks[0].Edges[0].Enabled = enabled
+		snapshot, err := routing.Compile(state, state.Agents[0].ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := agents[0].Apply(ctx, snapshot); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := agents[0].Apply(ctx, snapshot); err != nil {
+	revoke(false)
+	if _, err := server.Write([]byte("x")); err != nil {
 		t.Fatal(err)
 	}
 	conn.SetReadDeadline(time.Now().Add(time.Second))
-	if _, err := conn.Read(make([]byte, 1)); err == nil || err == io.EOF {
-		t.Fatalf("revoked flow did not reset: %v", err)
-	} else if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
-		t.Fatal("revoked flow remained blocked")
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("bytes crossed a revoked Edge")
+	} else if timeout, ok := err.(net.Error); !ok || !timeout.Timeout() {
+		t.Fatalf("connection without a path was not kept: %v", err)
+	}
+	revoke(true)
+	conn.SetReadDeadline(time.Now().Add(20 * time.Second))
+	buf := make([]byte, 1)
+	if _, err := io.ReadFull(conn, buf); err != nil || buf[0] != 'x' {
+		t.Fatalf("connection did not resume: %q, %v", buf, err)
 	}
 }
 

@@ -38,9 +38,12 @@ type policy struct {
 	endpoints []model.Endpoint
 }
 type Mesh struct {
-	// muxResent counts stream frames sent again after a Link change.
+	// muxResent counts stream frames sent again after a Link change;
+	// stallResets, TCP session hops reset for a stall.
 	muxResent      atomic.Uint64
+	stallResets    atomic.Uint64
 	streamHandler  StreamHandler
+	noResume       bool
 	linkState      atomic.Pointer[LinkStateHandler]
 	compact        link.CompactHeader
 	extensionMu    sync.Mutex
@@ -320,7 +323,7 @@ func (m *Mesh) Report() []model.LinkStatus {
 
 // Counters reports data-plane event totals for the Agent's report.
 func (m *Mesh) Counters() map[string]uint64 {
-	return map[string]uint64{"mux_resent_frames": m.muxResent.Load()}
+	return map[string]uint64{"mux_resent_frames": m.muxResent.Load(), "session_stall_resets": m.stallResets.Load()}
 }
 
 func (m *Mesh) secure(cfg *policy, kind model.Transport) secure.Config {
@@ -442,10 +445,11 @@ func (m *Mesh) accept(conn transport.Conn, kind model.Transport) {
 		}
 		// The acceptor confirms each offered capability in band.
 		streams := introduction.TCPStreams && m.streamsEnabled() && streamTransport(kind)
+		resume := introduction.TCPResume && m.resumeEnabled()
 		linkState := introduction.LinkState && m.linkStateEnabled()
 		compact := introduction.CompactData && m.compactHeader() != nil
 		sizeProbe := introduction.SizeProbe && streamTransport(kind)
-		selected.register(channel, *candidate, introduction.PathExchange, linkCaps{streams: streams, streamHello: true, linkState: linkState, linkStateHello: true, compact: compact, compactHello: true, sizeProbe: sizeProbe, sizeProbeHello: true, accepted: true})
+		selected.register(channel, *candidate, introduction.PathExchange, linkCaps{streams: streams, resume: resume, streamHello: true, linkState: linkState, linkStateHello: true, compact: compact, compactHello: true, sizeProbe: sizeProbe, sizeProbeHello: true, accepted: true})
 	}()
 }
 func addressFamily(address net.Addr) int {
@@ -525,6 +529,7 @@ func (g *group) close() {
 // offer (acceptor, which announces each with a hello message).
 type linkCaps struct {
 	streams, streamHello, linkState, linkStateHello bool
+	resume                                          bool
 	compact, compactHello                           bool
 	sizeProbe, sizeProbeHello                       bool
 	accepted                                        bool
@@ -558,6 +563,7 @@ func (g *group) register(channel *peer.Channel, candidate link.Candidate, pathEx
 		options.Compact, options.CompactHello = g.mesh.compactHeader(), caps.compactHello
 	}
 	options.SizeProbe, options.SizeProbeHello = caps.sizeProbe, caps.sizeProbeHello
+	options.Resume = caps.resume
 	l, err := link.New(g.ctx, channel, link.Info{NetworkID: cfg.network, EdgeID: cfg.peer.Edge.ID, PeerID: cfg.peer.Node.ID, CandidateID: candidate.ID, Transport: candidate.Endpoint.Transport}, options)
 	if err != nil {
 		g.mu.Unlock()

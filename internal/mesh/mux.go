@@ -14,6 +14,7 @@ import (
 
 	"github.com/eWloYW8/GraphWAN/internal/link"
 	"github.com/eWloYW8/GraphWAN/internal/secure"
+	"github.com/eWloYW8/GraphWAN/internal/streamproxy"
 )
 
 // Stream frames share an Edge's existing Links with packets. A stream belongs
@@ -26,12 +27,19 @@ const (
 	muxReset = 3
 
 	muxFin = 1
+	// With muxFin on a TCP session hop: the session's direction ended. Session
+	// hops are torn down by resets, so their FINs always carry it.
+	muxEnd = 2
 
 	// link kind + frame type + stream ID
 	muxHeader     = 1 + 1 + 8
 	muxDataHeader = muxHeader + 8 + 1
 	muxAckSize    = muxHeader + 8 + 8
 	muxMaxData    = secure.MaxPlaintext - muxDataHeader
+	// A TCP session relay's acknowledgements add the far end's delivered
+	// offset; a session reset adds whether it resets the connection.
+	muxSessionAckSize = muxAckSize + 8
+	muxAbortSize      = muxHeader + 1
 
 	// The receive window covers one stream at 3 Gbit/s over 80 ms.
 	muxWindow       = 32 << 20
@@ -41,6 +49,9 @@ const (
 	muxBurst = 16
 	// Streams wait this long for an Edge to regain a stream-capable Link.
 	muxLinkLoss = 30 * time.Second
+	// A TCP session hop whose sent frames see no acknowledgement this long is
+	// reset; the ingress rebuilds the session from what the egress delivered.
+	muxStall = time.Second
 	// Ended peer streams are remembered so frames sent again after a Link
 	// change cannot start them a second time.
 	muxTombstoneLifetime = 10 * time.Minute
@@ -75,7 +86,7 @@ type mux struct {
 	streams   map[uint64]*muxStream
 	pending   []*muxStream
 	queued    map[*muxStream]bool
-	resets    []uint64
+	resets    []muxResetEntry
 	lostSince time.Time
 	closed    bool
 }
@@ -120,6 +131,13 @@ func (m *mux) Available() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return !m.closed && m.current != nil
+}
+
+// Resumable reports whether new streams can carry resumable TCP sessions.
+func (m *mux) Resumable() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return !m.closed && m.current != nil && m.current.Resume()
 }
 
 func (m *mux) Open(ctx context.Context) (*muxStream, error) {
@@ -248,19 +266,32 @@ func (m *mux) maintain() {
 		}
 	}
 	var failed []*muxStream
-	if m.current == nil && !m.lostSince.IsZero() && time.Since(m.lostSince) >= muxLinkLoss {
-		for _, s := range m.streams {
+	now := time.Now()
+	for _, s := range m.streams {
+		switch {
+		case s.session:
+			// A session rebuilds what a stalled hop holds instead of waiting.
+			if len(s.frames) > 0 && now.Sub(s.progress) >= muxStall {
+				failed = append(failed, s)
+			}
+		case m.current == nil && !m.lostSince.IsZero() && now.Sub(m.lostSince) >= muxLinkLoss:
 			failed = append(failed, s)
 		}
 	}
 	for _, s := range failed {
 		s.failLocked(errStreamReset)
+		if s.session {
+			m.resetLocked(s.id)
+			if m.g != nil && m.g.mesh != nil {
+				m.g.mesh.stallResets.Add(1)
+			}
+		}
 	}
 	// ACK receipt independently of application consumption. Small messages
 	// release retransmission storage even when the reader has stopped; only
 	// consumed bytes increase the receive window.
 	for _, s := range m.streams {
-		if s.received != s.ackReceived || s.consumed+muxWindow > s.advertised {
+		if s.received != s.ackReceived || s.consumed+muxWindow > s.advertised || s.session && !s.local && s.delivered != s.ackDelivered {
 			s.ackDue = true
 			m.enqueueLocked(s)
 			wake = m.current
@@ -297,9 +328,16 @@ func (m *mux) wake() {
 	}
 }
 
-func (m *mux) resetLocked(id uint64) {
+type muxResetEntry struct {
+	id    uint64
+	abort bool // the reset resets a TCP session's connection
+}
+
+func (m *mux) resetLocked(id uint64) { m.resetKindLocked(id, false) }
+
+func (m *mux) resetKindLocked(id uint64, abort bool) {
 	if len(m.resets) < 1024 {
-		m.resets = append(m.resets, id)
+		m.resets = append(m.resets, muxResetEntry{id, abort})
 	}
 }
 
@@ -319,8 +357,12 @@ func (m *mux) PullStream(l *link.Link, dst [][]byte) int {
 	}
 	n := 0
 	for n < len(dst) && len(m.resets) > 0 {
-		raw := make([]byte, muxHeader)
-		frameHeader(raw, muxReset, m.resets[0])
+		reset := m.resets[0]
+		raw := make([]byte, muxHeader, muxAbortSize)
+		frameHeader(raw, muxReset, reset.id)
+		if reset.abort {
+			raw = append(raw, 1)
+		}
 		m.resets = m.resets[1:]
 		dst[n] = raw
 		n++
@@ -332,6 +374,9 @@ func (m *mux) PullStream(l *link.Link, dst [][]byte) int {
 		if s.ackDue {
 			dst[n] = s.ackFrameLocked()
 			n++
+			if s.session {
+				s.finishLocked()
+			}
 		}
 		for burst := 0; burst < muxBurst && n < len(dst) && s.unsent < len(s.frames); burst++ {
 			dst[n] = s.frames[s.unsent].raw
@@ -363,17 +408,22 @@ func (m *mux) ReceiveStream(l *link.Link, raw []byte) bool {
 		}
 		return m.receiveData(id, binary.BigEndian.Uint64(raw[9:17]), raw[17], raw[18:])
 	case muxAck:
-		if len(raw) != muxAckSize-1 {
+		switch len(raw) {
+		case muxAckSize - 1:
+			m.receiveAck(id, binary.BigEndian.Uint64(raw[9:17]), binary.BigEndian.Uint64(raw[17:25]), 0, false)
+		case muxSessionAckSize - 1:
+			m.receiveAck(id, binary.BigEndian.Uint64(raw[9:17]), binary.BigEndian.Uint64(raw[17:25]), binary.BigEndian.Uint64(raw[25:33]), true)
+		default:
 			return false
 		}
-		m.receiveAck(id, binary.BigEndian.Uint64(raw[9:17]), binary.BigEndian.Uint64(raw[17:25]))
 		return true
 	case muxReset:
-		if len(raw) != muxHeader-1 {
+		if len(raw) != muxHeader-1 && (len(raw) != muxAbortSize-1 || raw[9] != 1) {
 			return false
 		}
 		m.mu.Lock()
 		if s := m.streams[id]; s != nil {
+			s.peerAborted = len(raw) == muxAbortSize-1
 			s.failLocked(errStreamReset)
 		}
 		m.mu.Unlock()
@@ -384,7 +434,7 @@ func (m *mux) ReceiveStream(l *link.Link, raw []byte) bool {
 }
 
 func (m *mux) receiveData(id, offset uint64, flags byte, data []byte) bool {
-	if flags&^muxFin != 0 || flags&muxFin != 0 && len(data) != 0 {
+	if flags&^(muxFin|muxEnd) != 0 || flags&muxEnd != 0 && flags&muxFin == 0 || flags&muxFin != 0 && len(data) != 0 {
 		return false
 	}
 	m.mu.Lock()
@@ -433,7 +483,7 @@ func (m *mux) receiveData(id, offset uint64, flags byte, data []byte) bool {
 		signal(s.readWake)
 	}
 	if flags&muxFin != 0 && offset == s.received && !s.finRecv {
-		s.finRecv, s.finAt = true, offset
+		s.finRecv, s.finAt, s.peerEnd = true, offset, flags&muxEnd != 0
 		s.ackDue = true
 		m.enqueueLocked(s)
 		signal(s.readWake)
@@ -452,14 +502,20 @@ func (m *mux) receiveData(id, offset uint64, flags byte, data []byte) bool {
 	return true
 }
 
-func (m *mux) receiveAck(id, received, limit uint64) {
+func (m *mux) receiveAck(id, received, limit, delivered uint64, explicit bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	s := m.streams[id]
 	if s == nil || s.err != nil {
+		m.mu.Unlock()
 		return
 	}
+	before := s.peerDeliveredLocked()
+	if explicit {
+		s.explicitPeer = true
+		s.peerDelivered = max(s.peerDelivered, delivered)
+	}
 	if received > s.acked {
+		s.progress = time.Now()
 		s.acked = received
 		drop := 0
 		for drop < len(s.frames) && s.frames[drop].end <= received {
@@ -474,6 +530,12 @@ func (m *mux) receiveAck(id, received, limit uint64) {
 		signal(s.sendWake)
 	}
 	s.finishLocked()
+	notify := s.onDelivered
+	changed := s.session && s.peerDeliveredLocked() != before
+	m.mu.Unlock()
+	if changed && notify != nil {
+		notify()
+	}
 }
 
 func signal(c chan struct{}) {
@@ -515,10 +577,31 @@ type muxStream struct {
 	err      error
 	sendWake chan struct{}
 	readWake chan struct{}
+
+	// A TCP session hop; see streamproxy.Hop. Its session offsets count from
+	// sendStart at this stream's offset sendMark.
+	session       bool
+	sendStart     uint64
+	sendMark      uint64
+	local         bool   // the far end infers delivery from what this end consumed
+	delivered     uint64 // reported in acknowledgements unless local
+	ackDelivered  uint64
+	explicitPeer  bool
+	peerDelivered uint64
+	onDelivered   func()
+	peerEnd       bool
+	peerAborted   bool
+	leftover      []byte
+	keep          *streamproxy.Keep
+	progress      time.Time // when sent frames last saw an acknowledgement
 }
 
 func (s *muxStream) ackFrameLocked() []byte {
-	raw := make([]byte, muxAckSize)
+	size := muxAckSize
+	if s.session && !s.local {
+		size = muxSessionAckSize
+	}
+	raw := make([]byte, size)
 	frameHeader(raw, muxAck, s.id)
 	received := s.received
 	if s.finRecv {
@@ -527,6 +610,10 @@ func (s *muxStream) ackFrameLocked() []byte {
 	limit := s.consumed + muxWindow
 	binary.BigEndian.PutUint64(raw[10:18], received)
 	binary.BigEndian.PutUint64(raw[18:26], limit)
+	if size == muxSessionAckSize {
+		binary.BigEndian.PutUint64(raw[26:34], s.delivered)
+		s.ackDelivered = s.delivered
+	}
 	s.advertised = max(s.advertised, limit)
 	s.ackReceived = s.received
 	s.ackDue = false
@@ -637,8 +724,20 @@ func (s *muxStream) publish(b *frameBuilder) error {
 		m.mu.Unlock()
 		return err
 	}
-	s.frames = append(s.frames, b.finish()...)
+	frames := b.finish()
+	if len(s.frames) == 0 {
+		s.progress = time.Now()
+	}
+	s.frames = append(s.frames, frames...)
 	s.sendNext += uint64(b.bytes)
+	if s.keep != nil {
+		// Frames are immutable; the session end keeps their payloads until the
+		// far end delivered them. Under the lock, a reset of this hop either
+		// follows the bytes into the keep or fails this publish.
+		for _, frame := range frames {
+			s.keep.Add(frame.raw[muxDataHeader:])
+		}
+	}
 	m.enqueueLocked(s)
 	l := m.current
 	m.mu.Unlock()
@@ -649,11 +748,38 @@ func (s *muxStream) publish(b *frameBuilder) error {
 	return nil
 }
 
+// payload copies what a builder holds, for a ReadFrom that could not send it.
+func (b *frameBuilder) payload() []byte {
+	out := make([]byte, 0, b.bytes)
+	for i, start := range b.starts {
+		end := b.used
+		if i+1 < len(b.starts) {
+			end = b.starts[i+1]
+		}
+		out = append(out, b.chunk[start+muxDataHeader:end]...)
+	}
+	return out
+}
+
+// waitKeep holds a session end's writes while it keeps the most it may.
+func (s *muxStream) waitKeep() error {
+	s.m.mu.Lock()
+	keep := s.keep
+	s.m.mu.Unlock()
+	if keep == nil {
+		return nil
+	}
+	return keep.Wait(s.ctx)
+}
+
 func (s *muxStream) Write(p []byte) (int, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	written := 0
 	for len(p) > 0 {
+		if err := s.waitKeep(); err != nil {
+			return written, s.errOr(err)
+		}
 		start, limit, err := s.reserve()
 		if err != nil {
 			return written, err
@@ -682,6 +808,9 @@ func (s *muxStream) ReadFrom(src io.Reader) (int64, error) {
 	defer s.writeMu.Unlock()
 	var total int64
 	for {
+		if err := s.waitKeep(); err != nil {
+			return total, s.errOr(err)
+		}
 		start, limit, err := s.reserve()
 		if err != nil {
 			return total, err
@@ -690,6 +819,11 @@ func (s *muxStream) ReadFrom(src io.Reader) (int64, error) {
 		n, readErr := reader.ReadInto(b)
 		if n > 0 {
 			if err := s.publish(b); err != nil {
+				// What was read from the access connection but not sent goes to
+				// the session's next hop.
+				s.m.mu.Lock()
+				s.leftover = append(s.leftover, b.payload()...)
+				s.m.mu.Unlock()
 				return total, err
 			}
 			total += int64(n)
@@ -721,6 +855,12 @@ func (s *muxStream) CloseWrite() error {
 	frameHeader(raw, muxData, s.id)
 	binary.BigEndian.PutUint64(raw[10:18], s.sendNext)
 	raw[18] = muxFin
+	if s.session {
+		raw[18] |= muxEnd
+	}
+	if len(s.frames) == 0 {
+		s.progress = time.Now()
+	}
 	s.frames = append(s.frames, muxFrame{end: s.sendNext + 1, raw: raw})
 	m.enqueueLocked(s)
 	l := m.current
@@ -805,6 +945,11 @@ func (s *muxStream) Close() error {
 			s.failLocked(net.ErrClosed)
 			m.resetLocked(s.id)
 		} else {
+			if s.session && (s.consumed+muxWindow > s.advertised || s.received != s.ackReceived || !s.local && s.delivered != s.ackDelivered) {
+				// The far end learns what this end delivered from this ACK.
+				s.ackDue = true
+				m.enqueueLocked(s)
+			}
 			s.finishLocked()
 		}
 	}
@@ -831,7 +976,8 @@ func (s *muxStream) Abort() {
 }
 
 func (s *muxStream) finishLocked() {
-	if s.closed && s.writeClosed && s.acked > s.finOffset {
+	// A session hop's last acknowledgement may carry the delivered end.
+	if s.closed && s.writeClosed && s.acked > s.finOffset && !(s.session && s.ackDue) {
 		s.failLocked(net.ErrClosed)
 	}
 }
@@ -859,3 +1005,116 @@ func (s *muxStream) errOr(fallback error) error {
 
 // Bytes reports application bytes received and sent on this stream.
 func (s *muxStream) Bytes() (rx, tx uint64) { return s.rx.Load(), s.tx.Load() }
+
+// Begin starts a session hop's accounting: send is the session offset of the
+// next byte written. See streamproxy.Hop.
+func (s *muxStream) Begin(send uint64) {
+	s.m.mu.Lock()
+	defer s.m.mu.Unlock()
+	s.session = true
+	s.sendStart, s.sendMark = send, s.sendNext
+}
+
+// DeliverLocal makes acknowledgements imply the delivered offset: this end's
+// reader delivers what it consumes, which they already report.
+func (s *muxStream) DeliverLocal() {
+	s.m.mu.Lock()
+	s.local = true
+	s.m.mu.Unlock()
+}
+
+// SetDelivered sets the offset this relay's acknowledgements report.
+func (s *muxStream) SetDelivered(e uint64) {
+	m := s.m
+	m.mu.Lock()
+	if e <= s.delivered || s.err != nil {
+		m.mu.Unlock()
+		return
+	}
+	s.delivered = e
+	var l *link.Link
+	// After its own input ended, the hop has nothing else to acknowledge, so
+	// the end's delivery goes out at once.
+	if e-s.ackDelivered >= muxAckThreshold || s.finRecv && s.consumed == s.finAt {
+		s.ackDue = true
+		m.enqueueLocked(s)
+		l = m.current
+	}
+	m.mu.Unlock()
+	if l != nil {
+		l.WakeStreams()
+	}
+}
+
+func (s *muxStream) PeerDelivered() uint64 {
+	s.m.mu.Lock()
+	defer s.m.mu.Unlock()
+	return s.peerDeliveredLocked()
+}
+
+// peerDeliveredLocked is the far end's delivered offset: reported by a relay,
+// or what the end itself consumed, one more once it took the end.
+func (s *muxStream) peerDeliveredLocked() uint64 {
+	if s.explicitPeer {
+		return s.peerDelivered
+	}
+	consumed := s.peerLimit - muxWindow
+	if consumed < s.sendMark {
+		return s.sendStart
+	}
+	e := s.sendStart + consumed - s.sendMark
+	if s.writeClosed && s.acked > s.finOffset && consumed == s.finOffset {
+		e++
+	}
+	return e
+}
+
+func (s *muxStream) OnDelivered(notify func()) {
+	s.m.mu.Lock()
+	s.onDelivered = notify
+	s.m.mu.Unlock()
+}
+
+func (s *muxStream) SetRetention(k *streamproxy.Keep) {
+	s.m.mu.Lock()
+	s.keep = k
+	s.m.mu.Unlock()
+}
+
+func (s *muxStream) Leftover() []byte {
+	s.m.mu.Lock()
+	defer s.m.mu.Unlock()
+	left := s.leftover
+	s.leftover = nil
+	return left
+}
+
+// Ended reports, after Read returned io.EOF, that the FIN ended the session's
+// direction.
+func (s *muxStream) Ended() bool {
+	s.m.mu.Lock()
+	defer s.m.mu.Unlock()
+	return s.peerEnd
+}
+
+// Aborted reports that the peer reset the session's connection.
+func (s *muxStream) Aborted() bool {
+	s.m.mu.Lock()
+	defer s.m.mu.Unlock()
+	return s.peerAborted
+}
+
+// AbortSession resets the hop as a reset of the session's connection.
+func (s *muxStream) AbortSession() {
+	m := s.m
+	m.mu.Lock()
+	if s.err == nil {
+		s.failLocked(errStreamReset)
+		m.resetKindLocked(s.id, true)
+	}
+	l := m.current
+	m.mu.Unlock()
+	if l != nil {
+		l.WakeStreams()
+	}
+}

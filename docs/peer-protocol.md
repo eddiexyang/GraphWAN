@@ -292,6 +292,59 @@ credit threshold, FIN acknowledgements and Link-change acknowledgements remain
 in use. Unchanged idle streams emit no periodic ACK. The wire format is
 unchanged; the receiving Agent needs the update for timely small-message ACKs.
 
+### Resumable TCP sessions
+
+Between current Agents, an access TCP connection whose path crosses only
+TCP-backed Links (TCP, WS, WSS, gRPC) is a session. Only its ingress, which
+terminates the client's TCP, and its egress, which connects to the server,
+hold the original tuple and the session's state. The bytes travel on a chain
+of streams along the current routes; relays copy them and keep no session
+state. TCP never crosses a TCP-backed Link as packets.
+
+A chain's request is the stream request with four more fields: `conn`, a
+random 128-bit session ID chosen by the ingress; `gen`, the chain's
+generation; `down` and `up`, the offsets where its downstream and upstream
+bytes start. Every hop answers with one status byte: 0 accepted, 1 refused, 2
+a hop does not support sessions or its next Edge carries only packets, 3 the
+egress has no such session.
+
+Three additions to the stream frames apply to session streams only:
+
+- A FIN carries flag 2: the session's direction ended. Chains are torn down
+  by resets, never by FINs.
+- A reset may carry a trailing byte 1: it resets the connection. A reset
+  without it is a failed hop.
+- A relay's acknowledgements carry 8 more bytes: the offset the far end
+  delivered of the direction the stream carries, copied from the next hop.
+  The ends' acknowledgements are unchanged; the receive limit they carry
+  implies what they delivered, so a session over one hop sends the frames a
+  plain stream sends.
+
+Each end keeps the bytes it sent until the other end delivered them, at most
+32 MiB; reading its socket waits while the retention is full. A session
+stream whose sent frames see no acknowledgement for 1 s is reset, and it is
+not reset after an Edge has been without Links for 30 s.
+
+A relay whose next hop or its streams changed resets its part of the chain.
+The ingress then, and whenever its own first hop changes, opens a chain of the
+next generation along the current routes: it resends from what the egress
+delivered and asks for the upstream bytes from what it delivered itself,
+retrying from 200 ms up to every 2 s. An egress that loses its chain sends a
+replay request, a UDP datagram from and to port 18263 of the two Agents'
+overlay addresses holding the session ID and failed generation, which the
+ingress takes before its TUN. The egress takes only the newest generation and
+discards bytes it already delivered. A chain toward an Agent without sessions
+or an Edge carrying only packets resets the connection. Without any chain for
+two minutes, either end resets it. The egress remembers an ended session for
+ten minutes and answers late chains with status 3.
+
+A session ends when each end has delivered the other's end. A reset of the
+connection resets every hop of the chain and the other end's connection.
+
+The dialer offers `resume` in its Link introduction, and the acceptor confirms
+it with a resume hello message. When the first hop toward the destination does
+not carry sessions, the connection uses a plain stream, as before.
+
 ## Link control inside the authenticated channel
 
 After Ready, the dialer sends a type-0 plaintext message containing a JSON

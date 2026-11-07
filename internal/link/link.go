@@ -39,6 +39,9 @@ const (
 	// [compactDataMessage][hop limit][IP packet]. The receiver rebuilds it.
 	compactHelloMessage = 15
 	compactDataMessage  = 16
+	// The acceptor confirms resumable TCP sessions offered in the
+	// introduction; see Options.Resume.
+	resumeHelloMessage = 20
 	// Leave room for multiple kernel GSO bursts while writers process bounded
 	// batches. The queue is still finite; control messages use a separate queue.
 	queueSize = 512
@@ -83,6 +86,9 @@ type Options struct {
 	// side enables streams when that announcement arrives.
 	Streams     StreamHandler
 	StreamHello bool
+	// Resume offers (dialer) or confirms (acceptor) resumable TCP sessions on
+	// the streams. The acceptor confirms with a hello message.
+	Resume bool
 	// LinkState carries link-state advertisements; LinkStateHello is set by
 	// the accepting side, as for streams. Any transport may carry them.
 	LinkState      LinkStateHandler
@@ -177,6 +183,7 @@ type Link struct {
 	sent, lost      uint64
 	rx, tx, dropped atomic.Uint64
 	streamsReady    atomic.Bool
+	resume          atomic.Bool
 	streamWake      chan struct{}
 	linkStateReady  atomic.Bool
 	linkStateOut    chan []byte
@@ -226,6 +233,10 @@ func New(parent context.Context, channel Channel, info Info, options Options) (*
 		// The queue is empty here, so the announcement precedes every stream frame.
 		l.control <- []byte{streamHelloMessage, 1}
 		l.streamsReady.Store(true)
+	}
+	if options.Resume && options.Accepted {
+		l.control <- []byte{resumeHelloMessage, 1}
+		l.resume.Store(true)
 	}
 	if options.LinkState != nil && options.LinkStateHello {
 		l.control <- []byte{linkStateHelloMessage, 1}
@@ -299,6 +310,9 @@ func (l *Link) logAttrs(extra ...any) []any {
 }
 func (l *Link) ID() string         { return l.channel.ID() }
 func (l *Link) StreamsReady() bool { return l.streamsReady.Load() }
+
+// Resume reports whether both ends carry resumable TCP sessions.
+func (l *Link) Resume() bool { return l.resume.Load() }
 
 func (l *Link) LinkStateReady() bool { return l.linkStateReady.Load() }
 
@@ -635,6 +649,12 @@ func (l *Link) readLoop() {
 			if !l.streamsReady.Swap(true) {
 				l.options.Streams.StreamsReady(l)
 			}
+		case resumeHelloMessage:
+			if len(raw) != 2 || !l.options.Resume || l.options.Accepted {
+				return
+			}
+			l.sizeProbeUnsupported()
+			l.resume.Store(true)
 		case linkStateHelloMessage:
 			if len(raw) != 2 || l.options.LinkState == nil || l.options.LinkStateHello {
 				return

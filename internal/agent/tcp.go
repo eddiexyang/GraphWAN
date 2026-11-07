@@ -204,6 +204,11 @@ func (r *DataPlane) newTCP(network model.ID, fingerprint string, mtu int, offloa
 		if err != nil {
 			return nil, err
 		}
+		// A session survives route changes and failed relays; it needs every
+		// hop to support them, else the connection uses a plain stream.
+		if session, err := r.startSession(ctx, request); session != nil || err != nil {
+			return session, err
+		}
 		return r.openTCP(ctx, request, "")
 	}
 	batch := func(packets [][]byte) error {
@@ -361,13 +366,18 @@ func (r *DataPlane) acceptTCP(parent context.Context, network, remote model.ID, 
 	ctx, cancel := context.WithTimeout(parent, streamproxy.ConnectTimeout)
 	defer cancel()
 	var target streamproxy.Conn
+	var request streamproxy.Request
 	err := streamproxy.During(ctx, s, func() error {
-		request, err := streamproxy.ReadRequest(s)
+		var err error
+		request, err = streamproxy.ReadRequest(s)
 		if err != nil {
 			return err
 		}
 		if request.Network != network {
 			return errors.New("stream network disagrees with authenticated channel")
+		}
+		if request.Resumable() {
+			return nil
 		}
 		target, err = r.openTCP(ctx, request, remote)
 		if err != nil {
@@ -377,6 +387,10 @@ func (r *DataPlane) acceptTCP(parent context.Context, network, remote model.ID, 
 		_, err = s.Write([]byte{0})
 		return err
 	})
+	if err == nil && request.Resumable() {
+		r.acceptChain(parent, ctx, network, remote, s, request)
+		return
+	}
 	if target != nil {
 		defer target.Close()
 	}

@@ -125,6 +125,18 @@ func (e *Edge) sendLinkLocked() *Link {
 	return selected
 }
 
+// Active returns the selected Link while it is healthy, or nil. Both ends of
+// a coordinated Edge select the same Link.
+func (e *Edge) Active() *Link {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	l := e.links[e.active]
+	if l == nil || !l.healthy() {
+		return nil
+	}
+	return l
+}
+
 func (e *Edge) Report() []model.LinkStatus {
 	e.mu.Lock()
 	defer e.mu.Unlock()

@@ -388,7 +388,7 @@ func TestMuxSparseBatchStorage(t *testing.T) {
 		if !bytes.Equal(got, payload) {
 			t.Fatal("compaction changed payload")
 		}
-		p.a.receiveAck(s.id, s.sendNext, muxWindow)
+		p.a.receiveAck(s.id, s.sendNext, muxWindow, 0, false)
 	}
 }
 
@@ -466,7 +466,7 @@ func BenchmarkMuxBatchPublish(b *testing.B) {
 				if err := s.publish(batch); err != nil {
 					b.Fatal(err)
 				}
-				m.receiveAck(s.id, s.sendNext, s.sendNext+muxWindow)
+				m.receiveAck(s.id, s.sendNext, s.sendNext+muxWindow, 0, false)
 			}
 		})
 	}
