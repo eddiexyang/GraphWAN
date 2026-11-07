@@ -96,7 +96,6 @@ type Router struct {
 	sendOwnedBatch func(context.Context, model.ID, model.ID, []*packetbuf.Buffer) error
 	tcpIntercept   atomic.Pointer[TCPIntercept]
 	tcpCarrier     atomic.Pointer[TCPCarrier]
-	sticky         stickyFlows
 }
 
 // SetTCPCarrier installs or removes (nil) the check that keeps TCP packets
@@ -312,12 +311,7 @@ func (r *Router) encapsulateSource(ctx context.Context, n *network, raw []byte, 
 		return nil, "", ErrSource
 	}
 	flow := func() uint64 { return info.Flow }
-	var destination *node
-	if packet.IsUDP(raw) || packet.IsTCP(raw) {
-		destination = r.sticky.exit(n, info.Destination, info.Flow)
-	} else {
-		destination = n.exit(info.Destination, flow)
-	}
+	destination := n.exit(info.Destination, flow)
 	if destination == nil {
 		return nil, "", ErrDestination
 	}

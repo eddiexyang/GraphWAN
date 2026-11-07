@@ -114,32 +114,24 @@ func TestLowestCostExit(t *testing.T) {
 	}
 }
 
-// A UDP flow, and TCP carried as packets, keeps its exit when another exit
-// becomes cheaper, and moves only when its exit becomes unreachable. New
-// flows use the cheaper exit.
-func TestPacketFlowKeepsExit(t *testing.T) {
+// Packets choose their exit per packet, as routes do: when another exit
+// becomes cheaper, an existing flow moves to it at once, for UDP and for TCP
+// carried as packets.
+func TestPacketFlowFollowsExit(t *testing.T) {
 	for _, protocol := range []byte{17, 6} {
-		t.Run(fmt.Sprint(protocol), func(t *testing.T) { packetFlowKeepsExit(t, protocol) })
-	}
-}
-
-func packetFlowKeepsExit(t *testing.T, protocol byte) {
-	x := newExitNetwork(t, exitTopology())
-	n := x.state.Networks[0]
-	b, d := n.Nodes[1].ID, n.Nodes[3].ID
-	if got := x.sendProtocol("192.168.0.7", 2000, protocol); got != d {
-		t.Fatalf("exit %s, want D", got)
-	}
-	x.update(func(s *model.State) { s.Networks[0].Nodes[1].AdvertisedSubnets[0].Metric = 0 }) // B: 10, ties D and wins on Node ID
-	if got := x.sendProtocol("192.168.0.7", 2000, protocol); got != d {
-		t.Fatalf("existing flow moved to %s", got)
-	}
-	if got := x.sendProtocol("192.168.0.7", 2001, protocol); got != b {
-		t.Fatalf("new flow exit %s, want B", got)
-	}
-	x.update(func(s *model.State) { s.Agents[3].Revoked = true })
-	if got := x.sendProtocol("192.168.0.7", 2000, protocol); got != b {
-		t.Fatalf("flow did not leave the failed exit: %s", got)
+		t.Run(fmt.Sprint(protocol), func(t *testing.T) {
+			x := newExitNetwork(t, exitTopology())
+			n := x.state.Networks[0]
+			b, d := n.Nodes[1].ID, n.Nodes[3].ID
+			if got := x.sendProtocol("192.168.0.7", 2000, protocol); got != d {
+				t.Fatalf("exit %s, want D", got)
+			}
+			x.update(func(s *model.State) { s.Networks[0].Nodes[1].AdvertisedSubnets[0].Metric = 0 })  // B: 10
+			x.update(func(s *model.State) { s.Networks[0].Nodes[3].AdvertisedSubnets[0].Metric = 20 }) // D: 21
+			if got := x.sendProtocol("192.168.0.7", 2000, protocol); got != b {
+				t.Fatalf("existing flow stayed at %s after B became cheaper", got)
+			}
+		})
 	}
 }
 

@@ -61,10 +61,9 @@ link-state routing moves traffic to the next one. Each hop makes its own choice
 toward the nearest gateway; a transit Node forwards a packet to any advertiser of
 the prefix.
 
-A connection keeps its gateway while that gateway stays reachable, even when
-another one becomes cheaper. A TCP connection carried as a stream keeps the
-gateway its egress reached; a UDP flow, or TCP carried as packets, keeps the
-gateway its ingress chose until it has been idle for 2 minutes.
+Packets, including UDP and TCP carried as packets, choose the gateway with
+every packet, so an existing flow moves at once when another gateway becomes
+cheaper.
 
 The Network's **equal-cost paths** setting decides ties, both between next hops of
 equal cost and between gateways of equal total cost:
