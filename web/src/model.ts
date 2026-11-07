@@ -19,7 +19,12 @@ export type Agent = {
   stun_servers?: string[]
   exclude_container_ips?: boolean
 }
-export type AdvertisedSubnet = { prefix: string; gateway_mode: 'off' | 'route' | 'snat' }
+export type AdvertisedSubnet = {
+  prefix: string
+  gateway_mode: 'off' | 'route' | 'snat'
+  // Added to the path cost when several nodes advertise the prefix.
+  metric?: number
+}
 export type Node = {
   wireguard?: { public_key: string; endpoint?: string }
   advertised_subnets?: AdvertisedSubnet[]
@@ -54,6 +59,7 @@ export type Network = {
   cipher: string
   nodes: Node[]
   edges: Edge[]
+  equal_cost_paths?: 'lowest-id' | 'ecmp'
 }
 export type ServerEndpoint = {
   id: string

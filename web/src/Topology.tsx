@@ -1121,6 +1121,32 @@ export default function Topology({
                         <option value="snat">SNAT (Linux)</option>
                       </select>
                     </Field>
+                    <Field label="Metric">
+                      <input
+                        aria-label={`Advertised subnet ${index + 1} metric`}
+                        type="number"
+                        min={0}
+                        max={4294967295}
+                        value={subnet.metric ?? 0}
+                        onChange={(e) =>
+                          change({
+                            ...network,
+                            nodes: network.nodes.map((n) =>
+                              n.id === node.id
+                                ? {
+                                    ...n,
+                                    advertised_subnets: (n.advertised_subnets || []).map((s, i) =>
+                                      i === index
+                                        ? { ...s, metric: Number(e.target.value) || undefined }
+                                        : s,
+                                    ),
+                                  }
+                                : n,
+                            ),
+                          })
+                        }
+                      />
+                    </Field>
                     {editing && (
                       <button
                         type="button"
@@ -1496,6 +1522,20 @@ export default function Topology({
                   <option value="aes-256-gcm">AES-256-GCM</option>
                   <option value="chacha20-poly1305">ChaCha20-Poly1305</option>
                   <option value="xchacha20-poly1305">XChaCha20-Poly1305</option>
+                </select>
+              </Field>
+              <Field label="Equal-cost paths">
+                <select
+                  value={network.equal_cost_paths ?? 'lowest-id'}
+                  onChange={(e) =>
+                    change({
+                      ...network,
+                      equal_cost_paths: e.target.value === 'ecmp' ? 'ecmp' : undefined,
+                    })
+                  }
+                >
+                  <option value="lowest-id">Lowest node ID</option>
+                  <option value="ecmp">ECMP (hash per flow)</option>
                 </select>
               </Field>
             </fieldset>
