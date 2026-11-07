@@ -89,6 +89,20 @@ func (r *Router) nextHop(networkID model.ID, destination netip.Addr, flow func()
 	return next, false, nil
 }
 
+// TCPExit returns the Node a TCP connection from from to to leaves the
+// network at now: the destination's host, or the gateway chosen for it.
+func (r *Router) TCPExit(networkID model.ID, from, to netip.AddrPort) (model.ID, error) {
+	n := r.state.Load().networks[networkID]
+	if n == nil {
+		return "", ErrNetwork
+	}
+	dest := n.exit(to.Addr(), func() uint64 { return packet.TCPFlowHash(from, to) })
+	if dest == nil {
+		return "", ErrDestination
+	}
+	return dest.id, nil
+}
+
 func (r *Router) TCPRequest(networkID model.ID, from, to netip.AddrPort) (streamproxy.Request, error) {
 	n := r.state.Load().networks[networkID]
 	if n == nil {

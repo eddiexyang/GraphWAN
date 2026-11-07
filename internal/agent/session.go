@@ -42,6 +42,7 @@ type sessions struct {
 	wake     chan struct{}
 	counters streamproxy.Counters
 	resets   uint64 // relay chains reset for a route change, under mu
+	exits    uint64 // connections reset because their gateway changed, under mu
 }
 
 type ingressSession struct {
@@ -96,15 +97,26 @@ func (r *DataPlane) rerouteLoop() {
 }
 
 // rerouteSessions moves every chain whose next hop changed: the ingress
-// rebuilds its own, a relay resets its part so the ingress rebuilds.
+// rebuilds its own, a relay resets its part so the ingress rebuilds. A
+// connection whose destination now leaves the network at another Node is
+// reset.
 func (r *DataPlane) rerouteSessions() {
 	state := r.state.Load()
 	if state == nil {
 		return
 	}
 	r.sessions.mu.Lock()
-	var moved []*ingressSession
-	for _, s := range r.sessions.ingress {
+	var moved, ended []*ingressSession
+	for key, s := range r.sessions.ingress {
+		// A connection's state is at its egress. When traffic to its
+		// destination leaves at another Node now, the connection ends there
+		// with a reset; it never continues on another egress.
+		if exit, err := state.router.TCPExit(s.request.Network, s.request.From, s.request.To); err == nil && exit != s.request.Destination {
+			ended = append(ended, s)
+			delete(r.sessions.ingress, key)
+			r.sessions.exits++
+			continue
+		}
 		next, local, err := state.router.TCPRoute(s.request, "")
 		if err != nil || local || next != s.next || !state.mesh.ResumeAvailable(s.request.Network, next) {
 			moved = append(moved, s)
@@ -120,6 +132,9 @@ func (r *DataPlane) rerouteSessions() {
 		}
 	}
 	r.sessions.mu.Unlock()
+	for _, s := range ended {
+		s.end.Abort()
+	}
 	for _, s := range moved {
 		s.end.Reroute()
 	}
@@ -443,7 +458,7 @@ func (r *DataPlane) replayRequest(state *runtimeState, network model.ID, raw []b
 // sessionCounters reports session event totals.
 func (r *DataPlane) sessionCounters() map[string]uint64 {
 	r.sessions.mu.Lock()
-	resets := r.sessions.resets
+	resets, exits := r.sessions.resets, r.sessions.exits
 	r.sessions.mu.Unlock()
 	c := &r.sessions.counters
 	return map[string]uint64{
@@ -451,5 +466,6 @@ func (r *DataPlane) sessionCounters() map[string]uint64 {
 		"session_rebuilds":        c.Rebuilds.Load(),
 		"session_replay_requests": c.ReplayRequests.Load(),
 		"session_route_resets":    resets,
+		"session_exit_resets":     exits,
 	}
 }

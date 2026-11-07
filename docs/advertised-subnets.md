@@ -63,7 +63,11 @@ the prefix.
 
 Packets, including UDP and TCP carried as packets, choose the gateway with
 every packet, so an existing flow moves at once when another gateway becomes
-cheaper.
+cheaper. A TCP connection carried as a stream ends at the gateway its egress
+holds its state on: when another gateway takes over, the connection is reset
+after the bytes delivered so far, and the client's next connection uses the
+new gateway. It never continues on another gateway. A change of path to the
+same gateway keeps the connection.
 
 The Network's **equal-cost paths** setting decides ties, both between next hops of
 equal cost and between gateways of equal total cost:

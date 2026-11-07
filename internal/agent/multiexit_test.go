@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,10 +18,11 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
-// B (cost 10 + metric 0) and D (1 + 20) both advertise 192.168.0.0/24. A
-// connection keeps its exit when the other exit becomes cheaper; new
-// connections use the cheaper one.
-func TestTCPConnectionKeepsExit(t *testing.T) {
+// B (cost 10 + metric 0) and D (1 + 20) both advertise 192.168.0.0/24. When
+// D becomes the cheaper exit, a connection through B ends with a reset after
+// a correct prefix of its byte stream; it never continues at D. A new
+// connection exits at D.
+func TestTCPConnectionResetsOnExitChange(t *testing.T) {
 	prefix := netip.MustParsePrefix("192.168.0.0/24")
 	agents, devices, state := graphAgents(t, model.TCP, streamOptions{}, 4, 4, func(s *model.State) {
 		s.Networks[0].Nodes[1].AdvertisedSubnets = []model.AdvertisedSubnet{{Prefix: prefix, GatewayMode: model.GatewayOff}}
@@ -80,15 +82,62 @@ func TestTCPConnectionKeepsExit(t *testing.T) {
 	if exit != 1 {
 		t.Fatalf("first connection exits at node %d, want B", exit)
 	}
-	echo(conn)
-	state.Revision++
-	state.Networks[0].Nodes[1].AdvertisedSubnets[0].Metric = 50 // B: 60, D: 21
-	applyAll(t, agents, state)
-	echo(conn)
+	// Stream random bytes and compare the echo with what was sent, before and
+	// after the exit changes.
+	sent := make([]byte, 64<<20)
+	rand.Read(sent)
+	conn.SetDeadline(time.Now().Add(20 * time.Second))
+	writeErr := make(chan error, 1)
+	go func() {
+		for offset := 0; offset < len(sent); offset += 16 << 10 {
+			if _, err := conn.Write(sent[offset : offset+16<<10]); err != nil {
+				writeErr <- err
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		writeErr <- nil
+	}()
+	received := make([]byte, 0, len(sent))
+	buf := make([]byte, 64<<10)
+	changed := false
+	var readErr error
+	for readErr == nil {
+		var n int
+		n, readErr = conn.Read(buf)
+		received = append(received, buf[:n]...)
+		if !bytes.Equal(received, sent[:len(received)]) {
+			t.Fatalf("echo differs from the sent stream within %d bytes", len(received))
+		}
+		if !changed && len(received) >= 1<<20 {
+			changed = true
+			state.Revision++
+			state.Networks[0].Nodes[1].AdvertisedSubnets[0].Metric = 50 // B: 60, D: 21
+			applyAll(t, agents, state)
+		}
+	}
+	if !changed {
+		t.Fatalf("connection ended before the exit changed: %v", readErr)
+	}
+	// The stack reports a reset to one call; the other then sees the closed
+	// connection.
+	var written error
+	select {
+	case written = <-writeErr:
+	case <-time.After(5 * time.Second):
+	}
+	reset := func(err error) bool { return err != nil && strings.Contains(err.Error(), "connection reset by peer") }
+	if !reset(readErr) && !reset(written) {
+		t.Fatalf("connection through the old exit was not reset: read %v, write %v", readErr, written)
+	}
+	t.Logf("reset after %d correct bytes: read %v, write %v", len(received), readErr, written)
 	select {
 	case other := <-accepted:
-		t.Fatalf("the connection was reopened at node %d", other)
+		t.Fatalf("the connection continued at node %d", other)
 	default:
+	}
+	if agents[0].Counters()["session_exit_resets"] == 0 {
+		t.Fatal("no exit reset counted")
 	}
 	second, exit := dial()
 	defer second.Close()
@@ -96,6 +145,5 @@ func TestTCPConnectionKeepsExit(t *testing.T) {
 		t.Fatalf("new connection exits at node %d, want D", exit)
 	}
 	echo(second)
-	echo(conn)
 	assertNoTCPOverTCP(t, agents)
 }
