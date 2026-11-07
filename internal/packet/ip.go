@@ -74,3 +74,24 @@ func inspectIP(raw []byte, flow bool) (IPInfo, error) {
 	info.Flow = h.Sum64()
 	return info, nil
 }
+
+// TCPFlowHash is the Flow InspectIP computes for an unfragmented TCP packet
+// from source to destination, so streams follow their packets' paths.
+func TCPFlowHash(source, destination netip.AddrPort) uint64 {
+	h := fnv.New64a()
+	if source.Addr().Is4() {
+		a, b := source.Addr().As4(), destination.Addr().As4()
+		h.Write(a[:])
+		h.Write(b[:])
+	} else {
+		a, b := source.Addr().As16(), destination.Addr().As16()
+		h.Write(a[:])
+		h.Write(b[:])
+	}
+	var tail [5]byte
+	tail[0] = 6
+	binary.BigEndian.PutUint16(tail[1:3], source.Port())
+	binary.BigEndian.PutUint16(tail[3:5], destination.Port())
+	h.Write(tail[:])
+	return h.Sum64()
+}

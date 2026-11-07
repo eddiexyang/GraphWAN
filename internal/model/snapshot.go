@@ -26,6 +26,8 @@ type NetworkConfig struct {
 	Directory []Destination `json:"directory"`
 	Peers     []Peer        `json:"peers"`
 	Routes    []Route       `json:"routes"`
+	// EqualCostPaths is the Network's setting; Agents apply it per hop.
+	EqualCostPaths EqualCostPaths `json:"equal_cost_paths,omitempty"`
 	// Topology lists the network's usable edges so Agents can compute routes
 	// from link-state advertisements without the controller.
 	Topology []TopologyEdge `json:"topology,omitempty"`
@@ -58,6 +60,9 @@ type Route struct {
 	Destination ID     `json:"destination"`
 	NextHop     ID     `json:"next_hop"`
 	Cost        uint64 `json:"cost"`
+	// Alternates are the other next hops of equal cost, in Node ID order.
+	// NextHop is always the lowest.
+	Alternates []ID `json:"alternates,omitempty"`
 }
 
 // Clone gives each runtime configuration its own backing slices.
@@ -75,6 +80,9 @@ func (s Snapshot) Clone() Snapshot {
 			n.Directory[j].AdvertisedSubnets = append([]AdvertisedSubnet(nil), n.Directory[j].AdvertisedSubnets...)
 		}
 		n.Routes = append([]Route{}, n.Routes...)
+		for j := range n.Routes {
+			n.Routes[j].Alternates = append([]ID(nil), n.Routes[j].Alternates...)
+		}
 		n.Topology = append([]TopologyEdge(nil), n.Topology...)
 		n.Peers = append([]Peer{}, n.Peers...)
 		for j := range n.Peers {

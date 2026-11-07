@@ -42,7 +42,13 @@ type AgentReport struct {
 	LinkState *LinkStateReport `json:"link_state,omitempty"`
 	// Counters are data-plane event totals since the Agent started.
 	Counters map[string]uint64 `json:"counters,omitempty"`
+	// Capabilities lists configuration features the Agent accepts.
+	Capabilities []string `json:"capabilities,omitempty"`
 }
+
+// CapabilityMultiExit marks Agents that accept a prefix advertised by
+// several Nodes.
+const CapabilityMultiExit = "multi_exit"
 
 type LinkStateReport struct {
 	Revision  uint64               `json:"revision"`

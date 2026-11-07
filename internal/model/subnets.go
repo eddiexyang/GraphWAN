@@ -8,7 +8,9 @@ import (
 const MaxAdvertisedSubnets = 64
 const MaxNetworkSubnets = 1024
 
-func validateAdvertised(overlay netip.Prefix, entries []AdvertisedSubnet, seen map[netip.Prefix]bool) error {
+// validateAdvertised checks one Node's entries; total counts the Network's.
+// Several Nodes may advertise one prefix, each Node once.
+func validateAdvertised(overlay netip.Prefix, entries []AdvertisedSubnet, total *int) error {
 	if len(entries) > MaxAdvertisedSubnets {
 		return fmt.Errorf("at most %d advertised subnets per node", MaxAdvertisedSubnets)
 	}
@@ -28,13 +30,39 @@ func validateAdvertised(overlay netip.Prefix, entries []AdvertisedSubnet, seen m
 		default:
 			return fmt.Errorf("invalid automatic gateway mode %q", entry.GatewayMode)
 		}
-		if seen[p] {
-			return fmt.Errorf("advertised subnet %s is declared more than once in the network", p)
+		if countPrefix(entries, p) > 1 {
+			return fmt.Errorf("advertised subnet %s is declared more than once on the node", p)
 		}
-		seen[p] = true
-		if len(seen) > MaxNetworkSubnets {
+		if *total++; *total > MaxNetworkSubnets {
 			return fmt.Errorf("too many advertised subnets in network")
 		}
 	}
 	return nil
+}
+
+func countPrefix(entries []AdvertisedSubnet, p netip.Prefix) int {
+	count := 0
+	for _, entry := range entries {
+		if entry.Prefix == p {
+			count++
+		}
+	}
+	return count
+}
+
+// SharedPrefixes reports whether several Nodes advertise one prefix. Agents
+// that predate multiple exits reject such a configuration.
+func SharedPrefixes(nodes []Node) bool {
+	owners := map[netip.Prefix]bool{}
+	for _, node := range nodes {
+		for _, entry := range node.AdvertisedSubnets {
+			if owners[entry.Prefix] {
+				return true
+			}
+		}
+		for _, entry := range node.AdvertisedSubnets {
+			owners[entry.Prefix] = true
+		}
+	}
+	return false
 }

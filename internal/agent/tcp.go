@@ -104,7 +104,7 @@ func (r *DataPlane) captureTCP(state *runtimeState, network model.ID, raw []byte
 		return false
 	}
 	if next == "" {
-		hop, local, err := state.router.NextHop(network, destination.Addr())
+		hop, local, err := state.router.TCPNextHop(network, source, destination)
 		if err != nil || local {
 			return false
 		}
@@ -167,6 +167,10 @@ func tcpFingerprint(cfg model.NetworkConfig) string {
 			peers = append(peers, accessPeer{p.Node.ID, p.Edge.ID, p.PublicKey})
 		}
 	}
+	directory := append([]model.Destination(nil), cfg.Directory...)
+	for i := range directory {
+		directory[i].AdvertisedSubnets = withoutMetrics(directory[i].AdvertisedSubnets)
+	}
 	raw, _ := json.Marshal(struct {
 		Self struct {
 			ID      model.ID
@@ -181,8 +185,18 @@ func tcpFingerprint(cfg model.NetworkConfig) string {
 		ID      model.ID
 		Address netip.Addr
 		Subnets []model.AdvertisedSubnet
-	}{cfg.Self.ID, cfg.Self.Address, cfg.Self.AdvertisedSubnets}, cfg.CIDR, cfg.Cipher, cfg.Directory, peers})
+	}{cfg.Self.ID, cfg.Self.Address, withoutMetrics(cfg.Self.AdvertisedSubnets)}, cfg.CIDR, cfg.Cipher, directory, peers})
 	return string(raw)
+}
+
+// withoutMetrics keeps a subnet's ownership and drops its metric, which only
+// ranks exits like an edge weight.
+func withoutMetrics(subnets []model.AdvertisedSubnet) []model.AdvertisedSubnet {
+	out := append([]model.AdvertisedSubnet(nil), subnets...)
+	for i := range out {
+		out[i].Metric = 0
+	}
+	return out
 }
 
 func (r *DataPlane) newTCP(network model.ID, fingerprint string, mtu int, offload bool) (*runtimeTCP, error) {

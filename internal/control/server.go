@@ -205,7 +205,19 @@ func (s *Server) change(w http.ResponseWriter, r *http.Request, status int, fn f
 	if !ok {
 		return
 	}
-	state, err := s.db.Update(expected, fn)
+	current, err := s.db.Read()
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	statuses := s.telemetry(current)
+	state, err := s.db.Update(expected, func(state *model.State) error {
+		before := state.Clone()
+		if err := fn(state); err != nil {
+			return err
+		}
+		return multiExitReady(before, *state, statuses)
+	})
 	if errors.Is(err, store.ErrUnavailable) {
 		s.internal(w, err)
 		return

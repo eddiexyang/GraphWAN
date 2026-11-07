@@ -70,6 +70,9 @@ func (s Snapshot) Validate(agentID ID) error {
 		if n.MTU < DefaultMTU || n.MTU > MaxMTU || !n.Cipher.Valid() {
 			return fmt.Errorf("invalid MTU or cipher")
 		}
+		if !n.EqualCostPaths.Valid() {
+			return fmt.Errorf("invalid equal-cost path setting")
+		}
 		if n.Self.AgentID != agentID || n.Self.WireGuard != nil {
 			return fmt.Errorf("network self membership belongs to another agent")
 		}
@@ -81,10 +84,10 @@ func (s Snapshot) Validate(agentID ID) error {
 		}
 		directory := map[ID]netip.Addr{}
 		addresses := map[netip.Addr]bool{}
-		advertised := map[netip.Prefix]bool{}
+		advertised := 0
 		subnetDirectory := map[ID][]AdvertisedSubnet{}
 		for _, d := range n.Directory {
-			if err := validateAdvertised(n.CIDR, d.AdvertisedSubnets, advertised); err != nil {
+			if err := validateAdvertised(n.CIDR, d.AdvertisedSubnets, &advertised); err != nil {
 				return err
 			}
 			subnetDirectory[d.NodeID] = d.AdvertisedSubnets
@@ -210,6 +213,14 @@ func (s Snapshot) Validate(agentID ID) error {
 			}
 			if r.Destination == r.NextHop && r.Cost != uint64(peer.Edge.Weight) {
 				return fmt.Errorf("invalid direct route cost")
+			}
+			previous := r.NextHop
+			for _, alternate := range r.Alternates {
+				peer, ok := peers[alternate]
+				if !ok || alternate <= previous || r.Cost < uint64(peer.Edge.Weight) || peer.Node.WireGuard != nil && r.Destination != alternate {
+					return fmt.Errorf("invalid alternate next hop")
+				}
+				previous = alternate
 			}
 			routes[r.Destination] = true
 		}

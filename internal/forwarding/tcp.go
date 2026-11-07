@@ -40,15 +40,14 @@ func (r *Router) tcpIngress(networkID model.ID, raw []byte, segmentSize int, wir
 	if err != nil {
 		return err
 	}
-	source := n.owner(info.Source)
 	if wireguard {
 		if n.wireguard[info.Source] == nil {
 			return ErrSource
 		}
-	} else if source == nil || source.id != n.self.ID {
+	} else if !n.admits(n.byAddress[n.self.Address], info.Source) {
 		return ErrSource
 	}
-	if n.owner(info.Destination) == nil {
+	if n.exit(info.Destination, func() uint64 { return 0 }) == nil {
 		return ErrDestination
 	}
 	return nil
@@ -59,18 +58,28 @@ func wireID(id model.ID) (out [16]byte) { hex.Decode(out[:], []byte(id)); return
 // NextHop returns the neighbor that carries traffic to destination, or local
 // when this Agent delivers it (its own addresses and attached WireGuard leaves).
 func (r *Router) NextHop(networkID model.ID, destination netip.Addr) (next model.ID, local bool, err error) {
+	return r.nextHop(networkID, destination, func() uint64 { return 0 })
+}
+
+// TCPNextHop is NextHop for a TCP connection, with its exit and equal-cost
+// next hop chosen by the connection's flow hash.
+func (r *Router) TCPNextHop(networkID model.ID, from, to netip.AddrPort) (next model.ID, local bool, err error) {
+	return r.nextHop(networkID, to.Addr(), func() uint64 { return packet.TCPFlowHash(from, to) })
+}
+
+func (r *Router) nextHop(networkID model.ID, destination netip.Addr, flow func() uint64) (next model.ID, local bool, err error) {
 	n := r.state.Load().networks[networkID]
 	if n == nil {
 		return "", false, ErrNetwork
 	}
-	dest := n.owner(destination)
+	dest := n.exit(destination, flow)
 	if dest == nil {
 		return "", false, ErrDestination
 	}
 	if dest.id == n.self.ID {
 		return "", true, nil
 	}
-	next, ok := n.routes[dest.id]
+	next, ok := n.next(dest.id, flow)
 	if !ok {
 		return "", false, ErrUnreachable
 	}
@@ -86,8 +95,13 @@ func (r *Router) TCPRequest(networkID model.ID, from, to netip.AddrPort) (stream
 		return streamproxy.Request{}, ErrNetwork
 	}
 	// Access packets were admitted by TCPIngress and transit packets by the
-	// peer path, so the source only needs an owner here.
-	source, dest := n.owner(from.Addr()), n.owner(to.Addr())
+	// peer path, so the source only needs an owner here: this Node when it
+	// may send for the address.
+	source := n.byAddress[n.self.Address]
+	if !n.admits(source, from.Addr()) {
+		source = n.sourceOwner(from.Addr())
+	}
+	dest := n.exit(to.Addr(), func() uint64 { return packet.TCPFlowHash(from, to) })
 	if source == nil {
 		return streamproxy.Request{}, ErrSource
 	}
@@ -112,16 +126,16 @@ func (r *Router) TCPRoute(request streamproxy.Request, ingress model.ID) (next m
 		return "", false, ErrPeer
 	}
 	source, dest := n.byNode[wireID(request.Source)], n.byNode[wireID(request.Destination)]
-	if source == nil || n.owner(request.From.Addr()) != source || ingress != "" && source.id == n.self.ID {
+	if !n.admits(source, request.From.Addr()) || ingress != "" && source.id == n.self.ID {
 		return "", false, ErrSource
 	}
-	if dest == nil || n.owner(request.To.Addr()) != dest {
+	if !n.admits(dest, request.To.Addr()) {
 		return "", false, ErrDestination
 	}
 	if dest.id == n.self.ID {
 		return "", true, nil
 	}
-	next, ok := n.routes[dest.id]
+	next, ok := n.next(dest.id, func() uint64 { return packet.TCPFlowHash(request.From, request.To) })
 	if !ok {
 		return "", false, ErrUnreachable
 	}
@@ -149,12 +163,14 @@ func (r *Router) TCPOutput(ctx context.Context, networkID model.ID, raw []byte) 
 	if err != nil {
 		return err
 	}
-	dest := n.owner(info.Destination)
+	self := n.byAddress[n.self.Address]
+	if n.admits(self, info.Destination) {
+		return r.deliver(ctx, networkID, raw)
+	}
+	flow := func() uint64 { info, _ := packet.InspectIP(raw); return info.Flow }
+	dest := n.exit(info.Destination, flow)
 	if dest == nil {
 		return ErrDestination
-	}
-	if dest.id == n.self.ID {
-		return r.deliver(ctx, networkID, raw)
 	}
 	if n.wireguard[info.Destination] != nil {
 		frame, err := (packet.Packet{Header: packet.Header{Network: networkID, Source: n.self.ID, Destination: dest.id, HopLimit: packet.DefaultHopLimit}, Payload: raw}).MarshalBinary()
@@ -163,14 +179,17 @@ func (r *Router) TCPOutput(ctx context.Context, networkID model.ID, raw []byte) 
 		}
 		return r.send(ctx, networkID, dest.id, frame)
 	}
-	source := n.owner(info.Source)
+	source := self
+	if !n.admits(source, info.Source) {
+		source = n.sourceOwner(info.Source)
+	}
 	if source == nil {
 		return ErrSource
 	}
 	if len(raw) > n.mtu {
 		return ErrMTU
 	}
-	next, ok := n.routes[dest.id]
+	next, ok := n.next(dest.id, flow)
 	if !ok {
 		return ErrUnreachable
 	}
@@ -188,8 +207,7 @@ func (r *Router) TCPOutputLocal(networkID model.ID, destination netip.Addr) erro
 	if n == nil {
 		return ErrNetwork
 	}
-	dest := n.owner(destination)
-	if dest == nil || dest.id != n.self.ID {
+	if !n.admits(n.byAddress[n.self.Address], destination) {
 		return ErrDestination
 	}
 	return nil
@@ -227,13 +245,7 @@ func (r *Router) TCPOutputBatch(ctx context.Context, networkID model.ID, packets
 			result = errors.Join(result, err)
 			continue
 		}
-		dest := n.owner(info.Destination)
-		if dest == nil {
-			flush()
-			result = errors.Join(result, ErrDestination)
-			continue
-		}
-		if dest.id == n.self.ID {
+		if n.admits(n.byAddress[n.self.Address], info.Destination) {
 			local[count] = raw
 			count++
 			if count == len(local) {

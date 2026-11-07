@@ -40,7 +40,7 @@ func NewReconciler(cache *Cache, runtime Runtime) *Reconciler {
 }
 func (r *Reconciler) Report(version string) model.AgentReport {
 	r.mu.Lock()
-	report := model.AgentReport{Version: version, AppliedRevision: r.applied, ConfigError: r.configError, RoutingHash: r.routingHash}
+	report := model.AgentReport{Version: version, AppliedRevision: r.applied, ConfigError: r.configError, RoutingHash: r.routingHash, Capabilities: []string{model.CapabilityMultiExit}}
 	r.mu.Unlock()
 	report.Resources = r.resources.Sample()
 	report.Links = r.runtime.Report()

@@ -2,6 +2,7 @@ package routing
 
 import (
 	"net/netip"
+	"reflect"
 	"testing"
 
 	"github.com/eWloYW8/GraphWAN/internal/model"
@@ -27,7 +28,7 @@ func TestClientNodesAreNeverTransit(t *testing.T) {
 		n := snapshot.Networks[0]
 		local := LocalRoutes(n, func(model.TopologyEdge) bool { return true })
 		for i, r := range n.Routes {
-			if r != local[i] {
+			if !reflect.DeepEqual(r, local[i]) {
 				t.Fatalf("agent %d: local route %+v, compiled %+v", agent, local[i], r)
 			}
 		}

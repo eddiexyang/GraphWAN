@@ -232,15 +232,18 @@ func (s State) Validate() error {
 		if !n.Cipher.Valid() {
 			return fmt.Errorf("network %s: unsupported cipher", n.ID)
 		}
+		if !n.EqualCostPaths.Valid() {
+			return fmt.Errorf("network %s: equal_cost_paths must be lowest-id or ecmp", n.ID)
+		}
 		if len(n.Nodes) > MaxNodes || len(n.Edges) > MaxEdges {
 			return fmt.Errorf("network %s: topology exceeds limits", n.ID)
 		}
 		nodes := map[ID]bool{}
 		members := map[ID]bool{}
 		addresses := map[netip.Addr]bool{}
-		advertised := map[netip.Prefix]bool{}
+		advertised := 0
 		for _, node := range n.Nodes {
-			if err := validateAdvertised(n.CIDR, node.AdvertisedSubnets, advertised); err != nil {
+			if err := validateAdvertised(n.CIDR, node.AdvertisedSubnets, &advertised); err != nil {
 				return fmt.Errorf("node %s: %w", node.ID, err)
 			}
 			if err := addID(node.ID); err != nil {

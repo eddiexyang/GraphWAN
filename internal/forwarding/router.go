@@ -2,6 +2,7 @@
 package forwarding
 
 import (
+	"cmp"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
@@ -53,12 +54,21 @@ type network struct {
 	mtu           int
 	byAddress     map[netip.Addr]*node
 	overlay       netip.Prefix
-	subnets       map[netip.Prefix]*node
+	subnets       map[netip.Prefix][]exit
 	prefixLengths []int
 	byNode        map[[16]byte]*node
 	wireguard     map[netip.Addr]*node
 	peers         map[model.ID]bool
-	routes        map[model.ID]model.ID
+	// routes lists each destination's next hops, lowest Node ID first.
+	routes map[model.ID][]model.ID
+	costs  map[model.ID]uint64
+	ecmp   bool
+}
+
+// exit is one Node advertising a prefix.
+type exit struct {
+	node   *node
+	metric uint32
 }
 type table struct {
 	agentID  model.ID
@@ -78,6 +88,7 @@ type Router struct {
 	sendBatch      func(context.Context, model.ID, model.ID, [][]byte) error
 	sendOwnedBatch func(context.Context, model.ID, model.ID, []*packetbuf.Buffer) error
 	tcpIntercept   atomic.Pointer[TCPIntercept]
+	sticky         stickyFlows
 }
 
 // SetTCPIntercept installs or removes (nil) the transit TCP hook.
@@ -114,7 +125,7 @@ func (r *Router) Configure(snapshot model.Snapshot) error {
 	}
 	next := &table{agentID: snapshot.AgentID, revision: snapshot.Revision, networks: map[model.ID]*network{}, byWire: map[[16]byte]*network{}}
 	for _, config := range snapshot.Networks {
-		n := &network{id: config.ID, self: config.Self, mtu: config.MTU, byAddress: map[netip.Addr]*node{}, byNode: map[[16]byte]*node{}, peers: map[model.ID]bool{}, routes: map[model.ID]model.ID{}}
+		n := &network{id: config.ID, self: config.Self, mtu: config.MTU, byAddress: map[netip.Addr]*node{}, byNode: map[[16]byte]*node{}, peers: map[model.ID]bool{}, routes: map[model.ID][]model.ID{}, costs: map[model.ID]uint64{}, ecmp: config.EqualCostPaths == model.EqualCostECMP}
 		// Snapshot validation above is the sole place where IDs need checking.
 		header, err := (packet.Packet{Header: packet.Header{Network: config.ID, Source: config.Self.ID, Destination: config.Self.ID, HopLimit: packet.DefaultHopLimit, Epoch: snapshot.Revision}, Payload: []byte{0}}).MarshalBinary()
 		if err != nil {
@@ -123,7 +134,7 @@ func (r *Router) Configure(snapshot model.Snapshot) error {
 		copy(n.header[:], header)
 		next.byWire[[16]byte(header[8:24])] = n
 		n.overlay = config.CIDR
-		n.subnets = map[netip.Prefix]*node{}
+		n.subnets = map[netip.Prefix][]exit{}
 		lengths := map[int]bool{}
 		for _, dest := range config.Directory {
 			entry := &node{id: dest.NodeID, address: dest.Address}
@@ -133,9 +144,12 @@ func (r *Router) Configure(snapshot model.Snapshot) error {
 			n.byAddress[dest.Address] = entry
 			n.byNode[entry.wire] = entry
 			for _, subnet := range dest.AdvertisedSubnets {
-				n.subnets[subnet.Prefix] = entry
+				n.subnets[subnet.Prefix] = append(n.subnets[subnet.Prefix], exit{entry, subnet.Metric})
 				lengths[subnet.Prefix.Bits()] = true
 			}
+		}
+		for _, exits := range n.subnets {
+			slices.SortFunc(exits, func(a, b exit) int { return cmp.Compare(a.node.id, b.node.id) })
 		}
 		for bits := range lengths {
 			n.prefixLengths = append(n.prefixLengths, bits)
@@ -150,7 +164,8 @@ func (r *Router) Configure(snapshot model.Snapshot) error {
 			n.peers[peer.Node.ID] = true
 		}
 		for _, route := range config.Routes {
-			n.routes[route.Destination] = route.NextHop
+			n.routes[route.Destination] = append([]model.ID{route.NextHop}, route.Alternates...)
+			n.costs[route.Destination] = route.Cost
 		}
 		next.networks[config.ID] = n
 	}
@@ -243,20 +258,23 @@ func (r *Router) encapsulateSource(ctx context.Context, n *network, raw []byte, 
 		if info.Source != client.address {
 			return nil, "", ErrSource
 		}
-	} else if info.Source != n.self.Address {
-		source := n.owner(info.Source)
-		if source == nil || source.id != n.self.ID {
-			return nil, "", ErrSource
-		}
+	} else if info.Source != n.self.Address && !n.admits(n.byAddress[n.self.Address], info.Source) {
+		return nil, "", ErrSource
 	}
-	destination := n.owner(info.Destination)
+	flow := func() uint64 { return info.Flow }
+	var destination *node
+	if packet.IsUDP(raw) {
+		destination = r.sticky.exit(n, info.Destination, info.Flow)
+	} else {
+		destination = n.exit(info.Destination, flow)
+	}
 	if destination == nil {
 		return nil, "", ErrDestination
 	}
 	if destination.id == n.self.ID {
 		return nil, "", r.deliver(ctx, n.id, raw)
 	}
-	nextHop, ok := n.routes[destination.id]
+	nextHop, ok := n.next(destination.id, flow)
 	if !ok {
 		return nil, "", ErrUnreachable
 	}
@@ -350,10 +368,10 @@ func (r *Router) fromPeer(ctx context.Context, peerID model.ID, frame []byte, de
 	if err != nil {
 		return err
 	}
-	if info.Source != source.address && n.owner(info.Source) != source {
+	if info.Source != source.address && !n.admits(source, info.Source) {
 		return ErrSource
 	}
-	if info.Destination != destination.address && n.owner(info.Destination) != destination {
+	if info.Destination != destination.address && !n.admits(destination, info.Destination) {
 		return ErrDestination
 	}
 	if destination.id == n.self.ID {
@@ -362,7 +380,7 @@ func (r *Router) fromPeer(ctx context.Context, peerID model.ID, frame []byte, de
 	if p.HopLimit <= 1 {
 		return packet.ErrHopLimit
 	}
-	nextHop, ok := n.routes[destination.id]
+	nextHop, ok := n.next(destination.id, func() uint64 { flow, _ := packet.InspectIP(p.Payload); return flow.Flow })
 	if !ok {
 		return ErrUnreachable
 	}
@@ -409,7 +427,8 @@ func (r *Router) CompactHeader(header []byte, networkWire [16]byte, hopLimit uin
 	if err != nil {
 		return false
 	}
-	source, destination := n.owner(info.Source), n.owner(info.Destination)
+	source := n.sourceOwner(info.Source)
+	destination := n.exit(info.Destination, func() uint64 { flow, _ := packet.InspectIP(payload); return flow.Flow })
 	if source == nil || destination == nil {
 		return false
 	}
@@ -417,12 +436,10 @@ func (r *Router) CompactHeader(header []byte, networkWire [16]byte, hopLimit uin
 	return true
 }
 
-// owner performs longest-prefix matching without allocations. Overlay hosts take
-// precedence over external routes, including /0, and unknown overlay IPs drop.
-func (n *network) owner(ip netip.Addr) *node {
-	if host := n.byAddress[ip]; host != nil {
-		return host
-	}
+// advertisers returns the Nodes advertising the longest prefix that matches
+// ip, without allocations. Overlay addresses never match a prefix, including
+// /0, and loopback, multicast and link-local addresses never leave.
+func (n *network) advertisers(ip netip.Addr) []exit {
 	if n.overlay.Contains(ip) || !ip.IsGlobalUnicast() {
 		return nil
 	}
@@ -430,11 +447,122 @@ func (n *network) owner(ip netip.Addr) *node {
 		if bits > ip.BitLen() {
 			continue
 		}
-		if destination := n.subnets[netip.PrefixFrom(ip, bits).Masked()]; destination != nil {
-			return destination
+		if exits := n.subnets[netip.PrefixFrom(ip, bits).Masked()]; exits != nil {
+			return exits
 		}
 	}
 	return nil
+}
+
+// exit chooses the Node that receives traffic to ip: the overlay host, or the
+// advertiser of the longest matching prefix with the lowest path cost plus
+// metric. A tie goes to the lowest Node ID, or with ECMP to the flow's hash;
+// flow is called only then. Unreachable advertisers are skipped; when none is
+// reachable traffic drops rather than using a shorter prefix.
+func (n *network) exit(ip netip.Addr, flow func() uint64) *node {
+	if host := n.byAddress[ip]; host != nil {
+		return host
+	}
+	exits := n.advertisers(ip)
+	switch len(exits) {
+	case 0:
+		return nil
+	case 1:
+		return exits[0].node
+	}
+	best, reachable := ^uint64(0), false
+	for _, e := range exits {
+		if cost, ok := n.exitCost(e); ok && cost < best {
+			best, reachable = cost, true
+		}
+	}
+	if !reachable {
+		return exits[0].node // next hop lookup reports it unreachable
+	}
+	ties := uint64(0)
+	for _, e := range exits {
+		if cost, ok := n.exitCost(e); ok && cost == best {
+			ties++
+		}
+	}
+	pick := uint64(0)
+	if ties > 1 && n.ecmp {
+		pick = flow() % ties
+	}
+	// Exits are in Node ID order, so pick 0 is the lowest ID.
+	for _, e := range exits {
+		if cost, ok := n.exitCost(e); ok && cost == best {
+			if pick == 0 {
+				return e.node
+			}
+			pick--
+		}
+	}
+	return nil
+}
+
+func (n *network) exitCost(e exit) (uint64, bool) {
+	if e.node.id == n.self.ID {
+		return uint64(e.metric), true
+	}
+	cost, ok := n.costs[e.node.id]
+	return cost + uint64(e.metric), ok
+}
+
+// admits reports whether candidate may send or receive traffic for ip: it is
+// the overlay host, or it advertises a prefix containing ip. Each hop chooses
+// its own exit, so a transit Node need not agree with the ingress's choice.
+func (n *network) admits(candidate *node, ip netip.Addr) bool {
+	if candidate == nil {
+		return false
+	}
+	if host := n.byAddress[ip]; host != nil {
+		return host == candidate
+	}
+	if n.overlay.Contains(ip) || !ip.IsGlobalUnicast() {
+		return false
+	}
+	for _, bits := range n.prefixLengths {
+		if bits > ip.BitLen() {
+			continue
+		}
+		for _, e := range n.subnets[netip.PrefixFrom(ip, bits).Masked()] {
+			if e.node == candidate {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// sourceOwner names a source Node for a header a compact Link omitted: the
+// overlay host, or an advertiser of the longest matching prefix other than
+// this Node, which never receives its own traffic from a peer.
+func (n *network) sourceOwner(ip netip.Addr) *node {
+	if host := n.byAddress[ip]; host != nil {
+		return host
+	}
+	var self *node
+	for _, e := range n.advertisers(ip) {
+		if e.node.id != n.self.ID {
+			return e.node
+		}
+		self = e.node
+	}
+	return self
+}
+
+// next returns the next hop toward destination: the lowest Node ID, or with
+// ECMP one of the equal-cost hops by the flow's hash.
+func (n *network) next(destination model.ID, flow func() uint64) (model.ID, bool) {
+	hops := n.routes[destination]
+	switch {
+	case len(hops) == 0:
+		return "", false
+	case len(hops) == 1 || !n.ecmp:
+		return hops[0], true
+	}
+	return hops[flow()%uint64(len(hops))], true
 }
 
 // FromWireGuard accepts plaintext only after WireGuard authenticates the peer

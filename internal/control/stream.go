@@ -318,7 +318,7 @@ func validateReport(snapshot model.Snapshot, report model.AgentReport) error {
 		}
 	}
 
-	if report.AppliedRevision > snapshot.Revision || len(report.RoutingHash) > 64 || len(report.Version) > 128 || len(report.ConfigError) > 4096 || len(report.RuntimeError) > 4096 || len(report.Links) > 4096 {
+	if report.AppliedRevision > snapshot.Revision || len(report.RoutingHash) > 64 || len(report.Version) > 128 || len(report.ConfigError) > 4096 || len(report.RuntimeError) > 4096 || len(report.Links) > 4096 || len(report.Capabilities) > 16 {
 		return errors.New("invalid agent report")
 	}
 	if report.Resources != nil {

@@ -82,6 +82,9 @@ const (
 type AdvertisedSubnet struct {
 	Prefix      netip.Prefix `json:"prefix"`
 	GatewayMode GatewayMode  `json:"gateway_mode"`
+	// Metric is added to the path cost when several Nodes advertise the
+	// prefix; each Node uses the advertiser with the lowest sum.
+	Metric uint32 `json:"metric,omitempty"`
 }
 
 type WireGuardNode struct {
@@ -131,6 +134,19 @@ const (
 	XChaCha20Poly1305 CipherSuite = "xchacha20-poly1305"
 )
 
+// EqualCostPaths chooses among equal-cost next hops and exits: the lowest
+// Node ID (the default, also for ""), or a hash of the flow.
+type EqualCostPaths string
+
+const (
+	EqualCostLowestID EqualCostPaths = "lowest-id"
+	EqualCostECMP     EqualCostPaths = "ecmp"
+)
+
+func (e EqualCostPaths) Valid() bool {
+	return e == "" || e == EqualCostLowestID || e == EqualCostECMP
+}
+
 func (c CipherSuite) Valid() bool {
 	switch c {
 	case AES128GCM, AES256GCM, ChaCha20Poly1305, XChaCha20Poly1305:
@@ -150,6 +166,8 @@ type Network struct {
 	Cipher     CipherSuite     `json:"cipher"`
 	Nodes      []Node          `json:"nodes"`
 	Edges      []Edge          `json:"edges"`
+	// EqualCostPaths applies to next hops and to advertisers of one prefix.
+	EqualCostPaths EqualCostPaths `json:"equal_cost_paths,omitempty"`
 }
 
 type State struct {

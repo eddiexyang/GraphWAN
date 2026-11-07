@@ -45,17 +45,45 @@ Windows/macOS automatic firewall rules cover traffic between the overlay prefix
 and the local advertised subnet; additional site-to-site firewall policy is manual.
 
 GraphWAN chooses the longest matching advertised prefix, then follows the existing
-weighted topology to its owner. Down-edge filtering still applies. If the selected
-gateway is unreachable, packets drop instead of falling back to a broader prefix.
-Both requests and replies must match their declared Node ownership, including on
-intermediate hops. This extends the existing hop-authenticated admission model;
-it does not introduce end-to-end source authentication across untrusted relays.
+weighted topology to its owner. Down-edge filtering still applies. If no gateway
+of that prefix is reachable, packets drop instead of falling back to a broader
+prefix. Both requests and replies must come from and go to a Node that advertises
+a prefix containing the address, including on intermediate hops. This extends the
+existing hop-authenticated admission model; it does not introduce end-to-end
+source authentication across untrusted relays.
+
+## Several gateways for one prefix
+
+Several Nodes may advertise the same prefix, each once, with an optional
+**metric** (default 0). Every Node sends traffic for the prefix to the reachable
+advertiser with the lowest path cost plus metric, so when a gateway fails,
+link-state routing moves traffic to the next one. Each hop makes its own choice
+toward the nearest gateway; a transit Node forwards a packet to any advertiser of
+the prefix.
+
+A connection keeps its gateway while that gateway stays reachable, even when
+another one becomes cheaper. A TCP connection carried as a stream keeps the
+gateway its egress reached; a UDP flow keeps the gateway it started with until it
+has been idle for 2 minutes. TCP carried as packets follows each packet's current
+choice.
+
+The Network's **equal-cost paths** setting decides ties, both between next hops of
+equal cost and between gateways of equal total cost:
+
+| Setting | Behavior |
+|---|---|
+| `lowest-id` (default) | The lowest Node ID, so each destination has one path. |
+| `ecmp` | A hash of the flow's addresses, protocol and ports, so each flow stays on one path and different flows spread. |
+
+Agents that predate several gateways reject such a configuration. The controller
+accepts a prefix on several Nodes only after every Agent in the Network has
+reported support for it, and an Agent joining such a Network must support it too.
 
 ## Validation and scope
 
 - Entries use canonical CIDRs of the Network's address family, such as
   `192.168.10.0/24` rather than `192.168.10.7/24`.
-- A prefix can occur only once per Network, including entries on different Nodes.
+- A prefix can occur only once per Node; several Nodes may advertise it.
   Different-length overlapping prefixes are permitted.
 - A subnet wholly inside the overlay CIDR is rejected. Broader prefixes, including
   `0.0.0.0/0` or `::/0`, are permitted. Registered overlay IPs take precedence;

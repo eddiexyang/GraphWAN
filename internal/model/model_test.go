@@ -20,11 +20,11 @@ func TestValidateTopology(t *testing.T) {
 		"invalid gateway mode": func(s *model.State) {
 			s.Networks[0].Nodes[0].AdvertisedSubnets = []model.AdvertisedSubnet{{Prefix: netip.MustParsePrefix("192.168.0.0/24"), GatewayMode: "invalid"}}
 		},
-		"duplicate advertised subnet": func(s *model.State) {
-			for i := 0; i < 2; i++ {
-				s.Networks[0].Nodes[i].AdvertisedSubnets = []model.AdvertisedSubnet{{Prefix: netip.MustParsePrefix("192.168.0.0/24"), GatewayMode: model.GatewayOff}}
-			}
+		"duplicate advertised subnet on a node": func(s *model.State) {
+			entry := model.AdvertisedSubnet{Prefix: netip.MustParsePrefix("192.168.0.0/24"), GatewayMode: model.GatewayOff}
+			s.Networks[0].Nodes[0].AdvertisedSubnets = []model.AdvertisedSubnet{entry, entry}
 		},
+		"unknown equal-cost paths": func(s *model.State) { s.Networks[0].EqualCostPaths = "random" },
 		"advertised overlay subnet": func(s *model.State) {
 			s.Networks[0].Nodes[0].AdvertisedSubnets = []model.AdvertisedSubnet{{Prefix: netip.MustParsePrefix("10.42.0.0/25"), GatewayMode: model.GatewayOff}}
 		},
@@ -72,5 +72,23 @@ func TestValidateTopology(t *testing.T) {
 				t.Fatal("accepted invalid state")
 			}
 		})
+	}
+}
+
+// Several Nodes may advertise one prefix, each with its own metric.
+func TestSharedAdvertisedSubnet(t *testing.T) {
+	s := testutil.Topology()
+	if model.SharedPrefixes(s.Networks[0].Nodes) {
+		t.Fatal("topology without subnets reported shared prefixes")
+	}
+	for i := 0; i < 2; i++ {
+		s.Networks[0].Nodes[i].AdvertisedSubnets = []model.AdvertisedSubnet{{Prefix: netip.MustParsePrefix("192.168.0.0/24"), GatewayMode: model.GatewayOff, Metric: uint32(10 * (i + 1))}}
+	}
+	s.Networks[0].EqualCostPaths = model.EqualCostECMP
+	if err := s.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !model.SharedPrefixes(s.Networks[0].Nodes) {
+		t.Fatal("shared prefix not reported")
 	}
 }

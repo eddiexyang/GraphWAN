@@ -82,3 +82,14 @@ func UDPDatagram(raw []byte) (source, destination netip.AddrPort, payload []byte
 	destination = netip.AddrPortFrom(dst, binary.BigEndian.Uint16(udp[2:4]))
 	return source, destination, udp[8:size], true
 }
+
+// IsUDP reports UDP in the base IPv4 or IPv6 header of a validated packet.
+func IsUDP(raw []byte) bool {
+	switch raw[0] >> 4 {
+	case 4:
+		return len(raw) >= 20 && raw[9] == 17
+	case 6:
+		return len(raw) >= 40 && raw[6] == 17
+	}
+	return false
+}

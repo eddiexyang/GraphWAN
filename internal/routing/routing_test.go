@@ -115,3 +115,32 @@ func TestForwardingTablesTerminateAtDestination(t *testing.T) {
 		}
 	}
 }
+
+// Equal-cost first hops: NextHop is the lowest Node ID and the others are
+// alternates, in the compiled and in the locally computed tables.
+func TestEqualCostAlternates(t *testing.T) {
+	s := testutil.Topology()
+	n := &s.Networks[0]
+	n.Edges[2].Weight, n.Edges[3].Weight = 10, 10 // A-D-C costs 20, like A-B-C
+	snapshot, err := routing.Compile(s, s.Agents[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.Validate(s.Agents[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	config := snapshot.Networks[0]
+	var toC model.Route
+	for _, r := range config.Routes {
+		if r.Destination == testutil.ID(22) {
+			toC = r
+		}
+	}
+	want := model.Route{Destination: testutil.ID(22), NextHop: testutil.ID(21), Cost: 20, Alternates: []model.ID{testutil.ID(23)}}
+	if !reflect.DeepEqual(toC, want) {
+		t.Fatalf("route to C %+v", toC)
+	}
+	if local := routing.LocalRoutes(config, func(model.TopologyEdge) bool { return true }); !reflect.DeepEqual(local, config.Routes) {
+		t.Fatalf("local routes %+v, compiled %+v", local, config.Routes)
+	}
+}
