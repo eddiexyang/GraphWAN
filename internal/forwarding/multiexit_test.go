@@ -3,6 +3,7 @@ package forwarding_test
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"net/netip"
 	"testing"
 
@@ -56,8 +57,18 @@ func (x *exitNetwork) update(change func(*model.State)) {
 
 // send sends a UDP packet from A and returns the Node that delivered it.
 func (x *exitNetwork) send(destination string, sourcePort uint16) model.ID {
+	return x.sendProtocol(destination, sourcePort, 17)
+}
+
+// sendProtocol sends a UDP (17) or TCP (6) packet from A.
+func (x *exitNetwork) sendProtocol(destination string, sourcePort uint16, protocol byte) model.ID {
 	x.t.Helper()
 	raw := ipv4("10.42.0.1", destination)
+	if protocol == 6 {
+		raw = append(raw, make([]byte, 12)...)
+		binary.BigEndian.PutUint16(raw[2:4], uint16(len(raw)))
+		raw[9], raw[32] = 6, 5<<4
+	}
 	binary.BigEndian.PutUint16(raw[20:22], sourcePort)
 	binary.BigEndian.PutUint16(raw[22:24], 53)
 	x.exitNode = ""
@@ -103,24 +114,31 @@ func TestLowestCostExit(t *testing.T) {
 	}
 }
 
-// A UDP flow keeps its exit when another exit becomes cheaper, and moves only
-// when its exit becomes unreachable. New flows use the cheaper exit.
-func TestUDPFlowKeepsExit(t *testing.T) {
+// A UDP flow, and TCP carried as packets, keeps its exit when another exit
+// becomes cheaper, and moves only when its exit becomes unreachable. New
+// flows use the cheaper exit.
+func TestPacketFlowKeepsExit(t *testing.T) {
+	for _, protocol := range []byte{17, 6} {
+		t.Run(fmt.Sprint(protocol), func(t *testing.T) { packetFlowKeepsExit(t, protocol) })
+	}
+}
+
+func packetFlowKeepsExit(t *testing.T, protocol byte) {
 	x := newExitNetwork(t, exitTopology())
 	n := x.state.Networks[0]
 	b, d := n.Nodes[1].ID, n.Nodes[3].ID
-	if got := x.send("192.168.0.7", 2000); got != d {
+	if got := x.sendProtocol("192.168.0.7", 2000, protocol); got != d {
 		t.Fatalf("exit %s, want D", got)
 	}
 	x.update(func(s *model.State) { s.Networks[0].Nodes[1].AdvertisedSubnets[0].Metric = 0 }) // B: 10, ties D and wins on Node ID
-	if got := x.send("192.168.0.7", 2000); got != d {
+	if got := x.sendProtocol("192.168.0.7", 2000, protocol); got != d {
 		t.Fatalf("existing flow moved to %s", got)
 	}
-	if got := x.send("192.168.0.7", 2001); got != b {
+	if got := x.sendProtocol("192.168.0.7", 2001, protocol); got != b {
 		t.Fatalf("new flow exit %s, want B", got)
 	}
 	x.update(func(s *model.State) { s.Agents[3].Revoked = true })
-	if got := x.send("192.168.0.7", 2000); got != b {
+	if got := x.sendProtocol("192.168.0.7", 2000, protocol); got != b {
 		t.Fatalf("flow did not leave the failed exit: %s", got)
 	}
 }

@@ -313,7 +313,7 @@ func (r *Router) encapsulateSource(ctx context.Context, n *network, raw []byte, 
 	}
 	flow := func() uint64 { return info.Flow }
 	var destination *node
-	if packet.IsUDP(raw) {
+	if packet.IsUDP(raw) || packet.IsTCP(raw) {
 		destination = r.sticky.exit(n, info.Destination, info.Flow)
 	} else {
 		destination = n.exit(info.Destination, flow)

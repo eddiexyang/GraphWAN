@@ -8,9 +8,10 @@ import (
 	"github.com/eWloYW8/GraphWAN/internal/model"
 )
 
-// A UDP flow to a prefix with several advertisers keeps the exit it started
-// with while that exit stays reachable, even when another becomes cheaper.
-// TCP keeps its exit through the stream's egress instead.
+// A UDP flow, or TCP carried as packets, to a prefix with several advertisers
+// keeps the exit it started with while that exit stays reachable, even when
+// another becomes cheaper. TCP in a stream keeps its exit through the
+// stream's egress instead.
 const (
 	stickyIdle     = 2 * time.Minute
 	maxStickyFlows = 65536

@@ -63,9 +63,8 @@ the prefix.
 
 A connection keeps its gateway while that gateway stays reachable, even when
 another one becomes cheaper. A TCP connection carried as a stream keeps the
-gateway its egress reached; a UDP flow keeps the gateway it started with until it
-has been idle for 2 minutes. TCP carried as packets follows each packet's current
-choice.
+gateway its egress reached; a UDP flow, or TCP carried as packets, keeps the
+gateway its ingress chose until it has been idle for 2 minutes.
 
 The Network's **equal-cost paths** setting decides ties, both between next hops of
 equal cost and between gateways of equal total cost:
