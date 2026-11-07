@@ -274,6 +274,15 @@ func (r *DataPlane) Report() []model.LinkStatus {
 	}
 	return state.mesh.Report()
 }
+
+// Counters reports data-plane event totals.
+func (r *DataPlane) Counters() map[string]uint64 {
+	state := r.state.Load()
+	if state == nil {
+		return nil
+	}
+	return state.mesh.Counters()
+}
 func (r *DataPlane) Close() error {
 	r.applyMu.Lock()
 	if r.closed {

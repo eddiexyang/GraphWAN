@@ -359,7 +359,7 @@ func streamAgentsWith(t *testing.T, carrier model.Transport, options streamOptio
 func TestTCPStreamsAcrossGraph(t *testing.T) {
 	for _, carrier := range []model.Transport{model.TCP, model.QUIC, model.WS, model.WSS, model.GRPC} {
 		t.Run(string(carrier), func(t *testing.T) {
-			_, devices, state := streamAgents(t, carrier)
+			agents, devices, state := streamAgents(t, carrier)
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
 			target := state.Networks[0].Nodes[2].Address
@@ -429,7 +429,20 @@ func TestTCPStreamsAcrossGraph(t *testing.T) {
 			if devices[0].readGSOs.Load() == 0 {
 				t.Fatal("native access TCP was split before stack ingress")
 			}
+			assertNoTCPOverTCP(t, agents[:])
 		})
+	}
+}
+
+// assertNoTCPOverTCP fails when any TCP-backed Link carried TCP packets.
+func assertNoTCPOverTCP(t *testing.T, agents []*DataPlane) {
+	t.Helper()
+	for i, agent := range agents {
+		for _, l := range agent.Report() {
+			if l.TCPPackets != 0 {
+				t.Fatalf("agent %d sent %d TCP packets on %s Link %s", i, l.TCPPackets, l.Transport, l.LinkID)
+			}
+		}
 	}
 }
 

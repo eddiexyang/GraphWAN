@@ -21,6 +21,12 @@ type LinkStatus struct {
 	Loss               float64   `json:"loss"`
 	RXBytes            uint64    `json:"rx_bytes"`
 	TXBytes            uint64    `json:"tx_bytes"`
+	// Dropped counts packets a full send queue discarded. TCPPackets counts TCP
+	// packets sent on a TCP-backed Link, which must stay zero. StreamSessions
+	// counts the Edge's streams, on its active Link.
+	Dropped        uint64 `json:"dropped,omitempty"`
+	TCPPackets     uint64 `json:"tcp_packets,omitempty"`
+	StreamSessions uint32 `json:"stream_sessions,omitempty"`
 }
 type AgentReport struct {
 	Update          *UpdateStatus  `json:"update,omitempty"`
@@ -34,6 +40,8 @@ type AgentReport struct {
 	// LinkState summarises the Agent's routing view; the controller only
 	// observes it, for example to show Agents whose view differs.
 	LinkState *LinkStateReport `json:"link_state,omitempty"`
+	// Counters are data-plane event totals since the Agent started.
+	Counters map[string]uint64 `json:"counters,omitempty"`
 }
 
 type LinkStateReport struct {

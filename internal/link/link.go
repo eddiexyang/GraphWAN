@@ -183,6 +183,9 @@ type Link struct {
 	linkStateLost   atomic.Uint64
 	compactOut      atomic.Bool
 	networkWire     [16]byte
+	// tcpPackets counts TCP packets queued on a TCP-backed Link: TCP over TCP,
+	// which access TCP termination exists to prevent.
+	tcpPackets atomic.Uint64
 	// Size probe state, guarded by mu. The zero value is a verified Link.
 	sizeMode     sizeProbeMode
 	unverified   bool
@@ -396,9 +399,13 @@ func (l *Link) enqueue(ctx context.Context, frames [][]byte, owners []*packetbuf
 		return ErrUnavailable
 	}
 	limit := min(len(frames), len(l.data)-l.dataCount)
+	tcpBacked := l.tcpBacked()
 	for i, frame := range frames[:limit] {
-		if l.tcpBacked() && l.dataBytes+len(frame)+1 > tcpQueueBytes {
+		if tcpBacked && l.dataBytes+len(frame)+1 > tcpQueueBytes {
 			break
+		}
+		if tcpBacked && packet.IsTCP(frame[packet.HeaderSize:]) {
+			l.tcpPackets.Add(1)
 		}
 		var buffer *packetbuf.Buffer
 		if l.compactOut.Load() {
@@ -498,7 +505,7 @@ func (l *Link) Stats() model.LinkStatus {
 	if channel, ok := l.channel.(interface{ LocalAddr() net.Addr }); ok && channel.LocalAddr() != nil {
 		local = channel.LocalAddr().String()
 	}
-	return model.LinkStatus{NetworkID: l.info.NetworkID, EdgeID: l.info.EdgeID, LinkID: l.ID(), CandidateID: l.info.CandidateID, Transport: l.info.Transport, Local: local, ObservedLocal: l.observedLocal, Remote: l.channel.RemoteAddr().String(), Healthy: healthy, RTTMillis: float64(l.rtt) / float64(time.Millisecond), Loss: loss, RXBytes: l.rx.Load(), TXBytes: l.tx.Load()}
+	return model.LinkStatus{NetworkID: l.info.NetworkID, EdgeID: l.info.EdgeID, LinkID: l.ID(), CandidateID: l.info.CandidateID, Transport: l.info.Transport, Local: local, ObservedLocal: l.observedLocal, Remote: l.channel.RemoteAddr().String(), Healthy: healthy, RTTMillis: float64(l.rtt) / float64(time.Millisecond), Loss: loss, RXBytes: l.rx.Load(), TXBytes: l.tx.Load(), Dropped: l.dropped.Load(), TCPPackets: l.tcpPackets.Load()}
 }
 func (l *Link) readLoop() {
 	owned, owning := l.channel.(interface {

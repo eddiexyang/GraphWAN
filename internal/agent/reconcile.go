@@ -49,6 +49,9 @@ func (r *Reconciler) Report(version string) model.AgentReport {
 	}); ok {
 		report.LinkState = ls.LinkStateReport()
 	}
+	if counters, ok := r.runtime.(interface{ Counters() map[string]uint64 }); ok {
+		report.Counters = counters.Counters()
+	}
 	if health, ok := r.runtime.(interface{ Health() error }); ok {
 		if err := health.Health(); err != nil {
 			report.RuntimeError = err.Error()

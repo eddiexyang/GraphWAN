@@ -217,11 +217,23 @@ func (m *mux) bestLocked() *link.Link {
 func (m *mux) switchLocked(l *link.Link) {
 	m.current = l
 	m.lostSince = time.Time{}
+	resent := 0
 	for _, s := range m.streams {
+		resent += s.unsent
 		s.unsent = 0
 		s.ackDue = true
 		m.enqueueLocked(s)
 	}
+	if m.g != nil && m.g.mesh != nil {
+		m.g.mesh.muxResent.Add(uint64(resent))
+	}
+}
+
+// streamCount reports the streams the mux carries.
+func (m *mux) streamCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.streams)
 }
 
 // maintain runs on the Edge scheduler. A Link stays in use while healthy and

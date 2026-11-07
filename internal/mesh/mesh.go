@@ -38,6 +38,8 @@ type policy struct {
 	endpoints []model.Endpoint
 }
 type Mesh struct {
+	// muxResent counts stream frames sent again after a Link change.
+	muxResent      atomic.Uint64
 	streamHandler  StreamHandler
 	linkState      atomic.Pointer[LinkStateHandler]
 	compact        link.CompactHeader
@@ -295,7 +297,14 @@ func (m *Mesh) Report() []model.LinkStatus {
 		result = append(result, m.wireguard.Report()...)
 	}
 	for _, g := range groups {
-		result = append(result, g.edge.Report()...)
+		links := g.edge.Report()
+		streams := uint32(g.mux.streamCount())
+		for i := range links {
+			if links[i].Active {
+				links[i].StreamSessions = streams
+			}
+		}
+		result = append(result, links...)
 	}
 	slices.SortFunc(result, func(a, b model.LinkStatus) int {
 		if a.LinkID < b.LinkID {
@@ -308,6 +317,12 @@ func (m *Mesh) Report() []model.LinkStatus {
 	})
 	return result
 }
+
+// Counters reports data-plane event totals for the Agent's report.
+func (m *Mesh) Counters() map[string]uint64 {
+	return map[string]uint64{"mux_resent_frames": m.muxResent.Load()}
+}
+
 func (m *Mesh) secure(cfg *policy, kind model.Transport) secure.Config {
 	return secure.Config{Network: cfg.network, Edge: cfg.peer.Edge.ID, Local: cfg.self, Peer: cfg.peer.Node.ID, Transport: kind, Cipher: cfg.cipher, Identity: m.identity, PeerIdentity: cfg.peer.PublicKey}
 }

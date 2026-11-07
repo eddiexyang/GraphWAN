@@ -236,3 +236,23 @@ func TestCompactOwnedFramesInPlace(t *testing.T) {
 		t.Fatal("compact frames leaked byte budget")
 	}
 }
+
+// A TCP-backed Link counts the TCP packets it is given, which access TCP
+// termination must keep at zero; other packets and datagram Links are not
+// counted.
+func TestTCPBackedLinkCountsTCPPackets(t *testing.T) {
+	tcp := make([]byte, 20)
+	tcp[0], tcp[9] = 0x45, 6
+	udp := bytes.Clone(tcp)
+	udp[9] = 17
+	for transport, want := range map[model.Transport]uint64{model.TCP: 1, model.UDP: 0} {
+		l := &Link{ctx: context.Background(), info: Info{Transport: transport}, dataReady: make(chan struct{}, 1)}
+		l.dataGeneration.Store(1)
+		if err := l.SendBatch(context.Background(), [][]byte{compactTestFrame(t, tcp), compactTestFrame(t, udp)}); err != nil {
+			t.Fatal(err)
+		}
+		if got := l.tcpPackets.Load(); got != want {
+			t.Fatalf("%s Link counted %d TCP packets, want %d", transport, got, want)
+		}
+	}
+}

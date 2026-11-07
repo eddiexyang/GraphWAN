@@ -199,6 +199,7 @@ func TestMuxStreamsShareOneLink(t *testing.T) {
 // are sent again and the receiver keeps each byte exactly once, in order.
 func TestMuxStreamSurvivesLinkChange(t *testing.T) {
 	p := newMuxPair(t)
+	p.a.g.mesh = &Mesh{}
 	first, _, _ := p.connect(t, true)
 	waitFor(t, "streams", p.a.Available)
 	p.connect(t, true)
@@ -245,6 +246,9 @@ func TestMuxStreamSurvivesLinkChange(t *testing.T) {
 	}
 	if err := <-writeErr; err != nil {
 		t.Fatal(err)
+	}
+	if p.a.g.mesh.Counters()["mux_resent_frames"] == 0 {
+		t.Fatal("frames sent again after the Link change were not counted")
 	}
 }
 
