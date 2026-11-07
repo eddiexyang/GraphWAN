@@ -263,14 +263,24 @@ type streamOptions struct {
 	// withoutLinkState applies configurations without topology, so Agents
 	// forward on the compiled routes.
 	withoutLinkState bool
+	// legacy Agents carry streams without TCP sessions, as older versions do.
+	legacy map[int]bool
 }
 
 func streamAgentsWith(t *testing.T, carrier model.Transport, options streamOptions, configure ...func(*model.State)) ([3]*DataPlane, [3]*kernelTUN, model.State) {
 	t.Helper()
+	agents, devices, state := graphAgents(t, carrier, options, 3, 2, configure...)
+	return [3]*DataPlane(agents), [3]*kernelTUN(devices), state
+}
+
+// graphAgents runs the first count Agents of the test topology with its first
+// edges Edges: A-B, B-C, A-D, D-C.
+func graphAgents(t *testing.T, carrier model.Transport, options streamOptions, count, edges int, configure ...func(*model.State)) ([]*DataPlane, []*kernelTUN, model.State) {
+	t.Helper()
 	state := testutil.Topology()
-	state.Agents = state.Agents[:3]
-	state.Networks[0].Nodes = state.Networks[0].Nodes[:3]
-	state.Networks[0].Edges = state.Networks[0].Edges[:2]
+	state.Agents = state.Agents[:count]
+	state.Networks[0].Nodes = state.Networks[0].Nodes[:count]
+	state.Networks[0].Edges = state.Networks[0].Edges[:edges]
 	for i := range state.Agents {
 		listener, err := net.Listen("tcp4", "127.0.0.1:0")
 		if err != nil {
@@ -287,8 +297,8 @@ func streamAgentsWith(t *testing.T, carrier model.Transport, options streamOptio
 	for _, configure := range configure {
 		configure(&state)
 	}
-	var agents [3]*DataPlane
-	var devices [3]*kernelTUN
+	agents := make([]*DataPlane, count)
+	devices := make([]*kernelTUN, count)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	for i := range agents {
@@ -296,6 +306,7 @@ func streamAgentsWith(t *testing.T, carrier model.Transport, options streamOptio
 		seed[0] = byte(i + 1)
 		configured := DataPlaneOptions{}
 		configured.BindHost = "127.0.0.1"
+		configured.legacyStreams = options.legacy[i]
 		configured.TunnelFactory = func(cfg tunnel.Config) (tunnel.Device, error) {
 			device, err := newKernelTUN(cfg, true)
 			devices[i] = device
@@ -322,10 +333,14 @@ func streamAgentsWith(t *testing.T, carrier model.Transport, options streamOptio
 	}
 	// Each Edge chooses streams or packets when a connection starts. Start
 	// after every Edge has a healthy Link and, where offered, stream support.
+	legacyNode := map[model.ID]bool{}
+	for i, node := range state.Networks[0].Nodes {
+		legacyNode[node.ID] = options.legacy[i]
+	}
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		ready := true
-		for _, agent := range agents {
+		for i, agent := range agents {
 			current := agent.state.Load()
 			for _, network := range current.snapshot.Networks {
 				for _, peer := range network.Peers {
@@ -339,8 +354,15 @@ func streamAgentsWith(t *testing.T, carrier model.Transport, options streamOptio
 						}
 					}
 					ready = ready && found
-					if streamCarrier(carrier) {
+					streams := false
+					for _, transport := range peer.Edge.Transports {
+						streams = streams || streamCarrier(transport)
+					}
+					if streams {
 						ready = ready && current.mesh.StreamsAvailable(network.ID, peer.Node.ID)
+						if !options.legacy[i] && !legacyNode[peer.Node.ID] {
+							ready = ready && current.mesh.ResumeAvailable(network.ID, peer.Node.ID)
+						}
 					}
 				}
 			}
