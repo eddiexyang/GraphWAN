@@ -52,10 +52,9 @@ logging, managed updates and OpenWrt persistent-storage requirements.
   TCP/UDP endpoints using the configured Agent listen port (24752 by default).
 - Each Edge independently retries allowed candidates with jittered backoff.
   The Agent permits eight concurrent outgoing attempts and eight incoming
-  handshakes. Every retained Link exchanges authenticated heartbeats once per
-  second during traffic and once per ten seconds while idle. Missing replies
-  restore one-second probes, with a five-second response timeout; detecting a
-  silent idle failure can therefore take approximately fifteen seconds.
+  handshakes. Every retained Link exchanges authenticated heartbeats, every 2 s
+  with the default 6 s failure detection time of its Network; see
+  [failure detection](peer-protocol.md#failure-detection).
 - An available manually preferred candidate wins immediately. Otherwise the
   lowest measured RTT among retained candidates wins. If the active Link carried
   user data in either direction within the last five seconds, switching requires

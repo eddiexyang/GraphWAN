@@ -70,8 +70,8 @@ func (s Snapshot) Validate(agentID ID) error {
 		if n.MTU < DefaultMTU || n.MTU > MaxMTU || !n.Cipher.Valid() {
 			return fmt.Errorf("invalid MTU or cipher")
 		}
-		if !n.EqualCostPaths.Valid() {
-			return fmt.Errorf("invalid equal-cost path setting")
+		if !n.EqualCostPaths.Valid() || !validFailureDetection(n.FailureDetection) {
+			return fmt.Errorf("invalid equal-cost path or failure detection setting")
 		}
 		if n.Self.AgentID != agentID || n.Self.WireGuard != nil {
 			return fmt.Errorf("network self membership belongs to another agent")

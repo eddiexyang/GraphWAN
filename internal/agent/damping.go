@@ -12,14 +12,15 @@ import (
 
 // Edge damping keeps a flapping edge out of link-state. An edge that goes
 // down is withdrawn at once, but the outage only counts as a failure once it
-// lasts dampGrace; a quicker recovery, such as a Link replaced or redialled
-// within a second, is reported up again immediately. After a failure the edge
-// must stay up for a hold time before it is reported up again. The hold
-// doubles with every further failure, including one during the hold, and
-// resets once the edge has been reported up for dampStable. The first up
-// after the Agent starts is not held, so a restart does not cost a hold.
+// lasts its Network's failure detection time, dampGrace by default; a quicker
+// recovery, such as a Link replaced or redialled within a second, is reported
+// up again immediately. After a failure the edge must stay up for a hold time
+// before it is reported up again. The hold doubles with every further
+// failure, including one during the hold, and resets once the edge has been
+// reported up for dampStable. The first up after the Agent starts is not
+// held, so a restart does not cost a hold.
 const (
-	dampGrace  = 6 * time.Second // the default Link health timeout
+	dampGrace  = model.DefaultFailureDetection
 	dampHold   = 30 * time.Second
 	dampMax    = 10 * time.Minute
 	dampStable = 10 * time.Minute
@@ -55,8 +56,9 @@ func holdFor(failures int) time.Duration {
 	return min(hold, dampMax)
 }
 
-// filter returns the edges to report up, given the edges with a healthy Link.
-func (d *edgeDamper) filter(raw map[model.ID]map[model.ID]bool, now time.Time) map[model.ID]map[model.ID]bool {
+// filter returns the edges to report up, given the edges with a healthy Link
+// and each Network's grace period, dampGrace when it has none.
+func (d *edgeDamper) filter(raw map[model.ID]map[model.ID]bool, grace map[model.ID]time.Duration, now time.Time) map[model.ID]map[model.ID]bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	for network, edges := range raw {
@@ -68,9 +70,13 @@ func (d *edgeDamper) filter(raw map[model.ID]map[model.ID]bool, now time.Time) m
 	}
 	out := map[model.ID]map[model.ID]bool{}
 	for key, e := range d.edges {
+		outage := dampGrace
+		if g, ok := grace[key.network]; ok {
+			outage = g
+		}
 		if raw[key.network][key.edge] {
 			if !e.downSince.IsZero() {
-				if now.Sub(e.downSince) >= dampGrace {
+				if now.Sub(e.downSince) >= outage {
 					e.fail(e.downSince)
 				} else if e.resume {
 					e.reported = true // recovered within the grace period
@@ -101,11 +107,11 @@ func (d *edgeDamper) filter(raw map[model.ID]map[model.ID]bool, now time.Time) m
 			continue
 		}
 		// Raw down: withdraw at once. It becomes a failure once it lasts
-		// dampGrace, if the edge was reported up or was being held.
+		// the grace period, if the edge was reported up or was being held.
 		if e.downSince.IsZero() && (e.reported || !e.upSince.IsZero() && e.seen) {
 			e.downSince, e.resume = now, e.reported
 		}
-		if !e.downSince.IsZero() && now.Sub(e.downSince) >= dampGrace {
+		if !e.downSince.IsZero() && now.Sub(e.downSince) >= outage {
 			e.fail(e.downSince)
 			e.downSince, e.resume = time.Time{}, false
 		}

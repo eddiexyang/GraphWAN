@@ -134,6 +134,27 @@ const (
 	XChaCha20Poly1305 CipherSuite = "xchacha20-poly1305"
 )
 
+// FailureDetection bounds, in milliseconds.
+const (
+	MinFailureDetection = 750
+	MaxFailureDetection = 120_000
+)
+
+// DefaultFailureDetection is the Link health timeout of Networks without one.
+const DefaultFailureDetection = 6 * time.Second
+
+// FailureDetectionTime converts a FailureDetection setting.
+func FailureDetectionTime(ms uint32) time.Duration {
+	if ms == 0 {
+		return DefaultFailureDetection
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+func validFailureDetection(ms uint32) bool {
+	return ms == 0 || ms >= MinFailureDetection && ms <= MaxFailureDetection
+}
+
 // EqualCostPaths chooses among equal-cost next hops and exits: the lowest
 // Node ID (the default, also for ""), or a hash of the flow.
 type EqualCostPaths string
@@ -168,6 +189,9 @@ type Network struct {
 	Edges      []Edge          `json:"edges"`
 	// EqualCostPaths applies to next hops and to advertisers of one prefix.
 	EqualCostPaths EqualCostPaths `json:"equal_cost_paths,omitempty"`
+	// FailureDetection is the Link health timeout in milliseconds, 0 for the
+	// default; Links send a heartbeat every third of it.
+	FailureDetection uint32 `json:"failure_detection_ms,omitempty"`
 }
 
 type State struct {

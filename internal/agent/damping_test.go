@@ -14,7 +14,7 @@ func TestEdgeDamping(t *testing.T) {
 	d := newEdgeDamper()
 	now := time.Unix(1000, 0)
 	reported := func(raw map[model.ID]map[model.ID]bool) bool {
-		return d.filter(raw, now)[network][edge]
+		return d.filter(raw, nil, now)[network][edge]
 	}
 	step := func(by time.Duration) { now = now.Add(by) }
 
@@ -71,10 +71,10 @@ func TestEdgeDamping(t *testing.T) {
 
 	// Edges are independent, and an edge that never came up keeps no state.
 	other := map[model.ID]map[model.ID]bool{network: {edge: true, "f": true}}
-	if !d.filter(other, now)[network]["f"] {
+	if !d.filter(other, nil, now)[network]["f"] {
 		t.Fatal("another edge's first up was held")
 	}
-	d.filter(map[model.ID]map[model.ID]bool{network: {"g": false}}, now)
+	d.filter(map[model.ID]map[model.ID]bool{network: {"g": false}}, nil, now)
 	if d.edges[dampKey{network, "g"}] != nil {
 		t.Fatal("state kept for an edge that never came up")
 	}
@@ -89,7 +89,7 @@ func TestEdgeDampingGrace(t *testing.T) {
 	d := newEdgeDamper()
 	now := time.Unix(1000, 0)
 	reported := func(raw map[model.ID]map[model.ID]bool) bool {
-		return d.filter(raw, now)[network][edge]
+		return d.filter(raw, nil, now)[network][edge]
 	}
 	step := func(by time.Duration) { now = now.Add(by) }
 

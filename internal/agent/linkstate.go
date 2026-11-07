@@ -31,7 +31,13 @@ func (r *DataPlane) newLinkState() *linkstate.Engine {
 				}
 				up[s.NetworkID][s.EdgeID] = true
 			}
-			return r.damper.filter(up, time.Now())
+			grace := map[model.ID]time.Duration{}
+			if state := r.state.Load(); state != nil {
+				for _, n := range state.snapshot.Networks {
+					grace[n.ID] = model.FailureDetectionTime(n.FailureDetection)
+				}
+			}
+			return r.damper.filter(up, grace, time.Now())
 		},
 		Apply: r.ApplyRoutes,
 	})

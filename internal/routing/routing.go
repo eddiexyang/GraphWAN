@@ -163,7 +163,7 @@ func Compile(state model.State, agentID model.ID) (model.Snapshot, error) {
 		if me.ID == "" {
 			continue
 		}
-		config := model.NetworkConfig{ID: network.ID, Name: network.Name, CIDR: network.CIDR, MTU: network.MTU, Cipher: network.Cipher, EqualCostPaths: network.EqualCostPaths, Self: me, Directory: []model.Destination{}, Peers: []model.Peer{}, Routes: shortest(network, me.ID, excluded, ClientNodes(network))}
+		config := model.NetworkConfig{ID: network.ID, Name: network.Name, CIDR: network.CIDR, MTU: network.MTU, Cipher: network.Cipher, EqualCostPaths: network.EqualCostPaths, FailureDetection: network.FailureDetection, Self: me, Directory: []model.Destination{}, Peers: []model.Peer{}, Routes: shortest(network, me.ID, excluded, ClientNodes(network))}
 		for _, e := range network.EffectiveEdges() {
 			if e.Enabled && !excluded[e.A] && !excluded[e.B] {
 				config.Topology = append(config.Topology, model.TopologyEdge{ID: e.ID, A: e.A, B: e.B, Weight: e.Weight})

@@ -83,6 +83,9 @@ global-address candidate identities and introductions are unchanged.
 The optional `path_exchange: true` capability enables the address exchange and
 duplicate retirement messages below. Older peers ignore this field; no new
 message types are sent until the remote advertises or demonstrates support.
+Optional `heartbeat_ms` states the initiator's heartbeat; see
+[failure detection](#failure-detection). An initiator leaves it out when the
+introduction would otherwise exceed 256 bytes.
 
 ## Encrypted messages
 
@@ -359,15 +362,26 @@ by the established peer session.
 The Link then uses plaintext type 1 followed by an overlay frame for user data,
 and type 2/type 3 followed by an eight-byte big-endian probe sequence for ping/pong.
 
-Link probes run every second during user traffic and every ten seconds while
-idle (including standby Links). A missing response resumes one-second probes;
-five seconds without a valid response after the first unanswered probe closes
-the Link. Thus silent failure detection can take approximately fifteen seconds
-while idle, versus approximately five to six seconds during traffic. Initial
-admission still requires a valid pong within five seconds. User data restores
-fast probes on the next tick; after ten seconds without user data the Link
-returns to idle cadence. Ping/pong traffic itself does not count as user activity.
-Wire framing is unchanged, and peers with the old probe cadence interoperate.
+### Failure detection
+
+The initiator probes every Link, busy, idle or standby, once per heartbeat; the
+acceptor answers. A Link fails when no valid answer arrives within the timeout
+after the first unanswered probe, so a silent failure is detected after the
+timeout plus at most one heartbeat. The acceptor fails a Link that sends no
+probe for its timeout.
+
+The timeout is the Network's `failure_detection_ms`, 750 ms to 120 s, 6 s by
+default, and the heartbeat is a third of it. An acceptor's timeout is the larger
+of its own and three of the initiator's heartbeats, as stated by `heartbeat_ms`;
+without that field it assumes the 2 s heartbeat of older Agents. Agents of one
+Network with different settings, such as during a configuration change, thus
+keep their Links. Changing the setting re-establishes the Network's Links. Edge
+damping counts an outage as a failure once it lasts the Network's timeout.
+
+Measured on loopback (UDP payload of one idle Edge, both directions): 750 ms
+sends 300 B/s, the default 52 B/s. Rerouting after a neighbour went silent
+took 1.16 s at 750 ms and 8.17 s by default.
+
 Probes have priority over queued user frames. Standby Links run the same probes;
 only the selected sending Link receives user frames from the routing engine.
 

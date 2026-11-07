@@ -28,6 +28,8 @@ type NetworkConfig struct {
 	Routes    []Route       `json:"routes"`
 	// EqualCostPaths is the Network's setting; Agents apply it per hop.
 	EqualCostPaths EqualCostPaths `json:"equal_cost_paths,omitempty"`
+	// FailureDetection is the Network's Link health timeout in milliseconds.
+	FailureDetection uint32 `json:"failure_detection_ms,omitempty"`
 	// Topology lists the network's usable edges so Agents can compute routes
 	// from link-state advertisements without the controller.
 	Topology []TopologyEdge `json:"topology,omitempty"`

@@ -36,6 +36,8 @@ type policy struct {
 	cipher    model.CipherSuite
 	peer      model.Peer
 	endpoints []model.Endpoint
+	// detection is the Network's Link health timeout.
+	detection time.Duration
 }
 type Mesh struct {
 	// muxResent counts stream frames sent again after a Link change;
@@ -209,7 +211,7 @@ func (m *Mesh) Apply(snapshot model.Snapshot) error {
 				continue
 			}
 			k := key{network.ID, p.Node.ID}
-			cfg := &policy{network: network.ID, self: network.Self.ID, cipher: network.Cipher, peer: p, endpoints: snapshot.Endpoints}
+			cfg := &policy{network: network.ID, self: network.Self.ID, cipher: network.Cipher, peer: p, endpoints: snapshot.Endpoints, detection: model.FailureDetectionTime(network.FailureDetection)}
 			if existing := old[k]; existing != nil && compatible(existing.policy.Load(), cfg) {
 				retiredLinks = append(retiredLinks, existing.updatePolicy(cfg)...)
 				next[k] = existing
@@ -249,7 +251,7 @@ func (m *Mesh) Apply(snapshot model.Snapshot) error {
 	return nil
 }
 func compatible(a, b *policy) bool {
-	return a.network == b.network && a.self == b.self && a.cipher == b.cipher && a.peer.Node.ID == b.peer.Node.ID && a.peer.Edge.ID == b.peer.Edge.ID && bytes.Equal(a.peer.PublicKey, b.peer.PublicKey)
+	return a.network == b.network && a.self == b.self && a.cipher == b.cipher && a.detection == b.detection && a.peer.Node.ID == b.peer.Node.ID && a.peer.Edge.ID == b.peer.Edge.ID && bytes.Equal(a.peer.PublicKey, b.peer.PublicKey)
 }
 
 func (m *Mesh) Send(ctx context.Context, network, remote model.ID, frame []byte) error {
@@ -449,7 +451,7 @@ func (m *Mesh) accept(conn transport.Conn, kind model.Transport) {
 		linkState := introduction.LinkState && m.linkStateEnabled()
 		compact := introduction.CompactData && m.compactHeader() != nil
 		sizeProbe := introduction.SizeProbe && streamTransport(kind)
-		selected.register(channel, *candidate, introduction.PathExchange, linkCaps{streams: streams, resume: resume, streamHello: true, linkState: linkState, linkStateHello: true, compact: compact, compactHello: true, sizeProbe: sizeProbe, sizeProbeHello: true, accepted: true})
+		selected.register(channel, *candidate, introduction.PathExchange, linkCaps{streams: streams, resume: resume, streamHello: true, linkState: linkState, linkStateHello: true, compact: compact, compactHello: true, sizeProbe: sizeProbe, sizeProbeHello: true, accepted: true, peerHeartbeat: time.Duration(introduction.Heartbeat) * time.Millisecond})
 	}()
 }
 func addressFamily(address net.Addr) int {
@@ -533,6 +535,27 @@ type linkCaps struct {
 	compact, compactHello                           bool
 	sizeProbe, sizeProbeHello                       bool
 	accepted                                        bool
+	// peerHeartbeat is the dialer's heartbeat, as its introduction stated.
+	peerHeartbeat time.Duration
+}
+
+// legacyHeartbeat is the heartbeat of dialers that do not state theirs.
+const legacyHeartbeat = 2 * time.Second
+
+// linkTiming derives a Link's heartbeat and timeout from the Network's
+// failure detection time. An acceptor also allows three of the dialer's
+// heartbeats, so a dialer with a slower heartbeat, such as an older Agent,
+// is not taken for failed.
+func linkTiming(detection time.Duration, caps linkCaps) (heartbeat, timeout time.Duration) {
+	timeout = detection
+	if caps.accepted {
+		peer := caps.peerHeartbeat
+		if peer <= 0 {
+			peer = legacyHeartbeat
+		}
+		timeout = max(timeout, 3*min(peer, model.MaxFailureDetection*time.Millisecond/3))
+	}
+	return timeout / 3, timeout
 }
 
 func (g *group) register(channel *peer.Channel, candidate link.Candidate, pathExchange bool, caps linkCaps) {
@@ -549,6 +572,9 @@ func (g *group) register(channel *peer.Channel, candidate link.Candidate, pathEx
 		return
 	}
 	options := g.mesh.linkOptions
+	if options.Heartbeat == 0 {
+		options.Heartbeat, options.Timeout = linkTiming(cfg.detection, caps)
+	}
 	options.OwnedPackets = true
 	options.PathExchange = pathExchange
 	options.Accepted = caps.accepted

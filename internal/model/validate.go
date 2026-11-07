@@ -235,6 +235,9 @@ func (s State) Validate() error {
 		if !n.EqualCostPaths.Valid() {
 			return fmt.Errorf("network %s: equal_cost_paths must be lowest-id or ecmp", n.ID)
 		}
+		if !validFailureDetection(n.FailureDetection) {
+			return fmt.Errorf("network %s: failure detection must be %d–%d ms", n.ID, MinFailureDetection, MaxFailureDetection)
+		}
 		if len(n.Nodes) > MaxNodes || len(n.Edges) > MaxEdges {
 			return fmt.Errorf("network %s: topology exceeds limits", n.ID)
 		}
