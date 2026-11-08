@@ -1538,10 +1538,10 @@ export default function Topology({
                   <option value="ecmp">ECMP (hash per flow)</option>
                 </select>
               </Field>
-              <Field label="Failure detection (ms)">
+              <Field label="Failover time (ms)">
                 <input
                   type="number"
-                  min={750}
+                  min={1000}
                   max={120000}
                   placeholder="6000"
                   value={network.failure_detection_ms ?? ''}

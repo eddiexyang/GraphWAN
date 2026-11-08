@@ -42,18 +42,17 @@ func failover(t *testing.T, detection uint32, limit time.Duration) (time.Duratio
 	return time.Since(start), false
 }
 
-// A Network's failure detection time bounds how long traffic keeps going to
-// a silent neighbor: the timeout after the first unanswered heartbeat, which
-// follows the last answer within one heartbeat.
+// A Network's failover time bounds how long traffic keeps going to a silent
+// neighbor: it is rerouted within that time.
 func TestFailureDetectionTime(t *testing.T) {
-	elapsed, moved := failover(t, 750, 3*time.Second)
-	t.Logf("750 ms: rerouted after %v", elapsed.Round(time.Millisecond))
-	if !moved || elapsed > 1500*time.Millisecond {
-		t.Fatalf("750 ms: rerouted %v after %v", moved, elapsed)
+	elapsed, moved := failover(t, 1000, 3*time.Second)
+	t.Logf("1 s: rerouted after %v", elapsed.Round(time.Millisecond))
+	if !moved || elapsed > time.Second {
+		t.Fatalf("1 s: rerouted %v after %v", moved, elapsed)
 	}
 	elapsed, moved = failover(t, 0, 10*time.Second)
 	t.Logf("default: rerouted after %v", elapsed.Round(time.Millisecond))
-	if !moved || elapsed < 6*time.Second || elapsed > 9*time.Second {
+	if !moved || elapsed < 3*time.Second || elapsed > 6*time.Second {
 		t.Fatalf("default: rerouted %v after %v", moved, elapsed)
 	}
 	if elapsed, moved = failover(t, 60_000, 3*time.Second); moved {
@@ -160,8 +159,8 @@ func idleBytes(t *testing.T, detection uint32) float64 {
 // Heartbeats every third of the detection time; the test reports the bytes
 // an idle Edge carries in UDP payloads.
 func TestFailureDetectionHeartbeatBytes(t *testing.T) {
-	fast, slow := idleBytes(t, 750), idleBytes(t, 0)
-	t.Logf("idle UDP payload bytes per second on one Edge: 750 ms %.0f, default %.0f", fast, slow)
+	fast, slow := idleBytes(t, 1000), idleBytes(t, 0)
+	t.Logf("idle UDP payload bytes per second on one Edge: 1 s %.0f, default %.0f", fast, slow)
 	if fast <= slow {
 		t.Fatalf("a shorter detection time did not send more heartbeats: %.0f <= %.0f", fast, slow)
 	}
@@ -169,7 +168,8 @@ func TestFailureDetectionHeartbeatBytes(t *testing.T) {
 
 // An acceptor allows three of the dialer's heartbeats, so Agents whose
 // Networks have different detection times keep their Links up. B has no
-// endpoint, so its only Link is B's, at a 2 s heartbeat, to A with 750 ms.
+// endpoint, so its only Link is B's, at the default 1 s heartbeat, to A with
+// 1 s.
 func TestFailureDetectionMixedSettings(t *testing.T) {
 	agents, _, state := graphAgents(t, model.UDP, streamOptions{}, 2, 1, func(s *model.State) {
 		s.Agents[1].Endpoints = []model.Endpoint{}
@@ -177,7 +177,7 @@ func TestFailureDetectionMixedSettings(t *testing.T) {
 	fast := state
 	fast.Revision++
 	fast.Networks = append([]model.Network(nil), state.Networks...)
-	fast.Networks[0].FailureDetection = 750
+	fast.Networks[0].FailureDetection = 1000
 	snapshot, err := routing.Compile(fast, fast.Agents[0].ID)
 	if err != nil {
 		t.Fatal(err)

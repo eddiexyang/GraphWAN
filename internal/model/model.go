@@ -134,13 +134,15 @@ const (
 	XChaCha20Poly1305 CipherSuite = "xchacha20-poly1305"
 )
 
-// FailureDetection bounds, in milliseconds.
+// FailureDetection bounds, in milliseconds. A Network's FailureDetection is
+// the time within which traffic leaves a failed Link: detection and the move
+// to the next route together.
 const (
-	MinFailureDetection = 750
+	MinFailureDetection = 1000
 	MaxFailureDetection = 120_000
 )
 
-// DefaultFailureDetection is the Link health timeout of Networks without one.
+// DefaultFailureDetection is the failover time of Networks without one.
 const DefaultFailureDetection = 6 * time.Second
 
 // FailureDetectionTime converts a FailureDetection setting.

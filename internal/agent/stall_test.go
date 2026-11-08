@@ -88,7 +88,7 @@ func (p *pausingProxy) port() string { return p.listener.Addr().(*net.TCPAddr).A
 func TestTCPSessionSurvivesStalledHop(t *testing.T) {
 	var proxy *pausingProxy
 	agents, devices, state := graphAgents(t, model.TCP, streamOptions{}, 4, 4, func(s *model.State) {
-		s.Networks[0].FailureDetection = 750
+		s.Networks[0].FailureDetection = 1000
 		// Only A dials, and it reaches B through the proxy, so the A-B
 		// Link has one path to stall.
 		target := strings.TrimPrefix(s.Agents[1].Endpoints[0].URL, "tcp://")
@@ -125,9 +125,8 @@ func TestTCPSessionLeavesAStalledAttempt(t *testing.T) {
 		paused := time.Now()
 		proxy.paused.Store(true)
 		waitFor(t, 15*time.Second, "the chain to move to D", func() bool { return relaying(agents[3]) > 0 })
-		detection := model.FailureDetectionTime(0)
-		if moved := time.Since(paused); moved > detection+3*time.Second {
-			t.Errorf("moved %v after the stall, want within %v", moved, detection+3*time.Second)
+		if moved, failover := time.Since(paused), model.FailureDetectionTime(0); moved > failover {
+			t.Errorf("moved %v after the stall, want within %v", moved, failover)
 		}
 	})
 }

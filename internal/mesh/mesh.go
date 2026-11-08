@@ -543,11 +543,12 @@ type linkCaps struct {
 const legacyHeartbeat = 2 * time.Second
 
 // linkTiming derives a Link's heartbeat and timeout from the Network's
-// failure detection time. An acceptor also allows three of the dialer's
-// heartbeats, so a dialer with a slower heartbeat, such as an older Agent,
-// is not taken for failed.
+// failover time: a silent Link fails within its timeout plus one heartbeat,
+// two thirds of it, which leaves the last third to reroute and rebuild
+// sessions. An acceptor also allows three of the dialer's heartbeats, so a
+// dialer with a slower setting is not taken for failed.
 func linkTiming(detection time.Duration, caps linkCaps) (heartbeat, timeout time.Duration) {
-	timeout = detection
+	timeout = detection / 2
 	if caps.accepted {
 		peer := caps.peerHeartbeat
 		if peer <= 0 {
@@ -580,7 +581,6 @@ func (g *group) register(channel *peer.Channel, candidate link.Candidate, pathEx
 	options.Accepted = caps.accepted
 	if caps.streams {
 		options.Streams, options.StreamHello = g.mux, caps.streamHello
-		channel.UseKernelWriteBacklog()
 	}
 	if caps.linkState {
 		options.LinkState, options.LinkStateHello = g, caps.linkStateHello

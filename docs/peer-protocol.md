@@ -370,17 +370,23 @@ after the first unanswered probe, so a silent failure is detected after the
 timeout plus at most one heartbeat. The acceptor fails a Link that sends no
 probe for its timeout.
 
-The timeout is the Network's `failure_detection_ms`, 750 ms to 120 s, 6 s by
-default, and the heartbeat is a third of it. An acceptor's timeout is the larger
-of its own and three of the initiator's heartbeats, as stated by `heartbeat_ms`;
-without that field it assumes the 2 s heartbeat of older Agents. Agents of one
+The Network's `failure_detection_ms`, 1 s to 120 s, 6 s by default, is the
+failover time: traffic leaves a failed Link within it. The timeout is half of
+it and the heartbeat a third of the timeout, so a silent Link fails within two
+thirds of the failover time and the rest is left to reroute and rebuild
+sessions. An acceptor's timeout is the larger of its own and three of the
+initiator's heartbeats, as stated by `heartbeat_ms`; without that field it
+assumes a 2 s heartbeat.
+
+A ping carries the nonce of the last pong its sender received, and an acceptor
+counts its own direction as working only while that keeps growing within its
+timeout, so a Link that fails one way fails at both ends. Agents of one
 Network with different settings, such as during a configuration change, thus
 keep their Links. Changing the setting re-establishes the Network's Links. Edge
 damping counts an outage as a failure once it lasts the Network's timeout.
 
-Measured on loopback (UDP payload of one idle Edge with one Link, both
-directions): 750 ms sends 300–322 B/s, the default 63 B/s. Rerouting after a neighbour went silent
-took 1.16 s at 750 ms and 8.17 s by default.
+`TestFailureDetectionTime` checks that a silent neighbour's traffic is
+rerouted within the failover time, for 1 s and the default.
 
 Probes have priority over queued user frames. Standby Links run the same probes;
 only the selected sending Link receives user frames from the routing engine.
