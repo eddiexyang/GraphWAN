@@ -118,11 +118,13 @@ type Hop interface {
 }
 
 // Keep holds the bytes an end sent from the other end's delivered offset. It
-// owns each chunk's buffer, if any, until it drops the chunk.
+// owns each chunk's buffer, if any, until it drops the chunk; at is where the
+// chunk starts in its buffer's Data.
 type Keep struct {
 	mu     sync.Mutex
 	chunks [][]byte
 	owners []*packetbuf.Buffer
+	at     []int
 	base   uint64
 	end    uint64
 	closed bool
@@ -133,8 +135,8 @@ type Keep struct {
 func NewKeep() *Keep { return &Keep{wake: make(chan struct{})} }
 
 // Add appends data, which must not change afterwards, and becomes an owner of
-// its buffer (nil when data is not pooled).
-func (k *Keep) Add(data []byte, owner *packetbuf.Buffer) {
+// its buffer (nil when data is not pooled), where data starts at owner.Data[at].
+func (k *Keep) Add(data []byte, owner *packetbuf.Buffer, at int) {
 	if len(data) == 0 {
 		return
 	}
@@ -143,6 +145,7 @@ func (k *Keep) Add(data []byte, owner *packetbuf.Buffer) {
 		owner.Retain()
 		k.chunks = append(k.chunks, data)
 		k.owners = append(k.owners, owner)
+		k.at = append(k.at, at)
 		k.end += uint64(len(data))
 		k.budget.add(len(data))
 	}
@@ -242,10 +245,11 @@ func (k *Keep) Release(delivered uint64) {
 		k.base += uint64(len(k.chunks[0]))
 		k.owners[0].Release()
 		k.chunks[0], k.owners[0] = nil, nil
-		k.chunks, k.owners = k.chunks[1:], k.owners[1:]
+		k.chunks, k.owners, k.at = k.chunks[1:], k.owners[1:], k.at[1:]
 	}
 	if len(k.chunks) > 0 && limit > k.base {
 		k.chunks[0] = k.chunks[0][limit-k.base:]
+		k.at[0] += int(limit - k.base)
 		k.base = limit
 	}
 	k.budget.release(released)
@@ -253,26 +257,33 @@ func (k *Keep) Release(delivered uint64) {
 	k.wake = make(chan struct{})
 }
 
-// from returns the kept bytes from offset on, without copying, and owns
+// Kept is a chunk of kept bytes, which start at Owner.Data[At], or Owner is
+// nil.
+type Kept struct {
+	Data  []byte
+	Owner *packetbuf.Buffer
+	At    int
+}
+
+// From returns the kept bytes from offset on, without copying, and owns
 // their buffers for the caller, which releases them once it is done.
-func (k *Keep) from(offset uint64) ([][]byte, []*packetbuf.Buffer, bool) {
+func (k *Keep) From(offset uint64) ([]Kept, bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if offset < k.base || offset > k.end {
-		return nil, nil, false
+		return nil, false
 	}
-	var out [][]byte
-	var owners []*packetbuf.Buffer
+	var out []Kept
 	position := k.base
 	for i, chunk := range k.chunks {
 		if offset < position+uint64(len(chunk)) {
+			skip := max(offset, position) - position
 			k.owners[i].Retain()
-			out = append(out, chunk[max(offset, position)-position:])
-			owners = append(owners, k.owners[i])
+			out = append(out, Kept{chunk[skip:], k.owners[i], k.at[i] + int(skip)})
 		}
 		position += uint64(len(chunk))
 	}
-	return out, owners, true
+	return out, true
 }
 
 func (k *Keep) bounds() (base, end uint64) {
@@ -287,7 +298,7 @@ func (k *Keep) close() {
 		k.closed = true
 		k.budget.release(k.end - k.base)
 		packetbuf.ReleaseAll(k.owners)
-		k.chunks, k.owners = nil, nil
+		k.chunks, k.owners, k.at = nil, nil, nil
 		k.base = k.end
 		close(k.wake)
 	}
@@ -395,13 +406,28 @@ func (e *End) useLocked(hop Hop, out, in uint64) {
 // runs without the lock: the writes wait for the hop's acknowledgements.
 func (e *End) resend(hop Hop, out uint64) error {
 	hop.Begin(out)
-	chunks, owners, ok := e.keep.from(out)
+	chunks, ok := e.keep.From(out)
 	if !ok {
 		return ErrUnknownSession
 	}
-	defer packetbuf.ReleaseAll(owners)
+	defer func() {
+		for _, chunk := range chunks {
+			chunk.Owner.Release()
+		}
+	}()
+	// A hop that can sends the kept buffers themselves instead of copies.
+	kept, _ := hop.(interface{ WriteKept(Kept) (bool, error) })
 	for _, chunk := range chunks {
-		if _, err := hop.Write(chunk); err != nil {
+		if kept != nil {
+			sent, err := kept.WriteKept(chunk)
+			if err != nil {
+				return err
+			}
+			if sent {
+				continue
+			}
+		}
+		if _, err := hop.Write(chunk.Data); err != nil {
 			return err
 		}
 	}

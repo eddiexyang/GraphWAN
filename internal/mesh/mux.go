@@ -79,6 +79,7 @@ type muxFrame struct {
 	end uint64 // offset after this frame; a FIN occupies one virtual byte
 	raw []byte
 	buf *packetbuf.Buffer // pooled storage of a data frame, or nil
+	at  int               // where raw starts in buf.Data
 }
 
 type mux struct {
@@ -752,7 +753,7 @@ func (s *muxStream) publish(b *frameBuilder) error {
 		// far end delivered them. Under the lock, a reset of this hop either
 		// follows the bytes into the keep or fails this publish.
 		for _, frame := range frames {
-			s.keep.Add(frame.raw[muxDataHeader:], frame.buf)
+			s.keep.Add(frame.raw[muxDataHeader:], frame.buf, frame.at+muxDataHeader)
 		}
 	}
 	m.enqueueLocked(s)
@@ -783,6 +784,65 @@ func (s *muxStream) waitKeep() error {
 		return nil
 	}
 	return keep.Wait(s.ctx)
+}
+
+// keptExclusive bounds how long WriteKept waits for a Link still sending a
+// kept buffer's earlier frame before it copies the bytes instead.
+const keptExclusive = time.Second
+
+// WriteKept sends a session's kept bytes in the buffer that already holds
+// them: their old frame header precedes them there, and is rewritten for this
+// stream once only the keep and the caller own the buffer. It reports false
+// when it cannot, and the caller copies the bytes.
+func (s *muxStream) WriteKept(kept streamproxy.Kept) (bool, error) {
+	if kept.Owner == nil || kept.At < muxDataHeader || len(kept.Data) == 0 || len(kept.Data) > muxMaxData || kept.At+len(kept.Data) > len(kept.Owner.Data) {
+		return false, nil
+	}
+	for deadline := time.Now().Add(keptExclusive); kept.Owner.Owners() > 2; time.Sleep(100 * time.Microsecond) {
+		if time.Now().After(deadline) {
+			return false, nil
+		}
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	start, err := s.reserveAll(len(kept.Data))
+	if err != nil {
+		return false, err
+	}
+	at := kept.At - muxDataHeader
+	raw := kept.Owner.Data[at : kept.At+len(kept.Data) : kept.At+len(kept.Data)]
+	frameHeader(raw, muxData, s.id)
+	binary.BigEndian.PutUint64(raw[10:18], start)
+	raw[18] = 0 // flags
+	kept.Owner.Retain()
+	b := &frameBuilder{id: s.id, offset: start, limit: len(kept.Data), bytes: len(kept.Data), frames: []muxFrame{{raw: raw, buf: kept.Owner, at: at}}}
+	if err := s.publish(b); err != nil {
+		b.release()
+		return false, err
+	}
+	return true, nil
+}
+
+// reserveAll waits until n bytes of send credit are available.
+func (s *muxStream) reserveAll(n int) (uint64, error) {
+	for {
+		start, limit, err := s.reserve()
+		if err != nil || limit >= n {
+			return start, err
+		}
+		m := s.m
+		m.mu.Lock()
+		short := s.peerLimit-s.sendNext < uint64(n)
+		m.mu.Unlock()
+		if !short {
+			continue
+		}
+		select {
+		case <-s.sendWake:
+		case <-s.ctx.Done():
+			return 0, s.errOr(net.ErrClosed)
+		}
+	}
 }
 
 func (s *muxStream) Write(p []byte) (int, error) {

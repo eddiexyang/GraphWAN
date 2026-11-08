@@ -618,3 +618,69 @@ func TestMuxReceiveKeepsLinkBuffer(t *testing.T) {
 		t.Fatal("buffer kept after its bytes were read")
 	}
 }
+
+// A session's kept bytes go out on its next hop in the buffers that hold them,
+// once no Link still sends their earlier frame, and arrive unchanged.
+func TestMuxResendsKeptBuffers(t *testing.T) {
+	p := newMuxPair(t)
+	old := p.a.newStreamLocked(2)
+	old.Begin(0)
+	keep := streamproxy.NewKeep()
+	old.SetRetention(keep)
+	payload := bytes.Repeat([]byte("kept"), muxMaxData/4)
+	if _, err := old.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	original := old.frames[0]
+	// A Link is still sending the old frame when the hop fails.
+	var dst [4][]byte
+	var owners [4]*packetbuf.Buffer
+	n := p.a.PullStream(nil, dst[:], owners[:])
+	p.a.mu.Lock()
+	old.failLocked(errStreamReset)
+	p.a.mu.Unlock()
+
+	next := p.a.newStreamLocked(4)
+	next.Begin(0)
+	chunks, ok := keep.From(0)
+	if !ok || len(chunks) != 1 {
+		t.Fatal("nothing kept")
+	}
+	sent := make(chan bool, 1)
+	go func() {
+		ok, err := next.WriteKept(chunks[0])
+		if err != nil {
+			t.Error(err)
+		}
+		sent <- ok
+	}()
+	select {
+	case <-sent:
+		t.Fatal("rewrote a header a Link was still sending")
+	case <-time.After(50 * time.Millisecond):
+	}
+	packetbuf.ReleaseAll(owners[:n]) // the Link is done
+	if !<-sent {
+		t.Fatal("kept buffer not reused")
+	}
+	chunks[0].Owner.Release()
+	frame := next.frames[0]
+	if frame.buf != original.buf || &frame.raw[muxDataHeader] != &original.raw[muxDataHeader] {
+		t.Fatal("kept bytes were copied")
+	}
+	if id := binary.BigEndian.Uint64(frame.raw[2:10]); id != next.id {
+		t.Fatalf("frame for stream %d, want %d", id, next.id)
+	}
+	n = p.a.PullStream(nil, dst[:], owners[:])
+	for i, raw := range dst[:n] {
+		if !p.b.ReceiveStream(nil, raw[1:], nil) {
+			t.Fatal("invalid frame")
+		}
+		owners[i].Release()
+	}
+	r := p.b.streams[next.id]
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(r, got); err != nil || !bytes.Equal(got, payload) {
+		t.Fatal("resent bytes changed", err)
+	}
+}

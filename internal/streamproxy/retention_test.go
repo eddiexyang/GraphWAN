@@ -15,7 +15,7 @@ func TestAgentRetention(t *testing.T) {
 	var counters Counters
 	a, b := NewKeep(), NewKeep()
 	a.budget, b.budget = &counters.retained, &counters.retained
-	a.Add(make([]byte, 1<<20), nil)
+	a.Add(make([]byte, 1<<20), nil, 0)
 	if counters.Retained() != 1<<20 {
 		t.Fatalf("retained %d", counters.Retained())
 	}

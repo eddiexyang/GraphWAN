@@ -102,6 +102,9 @@ func (b *Buffer) Retain() {
 	}
 }
 
+// Owners reports how many owners hold the buffer now.
+func (b *Buffer) Owners() int { return int(b.refs.Load()) + 1 }
+
 func (b *Buffer) Release() {
 	if b == nil || b.refs.Add(-1) >= 0 {
 		return
