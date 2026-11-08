@@ -162,12 +162,37 @@ func TestOneWayClusterChannel(t *testing.T) {
 	nodes[0].layer.channels.mu.Unlock()
 	session.Close()
 	wait(func() bool { return forward.Load() > 1 })
-	wait(func() bool { return nodes[0].Raft.State() == raft.Leader || nodes[1].Raft.State() == raft.Leader })
-	leader = 0
-	if nodes[1].Raft.State() == raft.Leader {
-		leader = 1
+	// An election may follow the reconnect; a write that loses its leader
+	// is retried on the next one, as a client would.
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		wait(func() bool { return nodes[0].Raft.State() == raft.Leader || nodes[1].Raft.State() == raft.Leader })
+		leader = 0
+		if nodes[1].Raft.State() == raft.Leader {
+			leader = 1
+		}
+		wait(func() bool {
+			_, id := nodes[1-leader].Raft.LeaderWithID()
+			return id == raft.ServerID(identities[leader].ID)
+		})
+		current, err := dbs[1-leader].Read()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = dbs[1-leader].Update(current.Revision, func(s *model.State) error { s.Servers[0].Name = "after-reconnect"; return nil })
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, store.ErrUnavailable) || time.Now().After(deadline) {
+			t.Fatal(err)
+		}
 	}
-	write(leader, "after-reconnect")
+	for _, db := range dbs {
+		s, err := db.Read()
+		if err != nil || s.Servers[0].Name != "after-reconnect" {
+			t.Fatalf("write not replicated: %v", err)
+		}
+	}
 }
 
 func TestChannelDuplicateAndPrune(t *testing.T) {
