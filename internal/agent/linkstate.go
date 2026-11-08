@@ -49,6 +49,7 @@ func (r *DataPlane) linkStateHandler() mesh.LinkStateHandler {
 		Receive: func(network, peer model.ID, raw []byte) {
 			_ = r.linkState.Receive(network, peer, raw)
 		},
+		LinkFailed: r.linkState.Kick,
 	}
 }
 

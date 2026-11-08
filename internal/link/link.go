@@ -110,6 +110,9 @@ type Options struct {
 	// answered; see sizeprobe.go. SizeProbeHello is set by the accepting side.
 	SizeProbe      bool
 	SizeProbeHello bool
+	// Failed is called after the Link stopped, so routes leave it without
+	// waiting to poll it. It must not block.
+	Failed func()
 }
 
 // CompactHeader writes the omitted packet header into header[:packet.HeaderSize]
@@ -888,6 +891,7 @@ func (l *Link) pullStreams(dst [][]byte, owners []*packetbuf.Buffer) int {
 // Link that selection had already dropped.
 func (l *Link) healthLoop() {
 	defer l.wg.Done()
+	defer l.failed()
 	defer l.stop()
 	now := time.Now()
 	next := now
@@ -1013,6 +1017,12 @@ func (l *Link) logUp(attrs ...any) {
 		if up := l.up.Load(); up != nil {
 			(*up)()
 		}
+	}
+}
+
+func (l *Link) failed() {
+	if l.options.Failed != nil {
+		l.options.Failed()
 	}
 }
 

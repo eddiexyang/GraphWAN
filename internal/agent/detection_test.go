@@ -52,7 +52,9 @@ func TestFailureDetectionTime(t *testing.T) {
 	}
 	elapsed, moved = failover(t, 0, 10*time.Second)
 	t.Logf("default: rerouted after %v", elapsed.Round(time.Millisecond))
-	if !moved || elapsed < 3*time.Second || elapsed > 6*time.Second {
+	// The default 3 s Link timeout counts from the last confirmed heartbeat,
+	// up to one 1 s heartbeat before the neighbor went silent.
+	if !moved || elapsed < 2*time.Second || elapsed > 6*time.Second {
 		t.Fatalf("default: rerouted %v after %v", moved, elapsed)
 	}
 	if elapsed, moved = failover(t, 60_000, 3*time.Second); moved {

@@ -10,6 +10,8 @@ import (
 type LinkStateHandler struct {
 	Ready   func(network, peer model.ID)
 	Receive func(network, peer model.ID, raw []byte)
+	// LinkFailed is called when any Link stops; it must not block.
+	LinkFailed func()
 }
 
 // EnableLinkState is called before this Mesh is published to the dataplane.

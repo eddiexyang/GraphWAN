@@ -72,13 +72,16 @@ func TestLinkStateRoutesWithoutController(t *testing.T) {
 		return r.NextHop == d && r.Cost == 31
 	})
 	t.Logf("rerouted %v after B failed", time.Since(failed).Round(10*time.Millisecond))
-	for _, e := range agents[0].LinkState().Networks[0].Edges {
-		if e.A == a && e.B == b || e.A == b && e.B == a {
-			if e.Usable {
-				t.Fatalf("A-B still usable: %+v", e)
+	// C's report that B-C failed can move the route before A's own Link to B
+	// times out; A-B follows within the failover time.
+	waitFor(t, model.FailureDetectionTime(0), "A-B to become unusable", func() bool {
+		for _, e := range agents[0].LinkState().Networks[0].Edges {
+			if e.A == a && e.B == b || e.A == b && e.B == a {
+				return !e.Usable
 			}
 		}
-	}
+		return false
+	})
 }
 
 // installedRoute reads the forwarding table the router actually uses.

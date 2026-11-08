@@ -590,6 +590,9 @@ func (g *group) register(channel *peer.Channel, candidate link.Candidate, pathEx
 	}
 	options.SizeProbe, options.SizeProbeHello = caps.sizeProbe, caps.sizeProbeHello
 	options.Resume = caps.resume
+	if h := g.mesh.linkStateHandler(); h != nil {
+		options.Failed = h.LinkFailed
+	}
 	l, err := link.New(g.ctx, channel, link.Info{NetworkID: cfg.network, EdgeID: cfg.peer.Edge.ID, PeerID: cfg.peer.Node.ID, CandidateID: candidate.ID, Transport: candidate.Endpoint.Transport}, options)
 	if err != nil {
 		g.mu.Unlock()

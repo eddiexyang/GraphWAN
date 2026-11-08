@@ -86,13 +86,22 @@ type Engine struct {
 	observed bool // local link state has been polled at least once
 	stats    Stats
 	events   []Event
+	kick     chan struct{}
 }
 
 func New(cb Callbacks) *Engine {
 	if cb.Now == nil {
 		cb.Now = time.Now
 	}
-	return &Engine{cb: cb, networks: map[model.ID]*network{}}
+	return &Engine{cb: cb, networks: map[model.ID]*network{}, kick: make(chan struct{}, 1)}
+}
+
+// Kick runs a step now: a local Link failed. It never blocks.
+func (e *Engine) Kick() {
+	select {
+	case e.kick <- struct{}{}:
+	default:
+	}
 }
 
 // Active reports whether the configuration carries topology, in which case
@@ -280,13 +289,25 @@ func (n *network) floodTargets(except model.ID) []model.ID {
 func (e *Engine) Run(ctx context.Context) {
 	t := time.NewTicker(tick)
 	defer t.Stop()
+	spf := time.NewTimer(tick)
+	defer spf.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			e.Step()
+		case <-e.kick:
+		case <-spf.C:
 		}
+		e.Step()
+		// A scheduled computation runs when due, not at the next tick.
+		e.mu.Lock()
+		wait := tick
+		if !e.spfAt.IsZero() {
+			wait = max(e.spfAt.Sub(e.cb.Now()), 0)
+		}
+		e.mu.Unlock()
+		spf.Reset(wait)
 	}
 }
 
@@ -306,17 +327,25 @@ func (e *Engine) Step() {
 	e.observed = true
 	for id, n := range e.networks {
 		if !maps(n.local, local[id]) {
+			lost := false
 			for _, edge := range n.config.Topology {
 				if was, is := n.local[edge.ID], local[id][edge.ID]; was != is {
 					kind := "edge-down"
 					if is {
 						kind = "edge-up"
 					}
+					lost = lost || was
 					e.eventLocked(kind, id, "", edge.ID, 0)
 				}
 			}
 			n.local = copyMap(local[id])
 			n.dirty = true
+			// A failed edge of this Agent moves its routes in this step. A new
+			// one waits SPFDelay for the neighbour's database, so routes are
+			// not computed from part of it.
+			if lost {
+				e.spfAt = now
+			}
 		}
 		for origin, en := range n.db {
 			if now.Sub(en.arrived) > en.lsa.maxAge() {

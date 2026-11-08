@@ -177,6 +177,21 @@ func TestLinkFailureReroutesWithoutController(t *testing.T) {
 	}
 }
 
+// A failure of this Agent's own Link moves its routes in the step that sees
+// it, without waiting for an SPF delay or the next tick.
+func TestOwnLinkFailureReroutesInTheSameStep(t *testing.T) {
+	l := newLab(t)
+	l.run(time.Second)
+	if r := l.route(nodeA, nodeC); r.NextHop != nodeB {
+		t.Fatalf("initial A->C %+v", r)
+	}
+	l.down[edgeAB] = true
+	l.engines[nodeA].Step()
+	if r := l.route(nodeA, nodeC); r.NextHop != nodeD {
+		t.Fatalf("A->C in the step that saw A-B fail %+v", r)
+	}
+}
+
 func TestEndpointWithoutLinkStateDefersToNeighbour(t *testing.T) {
 	l := newLab(t, nodeD)
 	l.legacyD = true
