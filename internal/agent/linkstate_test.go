@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"fmt"
-	"net"
 	"testing"
 	"time"
 
@@ -21,13 +20,8 @@ func TestLinkStateRoutesWithoutController(t *testing.T) {
 	state.Agents = state.Agents[:4]
 	state.Networks[0].Nodes = state.Networks[0].Nodes[:4]
 	for i := range state.Agents {
-		listener, err := net.ListenPacket("udp4", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		port := listener.LocalAddr().(*net.UDPAddr).Port
-		listener.Close()
-		state.Agents[i].ListenPort = uint16(port)
+		port := testutil.AgentPort(t)
+		state.Agents[i].ListenPort = port
 		state.Agents[i].Endpoints = []model.Endpoint{{ID: testutil.ID(30 + i), Transport: model.UDP, Source: model.Manual, URL: fmt.Sprintf("udp://127.0.0.1:%d", port)}}
 	}
 	for i := range state.Networks[0].Edges {

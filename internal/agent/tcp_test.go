@@ -282,12 +282,7 @@ func graphAgents(t *testing.T, carrier model.Transport, options streamOptions, c
 	state.Networks[0].Nodes = state.Networks[0].Nodes[:count]
 	state.Networks[0].Edges = state.Networks[0].Edges[:edges]
 	for i := range state.Agents {
-		listener, err := net.Listen("tcp4", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		port := uint16(listener.Addr().(*net.TCPAddr).Port)
-		listener.Close()
+		port := testutil.AgentPort(t)
 		state.Agents[i].ListenPort = port
 		state.Agents[i].Endpoints = []model.Endpoint{{ID: testutil.ID(30 + i), Transport: carrier, Source: model.Manual, URL: fmt.Sprintf("%s://127.0.0.1:%d", carrier, port)}}
 	}

@@ -107,12 +107,7 @@ func testTCPPacketsReuseConvergedTunnels(t *testing.T, carrier model.Transport) 
 	state.Networks[0].Nodes = state.Networks[0].Nodes[:3]
 	state.Networks[0].Edges = state.Networks[0].Edges[:2]
 	for i := range state.Agents {
-		listener, err := net.Listen("tcp4", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		state.Agents[i].ListenPort = uint16(listener.Addr().(*net.TCPAddr).Port)
-		listener.Close()
+		state.Agents[i].ListenPort = testutil.AgentPort(t)
 		state.Agents[i].Endpoints = nil
 	}
 	entrance := fmt.Sprintf("127.0.0.1:%d", state.Agents[1].ListenPort)
