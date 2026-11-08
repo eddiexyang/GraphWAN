@@ -91,6 +91,9 @@ func (s Snapshot) Validate(agentID ID) error {
 				return err
 			}
 			subnetDirectory[d.NodeID] = d.AdvertisedSubnets
+			if len(d.PublicKey) != 0 && len(d.PublicKey) != ed25519.PublicKeySize {
+				return fmt.Errorf("directory node %s has an invalid public key", d.NodeID)
+			}
 			if err := addID(d.NodeID); err != nil {
 				return err
 			}

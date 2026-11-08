@@ -1,6 +1,7 @@
 package routing_test
 
 import (
+	"bytes"
 	"math/rand/v2"
 	"reflect"
 	"testing"
@@ -142,5 +143,35 @@ func TestEqualCostAlternates(t *testing.T) {
 	}
 	if local := routing.LocalRoutes(config, func(model.TopologyEdge) bool { return true }); !reflect.DeepEqual(local, config.Routes) {
 		t.Fatalf("local routes %+v, compiled %+v", local, config.Routes)
+	}
+}
+
+// Every Node in the directory carries its Agent's identity, including Nodes
+// that are not neighbors, so end-to-end sessions can authenticate them.
+func TestDirectoryCarriesAgentKeys(t *testing.T) {
+	state := testutil.Topology()
+	snapshot, err := routing.Compile(state, state.Agents[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := map[model.ID][]byte{}
+	for _, a := range state.Agents {
+		keys[a.ID] = a.PublicKey
+	}
+	n := snapshot.Networks[0]
+	if len(n.Directory) != len(state.Networks[0].Nodes) {
+		t.Fatalf("directory has %d nodes", len(n.Directory))
+	}
+	for _, d := range n.Directory {
+		for _, node := range state.Networks[0].Nodes {
+			if node.ID == d.NodeID && !bytes.Equal(d.PublicKey, keys[node.AgentID]) {
+				t.Fatalf("node %s key %x, want its Agent's", d.NodeID, d.PublicKey)
+			}
+		}
+	}
+	bad := snapshot.Clone()
+	bad.Networks[0].Directory[1].PublicKey = []byte{1, 2, 3}
+	if err := bad.Validate(state.Agents[0].ID); err == nil {
+		t.Fatal("accepted a malformed directory key")
 	}
 }
