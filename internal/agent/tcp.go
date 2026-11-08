@@ -376,6 +376,28 @@ func (c *flowConn) Abort() {
 	}
 }
 
+// ReadFrom and ReadInto keep the stack connection's direct copies, which
+// write a session's bytes into the stack and read the stack's bytes into
+// stream frames without an intermediate buffer.
+func (c *flowConn) ReadFrom(src io.Reader) (int64, error) {
+	if conn, ok := c.Conn.(io.ReaderFrom); ok {
+		return conn.ReadFrom(src)
+	}
+	return io.Copy(struct{ io.Writer }{c.Conn}, src)
+}
+
+func (c *flowConn) ReadInto(dst io.Writer) (int, error) {
+	if conn, ok := c.Conn.(interface{ ReadInto(io.Writer) (int, error) }); ok {
+		return conn.ReadInto(dst)
+	}
+	buf := make([]byte, 64<<10)
+	n, err := c.Conn.Read(buf)
+	if n > 0 {
+		dst.Write(buf[:n])
+	}
+	return n, err
+}
+
 func (r *DataPlane) acceptTCP(parent context.Context, network, remote model.ID, s streamproxy.Conn) {
 	ctx, cancel := context.WithTimeout(parent, streamproxy.ConnectTimeout)
 	defer cancel()
