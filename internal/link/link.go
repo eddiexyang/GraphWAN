@@ -873,12 +873,19 @@ func (l *Link) writeLoop() {
 	}
 }
 
+// streamBatch bounds the stream frames of one write, about the kernel's
+// unsent backlog, so a heartbeat waits behind no more than that: on a Link
+// that has just taken over a bulk transfer the TCP window is still small, and
+// a heartbeat behind a whole batch could outlast the peer's timeout.
+const streamBatch = 8
+
 // pullStreams re-arms the wake signal when the handler may hold more frames,
 // so packets and control messages still get their turn between batches.
 func (l *Link) pullStreams(dst [][]byte, owners []*packetbuf.Buffer) int {
 	if !l.streamsReady.Load() {
 		return 0
 	}
+	dst, owners = dst[:min(len(dst), streamBatch)], owners[:min(len(owners), streamBatch)]
 	count := l.options.Streams.PullStream(l, dst, owners)
 	if count == len(dst) {
 		l.WakeStreams()
