@@ -98,11 +98,15 @@ type mux struct {
 	resets        []muxResetEntry
 	lostSince     time.Time
 	closed        bool
-	// queued is the bytes of frames waiting for the Link writer; writers wait
-	// while it reaches muxQueue, so a stream reads no further ahead of its
-	// Link than that and the rest waits in its source. drained is closed when
-	// it falls below.
+	// queued is the bytes of frames waiting for the Link writer. Once it
+	// reaches muxQueue a stream waits while it holds its share of that, so a
+	// stream reads no further ahead of its Link than that and the rest waits
+	// in its source, and a stream that starts later, such as a session sending
+	// again on a new chain, is not queued behind another's backlog. Nothing is
+	// queued past twice muxQueue. drained is closed when frames leave while
+	// writers wait on it.
 	queued  int
+	waiting int
 	drained chan struct{}
 }
 
@@ -339,10 +343,19 @@ func (m *mux) close() {
 func (m *mux) queueLocked(s *muxStream, n int) {
 	s.queued += n
 	m.queued += n
-	if n < 0 && m.queued < muxQueue {
+	if n < 0 && m.waiting > 0 {
 		close(m.drained)
 		m.drained = make(chan struct{})
+		m.waiting = 0
 	}
+}
+
+// fullLocked reports whether s waits for the Link writer before queueing more.
+func (m *mux) fullLocked(s *muxStream) bool {
+	if m.queued < muxQueue {
+		return false
+	}
+	return m.queued >= 2*muxQueue || s.queued >= muxQueue/max(1, len(m.queuedStreams))
 }
 
 func (m *mux) enqueueLocked(s *muxStream) {
@@ -749,7 +762,10 @@ func (s *muxStream) reserve() (uint64, int, error) {
 		}
 		available := s.peerLimit - s.sendNext
 		start := s.sendNext
-		drained, full := m.drained, m.queued >= muxQueue
+		drained, full := m.drained, m.fullLocked(s)
+		if full {
+			m.waiting++
+		}
 		m.mu.Unlock()
 		if full {
 			// The Link writer has enough waiting: the bytes stay in their

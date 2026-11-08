@@ -735,3 +735,38 @@ func TestMuxWritersWaitForTheLink(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// A stream that starts writing while another fills the queue, as a session
+// sending again on a new chain does, is queued at once with its share.
+func TestMuxLaterStreamIsNotQueuedBehindABacklog(t *testing.T) {
+	p := newMuxPair(t)
+	first := p.a.newStreamLocked(2)
+	go first.Write(make([]byte, 3*muxQueue))
+	waitFor(t, "the queue to fill", func() bool {
+		p.a.mu.Lock()
+		defer p.a.mu.Unlock()
+		return p.a.queued >= muxQueue
+	})
+	later := p.a.newStreamLocked(4)
+	wrote := make(chan error, 1)
+	go func() {
+		_, err := later.Write(make([]byte, muxQueue/4))
+		wrote <- err
+	}()
+	select {
+	case err := <-wrote:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a later stream waited behind another's backlog")
+	}
+	p.a.mu.Lock()
+	defer p.a.mu.Unlock()
+	if p.a.queued > 2*muxQueue+muxBurst*(muxDataHeader+muxMaxData) {
+		t.Errorf("%d bytes queued, want at most about %d", p.a.queued, 2*muxQueue)
+	}
+	if first.queued > muxQueue+muxBurst*(muxDataHeader+muxMaxData) {
+		t.Errorf("the first stream queued %d bytes, want about %d", first.queued, muxQueue)
+	}
+}
