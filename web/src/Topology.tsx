@@ -1538,6 +1538,21 @@ export default function Topology({
                   <option value="ecmp">ECMP (hash per flow)</option>
                 </select>
               </Field>
+              <Field label="Failure detection (ms)">
+                <input
+                  type="number"
+                  min={750}
+                  max={120000}
+                  placeholder="6000"
+                  value={network.failure_detection_ms ?? ''}
+                  onChange={(e) =>
+                    change({
+                      ...network,
+                      failure_detection_ms: Number(e.target.value) || undefined,
+                    })
+                  }
+                />
+              </Field>
             </fieldset>
             {!!network.groups?.length && (
               <>

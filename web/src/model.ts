@@ -60,6 +60,7 @@ export type Network = {
   nodes: Node[]
   edges: Edge[]
   equal_cost_paths?: 'lowest-id' | 'ecmp'
+  failure_detection_ms?: number
 }
 export type ServerEndpoint = {
   id: string
