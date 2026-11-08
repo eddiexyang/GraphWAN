@@ -109,3 +109,30 @@ func TestMuxSessionAbortReachesPeer(t *testing.T) {
 		t.Fatal("peer did not see the connection reset")
 	}
 }
+
+// An end that reads up to a FIN which arrived before it finished reading
+// acknowledges at once: the far end needs that to finish the session.
+func TestMuxSessionAcknowledgesTheEndAtOnce(t *testing.T) {
+	p := newMuxPair(t)
+	s, peer := sessionPair(t, p)
+	payload := bytes.Repeat([]byte("x"), 64<<10)
+	if _, err := s.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	s.CloseWrite()
+	waitFor(t, "the FIN", func() bool {
+		p.b.mu.Lock()
+		defer p.b.mu.Unlock()
+		return peer.finRecv
+	})
+	if raw, err := io.ReadAll(peer); err != nil || !bytes.Equal(raw, payload) {
+		t.Fatal("bytes changed", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for s.PeerDelivered() != 100+uint64(len(payload))+1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("delivered %d, want %d", s.PeerDelivered(), 100+len(payload)+1)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,8 @@ import (
 
 	"github.com/eWloYW8/GraphWAN/internal/link"
 	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
+	"github.com/eWloYW8/GraphWAN/internal/streamproxy"
 	"github.com/eWloYW8/GraphWAN/internal/testutil"
 )
 
@@ -364,6 +367,8 @@ func (r *sparseMuxReader) ReadInto(w io.Writer) (int, error) {
 	return w.Write(r.payload)
 }
 
+// A builder takes one pooled buffer per frame it fills, however much the read
+// window allowed.
 func TestMuxSparseBatchStorage(t *testing.T) {
 	p := newMuxPair(t)
 	s := p.a.newStreamLocked(2)
@@ -371,22 +376,21 @@ func TestMuxSparseBatchStorage(t *testing.T) {
 		b := newFrameBuilder(s.id, s.sendNext, muxBurst*muxMaxData)
 		payload := bytes.Repeat([]byte("x"), size)
 		b.Write(payload)
-		original := &b.chunk[0]
 		if err := s.publish(b); err != nil {
 			t.Fatal(err)
 		}
-		if size < muxMaxData && len(b.chunk) > 2*b.used {
-			t.Errorf("%d bytes retained a %d-byte batch", size, len(b.chunk))
-		}
-		if size >= muxMaxData && &b.chunk[0] != original {
-			t.Fatal("bulk read was copied")
+		if want := (size + muxMaxData - 1) / muxMaxData; len(b.frames) != want {
+			t.Errorf("%d bytes took %d frames, want %d", size, len(b.frames), want)
 		}
 		var got []byte
 		for _, f := range b.frames {
+			if f.buf == nil || &f.raw[0] != &f.buf.Data[0] {
+				t.Fatal("frame not in its pooled buffer")
+			}
 			got = append(got, f.raw[muxDataHeader:]...)
 		}
 		if !bytes.Equal(got, payload) {
-			t.Fatal("compaction changed payload")
+			t.Fatal("payload changed")
 		}
 		p.a.receiveAck(s.id, s.sendNext, muxWindow, 0, false)
 	}
@@ -399,11 +403,13 @@ func TestMuxSparseACKAndCredit(t *testing.T) {
 	payload := bytes.Repeat([]byte("x"), 31)
 	transfer := func(from, to *mux) int {
 		var dst [128][]byte
-		n := from.PullStream(nil, dst[:])
-		for _, raw := range dst[:n] {
+		var owners [128]*packetbuf.Buffer
+		n := from.PullStream(nil, dst[:], owners[:])
+		for i, raw := range dst[:n] {
 			if !to.ReceiveStream(nil, raw[1:]) {
 				t.Fatal("invalid frame")
 			}
+			owners[i].Release()
 		}
 		return n
 	}
@@ -525,4 +531,60 @@ func TestMuxStreamIDExhaustion(t *testing.T) {
 	if _, err := p.a.Open(p.ctx); err == nil {
 		t.Fatal("stream ID wrapped around")
 	}
+}
+
+// A data frame's pooled buffer returns only after the stream, the session's
+// keep and the sending Link have all let it go, in any order.
+func TestMuxFrameBufferOwners(t *testing.T) {
+	p := newMuxPair(t)
+	s := p.a.newStreamLocked(2)
+	s.Begin(0)
+	keep := streamproxy.NewKeep()
+	s.SetRetention(keep)
+	if _, err := s.Write(bytes.Repeat([]byte("x"), 3*muxMaxData)); err != nil {
+		t.Fatal(err)
+	}
+	frames := append([]muxFrame(nil), s.frames...)
+	var dst [16][]byte
+	var owners [16]*packetbuf.Buffer
+	n := p.a.PullStream(nil, dst[:], owners[:])
+	freed := func() int {
+		count := 0
+		for _, f := range frames {
+			if f.buf.Data == nil {
+				count++
+			}
+		}
+		return count
+	}
+	p.a.receiveAck(s.id, s.sendNext, muxWindow, 0, false) // the stream lets go
+	keep.Release(uint64(3 * muxMaxData))                  // delivered
+	if freed() != 0 {
+		t.Fatal("a buffer returned while the Link still sent it")
+	}
+	packetbuf.ReleaseAll(owners[:n])
+	if freed() != len(frames) {
+		t.Fatalf("%d of %d buffers returned", freed(), len(frames))
+	}
+}
+
+// Frames built in reused pooled storage carry no stale header bytes.
+func TestMuxFrameHeaderInReusedStorage(t *testing.T) {
+	for range 64 {
+		b := packetbuf.Get(muxDataHeader + muxMaxData)
+		for i := range b.Data {
+			b.Data[i] = 0xff
+		}
+		b.Release()
+	}
+	builder := newFrameBuilder(7, 100, 3)
+	builder.Write([]byte("abc"))
+	frame := builder.finish()[0]
+	want := make([]byte, muxDataHeader)
+	frameHeader(want, muxData, 7)
+	binary.BigEndian.PutUint64(want[10:18], 100)
+	if !bytes.Equal(frame.raw[:muxDataHeader], want) {
+		t.Fatalf("header %x, want %x", frame.raw[:muxDataHeader], want)
+	}
+	builder.release()
 }

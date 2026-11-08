@@ -120,11 +120,12 @@ type LinkStateHandler interface {
 }
 
 // StreamHandler owns stream state for every Link of one Edge. Frames returned by
-// PullStream start with the stream message kind and must not be modified later.
+// PullStream start with the stream message kind and must not be modified later;
+// the Link releases each frame's owner, if any, once it sent the frame.
 type StreamHandler interface {
 	StreamsReady(*Link)
 	ReceiveStream(*Link, []byte) bool
-	PullStream(*Link, [][]byte) int
+	PullStream(*Link, [][]byte, []*packetbuf.Buffer) int
 }
 
 func (o Options) defaults() Options {
@@ -796,7 +797,7 @@ func (l *Link) writeLoop() {
 		if count == 0 && preferStreams {
 			select {
 			case <-l.streamWake:
-				count = l.pullStreams(messages[:limit])
+				count = l.pullStreams(messages[:limit], owners[:limit])
 			default:
 			}
 		}
@@ -809,7 +810,7 @@ func (l *Link) writeLoop() {
 			case messages[0] = <-l.linkStateOut:
 				count = 1
 			case <-l.streamWake:
-				count = l.pullStreams(messages[:limit])
+				count = l.pullStreams(messages[:limit], owners[:limit])
 			case <-l.dataReady:
 				l.queueMu.Lock()
 				for l.dataCount > 0 && count < limit {
@@ -859,11 +860,11 @@ func (l *Link) writeLoop() {
 
 // pullStreams re-arms the wake signal when the handler may hold more frames,
 // so packets and control messages still get their turn between batches.
-func (l *Link) pullStreams(dst [][]byte) int {
+func (l *Link) pullStreams(dst [][]byte, owners []*packetbuf.Buffer) int {
 	if !l.streamsReady.Load() {
 		return 0
 	}
-	count := l.options.Streams.PullStream(l, dst)
+	count := l.options.Streams.PullStream(l, dst, owners)
 	if count == len(dst) {
 		l.WakeStreams()
 	}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/eWloYW8/GraphWAN/internal/link"
+	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
 	"github.com/eWloYW8/GraphWAN/internal/secure"
 	"github.com/eWloYW8/GraphWAN/internal/streamproxy"
 )
@@ -71,6 +72,7 @@ func (e *streamError) Unwrap() error { return e.errno }
 type muxFrame struct {
 	end uint64 // offset after this frame; a FIN occupies one virtual byte
 	raw []byte
+	buf *packetbuf.Buffer // pooled storage of a data frame, or nil
 }
 
 type mux struct {
@@ -348,8 +350,9 @@ func frameHeader(raw []byte, kind byte, id uint64) {
 }
 
 // PullStream hands the Link writer immutable frames. Frames stay referenced by
-// their stream until acknowledged, so a later Link can send them again.
-func (m *mux) PullStream(l *link.Link, dst [][]byte) int {
+// their stream until acknowledged, so a later Link can send them again; the
+// writer owns a data frame's buffer in owners until it has sent the frame.
+func (m *mux) PullStream(l *link.Link, dst [][]byte, owners []*packetbuf.Buffer) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if l != m.current {
@@ -364,7 +367,7 @@ func (m *mux) PullStream(l *link.Link, dst [][]byte) int {
 			raw = append(raw, 1)
 		}
 		m.resets = m.resets[1:]
-		dst[n] = raw
+		dst[n], owners[n] = raw, nil
 		n++
 	}
 	for n < len(dst) && len(m.pending) > 0 {
@@ -372,14 +375,16 @@ func (m *mux) PullStream(l *link.Link, dst [][]byte) int {
 		m.pending[0] = nil
 		m.pending = m.pending[1:]
 		if s.ackDue {
-			dst[n] = s.ackFrameLocked()
+			dst[n], owners[n] = s.ackFrameLocked(), nil
 			n++
 			if s.session {
 				s.finishLocked()
 			}
 		}
 		for burst := 0; burst < muxBurst && n < len(dst) && s.unsent < len(s.frames); burst++ {
-			dst[n] = s.frames[s.unsent].raw
+			frame := s.frames[s.unsent]
+			frame.buf.Retain()
+			dst[n], owners[n] = frame.raw, frame.buf
 			s.unsent++
 			n++
 		}
@@ -519,6 +524,7 @@ func (m *mux) receiveAck(id, received, limit, delivered uint64, explicit bool) {
 		s.acked = received
 		drop := 0
 		for drop < len(s.frames) && s.frames[drop].end <= received {
+			s.frames[drop].buf.Release()
 			s.frames[drop] = muxFrame{}
 			drop++
 		}
@@ -620,40 +626,40 @@ func (s *muxStream) ackFrameLocked() []byte {
 	return raw
 }
 
-// frameBuilder lays out data frames in one allocation as bytes arrive, as
-// peer.Stream's record builder does. Frames stay referenced until acknowledged.
+// frameBuilder lays out data frames in pooled buffers as bytes arrive, as
+// peer.Stream's record builder does, taking a buffer only for bytes it holds.
+// Each frame's buffer has one owner per holder: the stream until the frame is
+// acknowledged, a session end's keep until delivery, and a Link while it
+// sends the frame.
 type frameBuilder struct {
 	id     uint64
 	offset uint64
 	limit  int
 	bytes  int
-	chunk  []byte
-	used   int
 	frames []muxFrame
-	starts []int
 }
 
 func newFrameBuilder(id, offset uint64, limit int) *frameBuilder {
-	count := (limit + muxMaxData - 1) / muxMaxData
-	return &frameBuilder{id: id, offset: offset, limit: limit, chunk: make([]byte, limit+count*muxDataHeader), frames: make([]muxFrame, 0, count), starts: make([]int, 0, count)}
+	return &frameBuilder{id: id, offset: offset, limit: limit, frames: make([]muxFrame, 0, (limit+muxMaxData-1)/muxMaxData)}
 }
 
 func (b *frameBuilder) Write(data []byte) (int, error) {
 	written := 0
 	for len(data) > 0 && b.bytes < b.limit {
 		last := len(b.frames) - 1
-		if last < 0 || b.used-b.starts[last]-muxDataHeader == muxMaxData {
-			raw := b.chunk[b.used : b.used+muxDataHeader]
+		if last < 0 || len(b.frames[last].raw)-muxDataHeader == muxMaxData {
+			buf := packetbuf.Get(muxDataHeader + muxMaxData)
+			// Pooled storage is not cleared: every header byte is written.
+			raw := buf.Data[:muxDataHeader]
 			frameHeader(raw, muxData, b.id)
 			binary.BigEndian.PutUint64(raw[10:18], b.offset+uint64(b.bytes))
-			b.frames = append(b.frames, muxFrame{})
-			b.starts = append(b.starts, b.used)
-			b.used += muxDataHeader
+			raw[18] = 0 // flags
+			b.frames = append(b.frames, muxFrame{raw: raw, buf: buf})
 			last++
 		}
-		n := min(len(data), b.limit-b.bytes, muxMaxData-(b.used-b.starts[last]-muxDataHeader))
-		copy(b.chunk[b.used:], data[:n])
-		b.used += n
+		frame := &b.frames[last]
+		n := min(len(data), b.limit-b.bytes, muxMaxData-(len(frame.raw)-muxDataHeader))
+		frame.raw = append(frame.raw, data[:n]...)
 		b.bytes += n
 		written += n
 		data = data[n:]
@@ -666,15 +672,20 @@ func (b *frameBuilder) Write(data []byte) (int, error) {
 
 func (b *frameBuilder) finish() []muxFrame {
 	offset := b.offset
-	for i, start := range b.starts {
-		end := b.used
-		if i+1 < len(b.starts) {
-			end = b.starts[i+1]
-		}
-		offset += uint64(end - start - muxDataHeader)
-		b.frames[i] = muxFrame{end: offset, raw: b.chunk[start:end:end]}
+	for i := range b.frames {
+		raw := b.frames[i].raw
+		offset += uint64(len(raw) - muxDataHeader)
+		b.frames[i].end, b.frames[i].raw = offset, raw[:len(raw):len(raw)]
 	}
 	return b.frames
+}
+
+// release returns the buffers of frames that were not published.
+func (b *frameBuilder) release() {
+	for _, frame := range b.frames {
+		frame.buf.Release()
+	}
+	b.frames = nil
 }
 
 // reserve waits for send credit and returns the next offset and how many
@@ -709,14 +720,6 @@ func (s *muxStream) reserve() (uint64, int, error) {
 // publish queues frames built outside the lock; writers are serialized, so
 // offsets stay contiguous while receivers and other streams proceed.
 func (s *muxStream) publish(b *frameBuilder) error {
-	// ReadInto has released the access TCP receive lock. Compact sparse reads
-	// here so small messages cannot pin a whole batch. Reads of at least one
-	// frame keep the original bulk allocation and copy path.
-	if b.bytes < muxMaxData && b.used < len(b.chunk) {
-		chunk := make([]byte, b.used)
-		copy(chunk, b.chunk[:b.used])
-		b.chunk = chunk
-	}
 	m := s.m
 	m.mu.Lock()
 	if s.err != nil {
@@ -735,7 +738,7 @@ func (s *muxStream) publish(b *frameBuilder) error {
 		// far end delivered them. Under the lock, a reset of this hop either
 		// follows the bytes into the keep or fails this publish.
 		for _, frame := range frames {
-			s.keep.Add(frame.raw[muxDataHeader:])
+			s.keep.Add(frame.raw[muxDataHeader:], frame.buf)
 		}
 	}
 	m.enqueueLocked(s)
@@ -751,12 +754,8 @@ func (s *muxStream) publish(b *frameBuilder) error {
 // payload copies what a builder holds, for a ReadFrom that could not send it.
 func (b *frameBuilder) payload() []byte {
 	out := make([]byte, 0, b.bytes)
-	for i, start := range b.starts {
-		end := b.used
-		if i+1 < len(b.starts) {
-			end = b.starts[i+1]
-		}
-		out = append(out, b.chunk[start+muxDataHeader:end]...)
+	for _, frame := range b.frames {
+		out = append(out, frame.raw[muxDataHeader:]...)
 	}
 	return out
 }
@@ -787,6 +786,7 @@ func (s *muxStream) Write(p []byte) (int, error) {
 		b := newFrameBuilder(s.id, start, min(len(p), limit))
 		b.Write(p[:b.limit])
 		if err := s.publish(b); err != nil {
+			b.release()
 			return written, err
 		}
 		written += b.bytes
@@ -824,6 +824,7 @@ func (s *muxStream) ReadFrom(src io.Reader) (int64, error) {
 				s.m.mu.Lock()
 				s.leftover = append(s.leftover, b.payload()...)
 				s.m.mu.Unlock()
+				b.release()
 				return total, err
 			}
 			total += int64(n)
@@ -922,7 +923,9 @@ func (s *muxStream) Read(p []byte) (int, error) {
 	s.recvBytes -= n
 	s.consumed += uint64(n)
 	var l *link.Link
-	if s.consumed+muxWindow-s.advertised >= muxAckThreshold && s.err == nil {
+	// A session hop that read up to its FIN acknowledges at once: the far end
+	// finishes the session only when it learns that everything was delivered.
+	if (s.consumed+muxWindow-s.advertised >= muxAckThreshold || s.session && s.finRecv && s.consumed == s.finAt && s.consumed+muxWindow > s.advertised) && s.err == nil {
 		s.ackDue = true
 		m.enqueueLocked(s)
 		l = m.current
@@ -987,6 +990,9 @@ func (s *muxStream) failLocked(err error) {
 		return
 	}
 	s.err = err
+	for _, frame := range s.frames {
+		frame.buf.Release()
+	}
 	s.frames, s.recv, s.recvBytes = nil, nil, 0
 	s.ackDue = false
 	delete(s.m.streams, s.id)

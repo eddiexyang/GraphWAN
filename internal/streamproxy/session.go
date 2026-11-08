@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
 )
 
 // A resumable connection is a session between its ingress, which terminates
@@ -115,10 +117,12 @@ type Hop interface {
 	AbortSession()
 }
 
-// Keep holds the bytes an end sent from the other end's delivered offset.
+// Keep holds the bytes an end sent from the other end's delivered offset. It
+// owns each chunk's buffer, if any, until it drops the chunk.
 type Keep struct {
 	mu     sync.Mutex
 	chunks [][]byte
+	owners []*packetbuf.Buffer
 	base   uint64
 	end    uint64
 	closed bool
@@ -128,14 +132,17 @@ type Keep struct {
 
 func NewKeep() *Keep { return &Keep{wake: make(chan struct{})} }
 
-// Add appends data, which must not change afterwards.
-func (k *Keep) Add(data []byte) {
+// Add appends data, which must not change afterwards, and becomes an owner of
+// its buffer (nil when data is not pooled).
+func (k *Keep) Add(data []byte, owner *packetbuf.Buffer) {
 	if len(data) == 0 {
 		return
 	}
 	k.mu.Lock()
 	if !k.closed {
+		owner.Retain()
 		k.chunks = append(k.chunks, data)
+		k.owners = append(k.owners, owner)
 		k.end += uint64(len(data))
 		k.budget.add(len(data))
 	}
@@ -233,8 +240,9 @@ func (k *Keep) Release(delivered uint64) {
 	released := limit - k.base
 	for len(k.chunks) > 0 && k.base+uint64(len(k.chunks[0])) <= limit {
 		k.base += uint64(len(k.chunks[0]))
-		k.chunks[0] = nil
-		k.chunks = k.chunks[1:]
+		k.owners[0].Release()
+		k.chunks[0], k.owners[0] = nil, nil
+		k.chunks, k.owners = k.chunks[1:], k.owners[1:]
 	}
 	if len(k.chunks) > 0 && limit > k.base {
 		k.chunks[0] = k.chunks[0][limit-k.base:]
@@ -245,22 +253,26 @@ func (k *Keep) Release(delivered uint64) {
 	k.wake = make(chan struct{})
 }
 
-// from returns the kept bytes from offset on, without copying.
-func (k *Keep) from(offset uint64) ([][]byte, bool) {
+// from returns the kept bytes from offset on, without copying, and owns
+// their buffers for the caller, which releases them once it is done.
+func (k *Keep) from(offset uint64) ([][]byte, []*packetbuf.Buffer, bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if offset < k.base || offset > k.end {
-		return nil, false
+		return nil, nil, false
 	}
 	var out [][]byte
+	var owners []*packetbuf.Buffer
 	position := k.base
-	for _, chunk := range k.chunks {
+	for i, chunk := range k.chunks {
 		if offset < position+uint64(len(chunk)) {
+			k.owners[i].Retain()
 			out = append(out, chunk[max(offset, position)-position:])
+			owners = append(owners, k.owners[i])
 		}
 		position += uint64(len(chunk))
 	}
-	return out, true
+	return out, owners, true
 }
 
 func (k *Keep) bounds() (base, end uint64) {
@@ -274,7 +286,8 @@ func (k *Keep) close() {
 	if !k.closed {
 		k.closed = true
 		k.budget.release(k.end - k.base)
-		k.chunks = nil
+		packetbuf.ReleaseAll(k.owners)
+		k.chunks, k.owners = nil, nil
 		k.base = k.end
 		close(k.wake)
 	}
@@ -382,10 +395,11 @@ func (e *End) useLocked(hop Hop, out, in uint64) {
 // runs without the lock: the writes wait for the hop's acknowledgements.
 func (e *End) resend(hop Hop, out uint64) error {
 	hop.Begin(out)
-	chunks, ok := e.keep.from(out)
+	chunks, owners, ok := e.keep.from(out)
 	if !ok {
 		return ErrUnknownSession
 	}
+	defer packetbuf.ReleaseAll(owners)
 	for _, chunk := range chunks {
 		if _, err := hop.Write(chunk); err != nil {
 			return err

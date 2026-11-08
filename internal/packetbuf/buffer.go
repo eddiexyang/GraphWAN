@@ -1,20 +1,25 @@
 // Package packetbuf provides explicitly owned, size-classed packet storage.
 package packetbuf
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // BatchSize bounds immediately available bursts without waiting for more packets.
 const BatchSize = 128
 
-// Buffer has one owner. Data may be resliced (for example after in-place
-// decryption); Release always returns the original allocation. Neither the
-// Buffer nor any view of its Data may be used after ownership is transferred or
-// Release is called. Release must be called exactly once, including on drops.
+// Buffer has one owner unless Retain added more. Data may be resliced (for
+// example after in-place decryption); Release always returns the original
+// allocation. Neither the Buffer nor any view of its Data may be used after
+// ownership is transferred or Release is called. Each owner calls Release
+// exactly once, including on drops; the last one returns the storage.
 type Buffer struct {
 	Data     []byte
 	storage  []byte
 	pool     *sync.Pool
 	headroom int
+	refs     atomic.Int32 // owners beyond the first
 }
 
 var small, large sync.Pool
@@ -40,6 +45,7 @@ func Get(size int) *Buffer {
 	}
 	b.Data = b.storage[:size]
 	b.headroom = 0
+	b.refs.Store(0)
 	return b
 }
 
@@ -71,8 +77,16 @@ func (b *Buffer) PrependByte(value byte) bool {
 // Wrap transfers ownership of an existing allocation, without copying it. Such
 // allocations are garbage collected rather than inserted into a size-class pool.
 func Wrap(data []byte) *Buffer { return &Buffer{Data: data} }
+
+// Retain adds an owner, which calls Release once it is done.
+func (b *Buffer) Retain() {
+	if b != nil {
+		b.refs.Add(1)
+	}
+}
+
 func (b *Buffer) Release() {
-	if b == nil {
+	if b == nil || b.refs.Add(-1) >= 0 {
 		return
 	}
 	b.Data = nil
