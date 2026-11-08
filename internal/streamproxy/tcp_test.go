@@ -123,3 +123,91 @@ func TestEngineCloseInterruptsIncompleteAccessHandshake(t *testing.T) {
 		t.Fatal("TCP stack shutdown leaked an incomplete handshake")
 	}
 }
+
+// An Engine carries as many established connections as the host allows; only
+// handshakes in progress are bounded.
+func TestEngineCarriesManyConnections(t *testing.T) {
+	const connections = 1000
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	application := stack.New(stack.Options{NetworkProtocols: []stack.NetworkProtocolFactory{ipv4.NewProtocol}, TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol}})
+	link := channel.New(4096, 1280, "")
+	application.CreateNIC(1, link)
+	application.AddProtocolAddress(1, tcpip.ProtocolAddress{Protocol: ipv4.ProtocolNumber, AddressWithPrefix: tcpip.AddressWithPrefix{Address: tcpip.AddrFrom4([4]byte{10, 0, 0, 1}), PrefixLen: 24}}, stack.AddressProperties{})
+	application.SetRouteTable([]tcpip.Route{{Destination: header.IPv4EmptySubnet, NIC: 1}})
+	opened := make(chan struct{}, connections)
+	engine, err := NewEngine(ctx, 1280, func(raw []byte) error {
+		p := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(append([]byte(nil), raw...))})
+		link.InjectInbound(ipv4.ProtocolNumber, p)
+		p.DecRef()
+		return nil
+	}, func(context.Context, netip.AddrPort, netip.AddrPort) (Conn, error) {
+		a, b := net.Pipe()
+		go func() { io.Copy(b, b); b.Close() }()
+		opened <- struct{}{}
+		return halfPipe{a}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		engine.Close()
+		application.Close()
+		link.Close()
+	}()
+	go func() {
+		for {
+			p := link.ReadContext(ctx)
+			if p == nil {
+				return
+			}
+			view := p.ToView()
+			engine.Inject(view.AsSlice())
+			view.Release()
+			p.DecRef()
+		}
+	}()
+	conns := make([]net.Conn, connections)
+	errs := make(chan error, connections)
+	for i := range conns {
+		go func() {
+			conn, err := gonet.DialContextTCP(ctx, application, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4([4]byte{10, 0, 0, 2}), Port: 443}, ipv4.ProtocolNumber)
+			conns[i] = conn
+			errs <- err
+		}()
+	}
+	for range conns {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range conns {
+		select {
+		case <-opened:
+		case <-ctx.Done():
+			t.Fatal("not every connection reached the other side")
+		}
+	}
+	// Every connection is open at once; each still carries bytes.
+	for i, conn := range conns {
+		defer conn.Close()
+		go func() {
+			message := []byte{byte(i), byte(i >> 8)}
+			got := make([]byte, len(message))
+			conn.SetDeadline(time.Now().Add(10 * time.Second))
+			_, err := conn.Write(message)
+			if err == nil {
+				_, err = io.ReadFull(conn, got)
+			}
+			if err == nil && string(got) != string(message) {
+				err = io.ErrUnexpectedEOF
+			}
+			errs <- err
+		}()
+	}
+	for range conns {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+}

@@ -25,10 +25,10 @@ const (
 	// Retention bounds what an end keeps unconfirmed; reading its socket waits
 	// while it is full.
 	Retention = 32 << 20
-	// AgentRetention bounds what all of an Agent's ends keep together;
-	// reading any of their sockets waits while it is full. Bytes already sent
-	// are always kept.
-	AgentRetention = 256 << 20
+	// AgentRetention bounds what all of an Agent's ends keep together, the
+	// kernel's largest socket send buffer; reading any of their sockets waits
+	// while it is full. Bytes already sent are always kept.
+	AgentRetention = 64 << 20
 	// An end without a working chain this long resets the connection.
 	orphanLifetime = 2 * time.Minute
 	rebuildMin     = 200 * time.Millisecond

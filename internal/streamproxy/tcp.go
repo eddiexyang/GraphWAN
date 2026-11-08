@@ -42,7 +42,6 @@ type Engine struct {
 	open        func(context.Context, netip.AddrPort, netip.AddrPort) (Conn, error)
 	mu          sync.Mutex
 	closed      bool
-	slots       chan struct{}
 	wg          sync.WaitGroup
 	flowHook    atomic.Pointer[func(from, to netip.AddrPort, open bool)]
 }
@@ -139,7 +138,7 @@ func newEngine(parent context.Context, mtu int, output func([]byte) error, open 
 		return nil, errors.New("TCP callbacks are required")
 	}
 	ctx, cancel := context.WithCancel(parent)
-	e := &Engine{ctx: ctx, cancel: cancel, output: output, outputBatch: batch, open: open, slots: make(chan struct{}, MaxConnections)}
+	e := &Engine{ctx: ctx, cancel: cancel, output: output, outputBatch: batch, open: open}
 	e.stack = stack.New(stack.Options{NetworkProtocols: []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol}, TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol}})
 	// Access TCP remains on the local host. gVisor's SACK recovery can count
 	// stale, out-of-window segments as pipe after a receiver shrinks its window,
@@ -183,7 +182,7 @@ func newEngine(parent context.Context, mtu int, output func([]byte) error, open 
 	e.stack.SetRouteTable([]tcpip.Route{{Destination: header.IPv4EmptySubnet, NIC: 1}, {Destination: header.IPv6EmptySubnet, NIC: 1}})
 	e.stack.SetSpoofing(1, true)
 	e.stack.SetPromiscuousMode(1, true)
-	e.stack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcp.NewForwarder(e.stack, 0, MaxConnections, e.forward).HandlePacket)
+	e.stack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcp.NewForwarder(e.stack, 0, MaxHandshakes, e.forward).HandlePacket)
 	if outputGSO == nil {
 		e.wg.Add(1)
 		go e.writePackets()
@@ -198,17 +197,9 @@ func (e *Engine) forward(request *tcp.ForwarderRequest) {
 		request.Complete(true)
 		return
 	}
-	select {
-	case e.slots <- struct{}{}:
-	default:
-		e.mu.Unlock()
-		request.Complete(true)
-		return
-	}
 	e.wg.Add(1)
 	e.mu.Unlock()
 	defer e.wg.Done()
-	defer func() { <-e.slots }()
 	id := request.ID()
 	from, to := netip.AddrPortFrom(addr(id.RemoteAddress), id.RemotePort), netip.AddrPortFrom(addr(id.LocalAddress), id.LocalPort)
 	e.flow(from, to, true)

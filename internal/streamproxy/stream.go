@@ -14,7 +14,10 @@ import (
 )
 
 const SetupLimit = 512
-const MaxConnections = 256
+
+// MaxHandshakes bounds connections in their handshake, as the kernel's
+// tcp_max_syn_backlog does; established connections are not limited.
+const MaxHandshakes = 256
 
 type Request struct {
 	Network     model.ID       `json:"network"`
