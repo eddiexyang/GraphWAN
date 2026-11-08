@@ -129,6 +129,30 @@ func (s *Session) SealBatchAppend(dst, plaintexts [][]byte) error {
 	return nil
 }
 
+// TagSize is what SealChannel adds to a message.
+const TagSize = 16
+
+// An end-to-end session carries independent ordered channels, such as its TCP
+// connections. A channel message's nonce is the channel in its high 32 bits
+// and the message's index within the channel in its low 32 bits: no nonce
+// travels, and a reordered, repeated or missing message fails to open.
+// Channel 0 is reserved. SealChannel and Seal must not share a Session.
+func channelNonce(channel, index uint32) uint64 { return uint64(channel)<<32 | uint64(index) }
+
+// SealChannel seals plaintext in place; it needs TagSize bytes of spare
+// capacity and returns the sealed message.
+func (s *Session) SealChannel(channel, index uint32, plaintext []byte) []byte {
+	return s.send.Encrypt(plaintext[:0], channelNonce(channel, index), s.binding, plaintext)
+}
+
+// OpenChannel opens a SealChannel message in place.
+func (s *Session) OpenChannel(channel, index uint32, sealed []byte) ([]byte, error) {
+	if len(sealed) < TagSize {
+		return nil, errors.New("invalid channel message size")
+	}
+	return s.receive.Decrypt(sealed[:0], channelNonce(channel, index), s.binding, sealed)
+}
+
 // Open accepts bounded out-of-order delivery. Replay state advances only after
 // authentication succeeds, so forged high nonces cannot evict valid packets.
 func (s *Session) Open(frame []byte) ([]byte, error) { return s.open(nil, frame) }

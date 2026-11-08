@@ -58,7 +58,49 @@ func NewHandshake(config Config) (*Handshake, error) {
 	if !config.Initiator {
 		initiator, responder = responder, initiator
 	}
-	prologue := []byte(fmt.Sprintf("GraphWAN/peer/v1/%s/%s/%s/%s/%s", config.Network, config.Edge, initiator, responder, config.Transport))
+	return newHandshake(config, []byte(fmt.Sprintf("GraphWAN/peer/v1/%s/%s/%s/%s/%s", config.Network, config.Edge, initiator, responder, config.Transport)))
+}
+
+// E2EConfig names the two Nodes of an end-to-end session: where traffic
+// enters a Network and where it leaves it. Relays between them only forward
+// what it seals.
+type E2EConfig struct {
+	Network      model.ID
+	Local        model.ID // this Node
+	Peer         model.ID // the Node at the other end
+	Cipher       model.CipherSuite
+	Identity     ed25519.PrivateKey
+	PeerIdentity ed25519.PublicKey
+	Initiator    bool
+}
+
+// NewEndToEndHandshake is NewHandshake between two Nodes of a Network rather
+// than the ends of one Link. Its prologue names a different protocol, so a
+// Link's messages cannot complete it nor it a Link's.
+func NewEndToEndHandshake(config E2EConfig) (*Handshake, error) {
+	for _, id := range []model.ID{config.Network, config.Local, config.Peer} {
+		if err := id.Validate(); err != nil {
+			return nil, err
+		}
+	}
+	if config.Local == config.Peer || !config.Cipher.Valid() {
+		return nil, errors.New("invalid end-to-end handshake policy")
+	}
+	if len(config.Identity) != ed25519.PrivateKeySize || len(config.PeerIdentity) != ed25519.PublicKeySize {
+		return nil, errors.New("invalid handshake identities")
+	}
+	if !bytes.Equal(ed25519.NewKeyFromSeed(config.Identity.Seed()), config.Identity) {
+		return nil, errors.New("invalid private identity")
+	}
+	initiator, responder := config.Local, config.Peer
+	if !config.Initiator {
+		initiator, responder = responder, initiator
+	}
+	return newHandshake(Config{Network: config.Network, Local: config.Local, Peer: config.Peer, Cipher: config.Cipher, Identity: config.Identity, PeerIdentity: config.PeerIdentity, Initiator: config.Initiator},
+		[]byte(fmt.Sprintf("GraphWAN/e2e/v1/%s/%s/%s", config.Network, initiator, responder)))
+}
+
+func newHandshake(config Config, prologue []byte) (*Handshake, error) {
 	static, err := noise.DH25519.GenerateKeypair(rand.Reader)
 	if err != nil {
 		return nil, err
