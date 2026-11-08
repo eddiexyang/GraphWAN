@@ -351,7 +351,78 @@ func (r *Router) encapsulateSource(ctx context.Context, n *network, raw []byte, 
 // unauthenticated ID read from the packet itself. Transit Nodes are trusted hop
 // forwarders; the IP/Node directory check is admission, not end-to-end signing.
 func (r *Router) FromPeer(ctx context.Context, peerID model.ID, frame []byte) error {
-	return r.fromPeer(ctx, peerID, frame, r.deliver)
+	return r.fromPeer(ctx, peerID, frame, r.deliver, nil)
+}
+
+// FromPeerOwnedBatch takes ownership of every buffer. A transit frame is
+// forwarded in its own buffer, its hop limits decremented in place; local
+// packets are delivered in batches as FromPeerBatch does.
+func (r *Router) FromPeerOwnedBatch(ctx context.Context, peerID model.ID, owners []*packetbuf.Buffer) error {
+	var result error
+	var deliverNetwork model.ID
+	var packets [packetbuf.BatchSize][]byte
+	delivered := 0
+	flushDeliver := func() {
+		if delivered == 0 {
+			return
+		}
+		if r.deliverBatch != nil {
+			result = errors.Join(result, r.deliverBatch(ctx, deliverNetwork, packets[:delivered]))
+		} else {
+			for _, raw := range packets[:delivered] {
+				result = errors.Join(result, r.deliver(ctx, deliverNetwork, raw))
+			}
+		}
+		clear(packets[:delivered])
+		delivered = 0
+	}
+	deliver := func(_ context.Context, id model.ID, raw []byte) error {
+		if id != deliverNetwork || delivered == len(packets) {
+			flushDeliver()
+		}
+		deliverNetwork = id
+		packets[delivered] = raw
+		delivered++
+		return nil
+	}
+	var sendNetwork, sendHop model.ID
+	var sends [packetbuf.BatchSize]*packetbuf.Buffer
+	sending := 0
+	flushSend := func() {
+		if sending == 0 {
+			return
+		}
+		if r.sendOwnedBatch != nil {
+			result = errors.Join(result, r.sendOwnedBatch(ctx, sendNetwork, sendHop, sends[:sending]))
+		} else {
+			for _, b := range sends[:sending] {
+				result = errors.Join(result, r.send(ctx, sendNetwork, sendHop, b.Data))
+				b.Release()
+			}
+		}
+		clear(sends[:sending])
+		sending = 0
+	}
+	current := 0
+	forward := func(network, next model.ID) {
+		if network != sendNetwork || next != sendHop || sending == len(sends) {
+			flushSend()
+		}
+		sendNetwork, sendHop = network, next
+		sends[sending], owners[current] = owners[current], nil
+		sending++
+	}
+	for i, owner := range owners {
+		current = i
+		result = errors.Join(result, r.fromPeer(ctx, peerID, owner.Data, deliver, forward))
+	}
+	flushSend()
+	flushDeliver()
+	for i, owner := range owners {
+		owner.Release()
+		owners[i] = nil
+	}
+	return result
 }
 
 // FromPeerBatch validates every frame independently. Only admitted local
@@ -385,12 +456,15 @@ func (r *Router) FromPeerBatch(ctx context.Context, peerID model.ID, frames [][]
 		return nil
 	}
 	for _, frame := range frames {
-		result = errors.Join(result, r.fromPeer(ctx, peerID, frame, deliver))
+		result = errors.Join(result, r.fromPeer(ctx, peerID, frame, deliver, nil))
 	}
 	flush()
 	return result
 }
-func (r *Router) fromPeer(ctx context.Context, peerID model.ID, frame []byte, deliver Deliver) error {
+
+// fromPeer forwards a transit frame with forward when the caller owns frame:
+// its hop limits are then decremented in place. Otherwise it sends a copy.
+func (r *Router) fromPeer(ctx context.Context, peerID model.ID, frame []byte, deliver Deliver, forward func(network, next model.ID)) error {
 	p, err := packet.ParseView(frame)
 	if err != nil {
 		return err
@@ -445,6 +519,12 @@ func (r *Router) fromPeer(ctx context.Context, peerID model.ID, frame []byte, de
 	}
 	if packet.IPHopLimit(p.Payload) <= 1 {
 		return r.timeExceeded(ctx, n, p.Payload)
+	}
+	if forward != nil {
+		frame[3]--
+		packet.DecrementIPHopLimit(frame[packet.HeaderSize:])
+		forward(n.id, nextHop)
+		return nil
 	}
 	// Keep the caller's authenticated frame immutable, including its IP header.
 	buffer := packetbuf.Get(len(frame))

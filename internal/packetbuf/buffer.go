@@ -74,6 +74,15 @@ func (b *Buffer) PrependByte(value byte) bool {
 	return true
 }
 
+// Advance drops n bytes from the front of Data. Pooled storage keeps them as
+// headroom, so a later PrependByte can reuse the space without a copy.
+func (b *Buffer) Advance(n int) {
+	b.Data = b.Data[n:]
+	if offset := len(b.storage) - cap(b.Data); offset >= 0 && len(b.Data) > 0 && offset < len(b.storage) && &b.Data[0] == &b.storage[offset] {
+		b.headroom = offset
+	}
+}
+
 // Wrap transfers ownership of an existing allocation, without copying it. Such
 // allocations are garbage collected rather than inserted into a size-class pool.
 func Wrap(data []byte) *Buffer { return &Buffer{Data: data} }

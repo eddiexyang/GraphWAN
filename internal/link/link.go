@@ -610,7 +610,8 @@ func (l *Link) readLoop() {
 			}
 			l.rx.Add(uint64(len(raw) - 1))
 			if current != nil {
-				current.Data = raw[1:]
+				current.Data = raw
+				current.Advance(1)
 				ready[count], current = current, nil
 				count++
 				if count == len(ready) {

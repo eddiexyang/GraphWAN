@@ -72,7 +72,7 @@ type Mesh struct {
 	udp            *transport.UDP
 	quic           *transport.QUICHub
 	receive        Receive
-	receiveBatch   func(context.Context, model.ID, [][]byte) error
+	receiveBatch   func(context.Context, model.ID, []*packetbuf.Buffer) error // owns the buffers
 	mu             sync.Mutex
 	groups         map[key]*group
 	slots          chan struct{}
@@ -82,7 +82,7 @@ type Mesh struct {
 	linkOptions    link.Options
 }
 
-func New(parent context.Context, identity ed25519.PrivateKey, host string, port uint16, receive Receive, batches ...func(context.Context, model.ID, [][]byte) error) (*Mesh, error) {
+func New(parent context.Context, identity ed25519.PrivateKey, host string, port uint16, receive Receive, batches ...func(context.Context, model.ID, []*packetbuf.Buffer) error) (*Mesh, error) {
 	if len(identity) != ed25519.PrivateKeySize || receive == nil {
 		return nil, errors.New("mesh requires identity and packet receiver")
 	}
@@ -632,25 +632,22 @@ func (g *group) register(channel *peer.Channel, candidate link.Candidate, pathEx
 		}()
 
 		var owners [packetbuf.BatchSize]*packetbuf.Buffer
-		var frames [packetbuf.BatchSize][]byte
 		for {
 			count, err := l.ReadOwnedBatch(g.ctx, owners[:])
 			if err != nil {
 				return
 			}
-			for i, b := range owners[:count] {
-				frames[i] = b.Data
-			}
 			if g.mesh.receiveBatch != nil {
-				g.mesh.receiveBatch(g.ctx, cfg.peer.Node.ID, frames[:count])
-			} else {
-				for _, raw := range frames[:count] {
-					g.mesh.receive(g.ctx, cfg.peer.Node.ID, bytes.Clone(raw))
-				}
+				// The receiver forwards transit frames in these buffers.
+				g.mesh.receiveBatch(g.ctx, cfg.peer.Node.ID, owners[:count])
+				clear(owners[:count])
+				continue
+			}
+			for _, b := range owners[:count] {
+				g.mesh.receive(g.ctx, cfg.peer.Node.ID, bytes.Clone(b.Data))
 			}
 			packetbuf.ReleaseAll(owners[:count])
 			clear(owners[:count])
-			clear(frames[:count])
 		}
 	}()
 }

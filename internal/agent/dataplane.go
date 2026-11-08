@@ -21,6 +21,7 @@ import (
 	"github.com/eWloYW8/GraphWAN/internal/mesh"
 	"github.com/eWloYW8/GraphWAN/internal/model"
 	"github.com/eWloYW8/GraphWAN/internal/packet"
+	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
 	"github.com/eWloYW8/GraphWAN/internal/tunnel"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
@@ -531,12 +532,13 @@ func (r *DataPlane) readTunnelBatch(network model.ID, device *runtimeTunnel, bat
 		}
 	}
 }
-func (r *DataPlane) receiveBatch(ctx context.Context, remote model.ID, frames [][]byte) error {
+func (r *DataPlane) receiveBatch(ctx context.Context, remote model.ID, owners []*packetbuf.Buffer) error {
 	state := r.state.Load()
 	if state == nil {
+		packetbuf.ReleaseAll(owners)
 		return errors.New("agent runtime is not configured")
 	}
-	return state.router.FromPeerBatch(ctx, remote, frames)
+	return state.router.FromPeerOwnedBatch(ctx, remote, owners)
 }
 func (r *DataPlane) deliverBatch(ctx context.Context, network model.ID, packets [][]byte) error {
 	state := r.state.Load()
