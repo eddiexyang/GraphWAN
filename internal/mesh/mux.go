@@ -1069,6 +1069,14 @@ func (s *muxStream) peerDeliveredLocked() uint64 {
 	return e
 }
 
+func (s *muxStream) PeerEnded() bool {
+	s.m.mu.Lock()
+	defer s.m.mu.Unlock()
+	return s.writeClosed && s.peerDeliveredLocked() > s.sendStart+s.finOffset-s.sendMark
+}
+
+func (s *muxStream) Done() <-chan struct{} { return s.ctx.Done() }
+
 func (s *muxStream) OnDelivered(notify func()) {
 	s.m.mu.Lock()
 	s.onDelivered = notify

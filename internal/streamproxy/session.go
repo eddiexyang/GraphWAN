@@ -25,6 +25,10 @@ const (
 	// Retention bounds what an end keeps unconfirmed; reading its socket waits
 	// while it is full.
 	Retention = 32 << 20
+	// AgentRetention bounds what all of an Agent's ends keep together;
+	// reading any of their sockets waits while it is full. Bytes already sent
+	// are always kept.
+	AgentRetention = 256 << 20
 	// An end without a working chain this long resets the connection.
 	orphanLifetime = 2 * time.Minute
 	rebuildMin     = 200 * time.Millisecond
@@ -95,6 +99,10 @@ type Hop interface {
 	// PeerDelivered is how far the far end delivered what this hop sends.
 	PeerDelivered() uint64
 	OnDelivered(notify func())
+	// PeerEnded reports that the far end delivered all this hop sent, its end
+	// included. Done is closed once the hop failed or finished.
+	PeerEnded() bool
+	Done() <-chan struct{}
 	// SetRetention keeps every byte sent from now on in k. Leftover returns
 	// what a ReadFrom read but did not send.
 	SetRetention(k *Keep)
@@ -115,6 +123,7 @@ type Keep struct {
 	end    uint64
 	closed bool
 	wake   chan struct{}
+	budget *retained // the Agent's total, or nil
 }
 
 func NewKeep() *Keep { return &Keep{wake: make(chan struct{})} }
@@ -125,27 +134,92 @@ func (k *Keep) Add(data []byte) {
 		return
 	}
 	k.mu.Lock()
-	k.chunks = append(k.chunks, data)
-	k.end += uint64(len(data))
+	if !k.closed {
+		k.chunks = append(k.chunks, data)
+		k.end += uint64(len(data))
+		k.budget.add(len(data))
+	}
 	k.mu.Unlock()
 }
 
-// Wait returns once fewer than Retention bytes are kept.
+// Wait returns once fewer than Retention bytes are kept, and the Agent's ends
+// keep fewer than AgentRetention together.
 func (k *Keep) Wait(ctx context.Context) error {
 	for {
 		k.mu.Lock()
-		if k.closed || k.end-k.base < Retention {
+		if k.closed {
 			k.mu.Unlock()
 			return nil
 		}
 		wake := k.wake
+		own := k.end-k.base >= Retention
 		k.mu.Unlock()
+		shared, full := k.budget.full()
+		if !own && !full {
+			return nil
+		}
 		select {
 		case <-wake:
+		case <-shared:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
+}
+
+// retained totals the bytes an Agent's ends keep.
+type retained struct {
+	mu    sync.Mutex
+	bytes uint64
+	wake  chan struct{}
+}
+
+// agentRetention is AgentRetention; tests lower it.
+var agentRetention uint64 = AgentRetention
+
+func (r *retained) add(n int) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.bytes += uint64(n)
+	r.mu.Unlock()
+}
+
+func (r *retained) release(n uint64) {
+	if r == nil || n == 0 {
+		return
+	}
+	r.mu.Lock()
+	r.bytes -= n
+	if r.wake != nil {
+		close(r.wake)
+		r.wake = nil
+	}
+	r.mu.Unlock()
+}
+
+// full reports whether the total reached agentRetention, and a channel
+// closed when it next falls.
+func (r *retained) full() (<-chan struct{}, bool) {
+	if r == nil {
+		return nil, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.bytes < agentRetention {
+		return nil, false
+	}
+	if r.wake == nil {
+		r.wake = make(chan struct{})
+	}
+	return r.wake, true
+}
+
+func (r *retained) total() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.bytes
 }
 
 // Release drops what the other end delivered.
@@ -156,6 +230,7 @@ func (k *Keep) Release(delivered uint64) {
 	if limit <= k.base {
 		return
 	}
+	released := limit - k.base
 	for len(k.chunks) > 0 && k.base+uint64(len(k.chunks[0])) <= limit {
 		k.base += uint64(len(k.chunks[0]))
 		k.chunks[0] = nil
@@ -165,6 +240,7 @@ func (k *Keep) Release(delivered uint64) {
 		k.chunks[0] = k.chunks[0][limit-k.base:]
 		k.base = limit
 	}
+	k.budget.release(released)
 	close(k.wake)
 	k.wake = make(chan struct{})
 }
@@ -197,6 +273,9 @@ func (k *Keep) close() {
 	k.mu.Lock()
 	if !k.closed {
 		k.closed = true
+		k.budget.release(k.end - k.base)
+		k.chunks = nil
+		k.base = k.end
 		close(k.wake)
 	}
 	k.mu.Unlock()
@@ -207,7 +286,11 @@ type Counters struct {
 	HopFailures    atomic.Uint64 // chains an end saw fail or reset
 	Rebuilds       atomic.Uint64 // chains the ingress opened after one failed
 	ReplayRequests atomic.Uint64 // replay requests the egress sent
+	retained       retained      // bytes the ends keep, against AgentRetention
 }
+
+// Retained reports the bytes the Agent's ends keep now.
+func (c *Counters) Retained() uint64 { return c.retained.total() }
 
 // OpenChain opens a chain of generation gen whose downstream bytes start at
 // down and upstream bytes at up.
@@ -244,6 +327,9 @@ type End struct {
 func newEnd(parent context.Context, counters *Counters) *End {
 	ctx, cancel := context.WithCancel(parent)
 	e := &End{ctx: ctx, cancel: cancel, keep: NewKeep(), counters: counters}
+	if counters != nil {
+		e.keep.budget = &counters.retained
+	}
 	e.cond = sync.NewCond(&e.mu)
 	go e.watchOrphan()
 	return e
@@ -761,8 +847,18 @@ func (r *onceReader) Read(p []byte) (int, error) {
 // session state: it passes on what the far ends delivered, and a reset of the
 // connection resets it on both hops.
 func RelayHops(ctx context.Context, up, down Hop) error {
-	down.OnDelivered(func() { up.SetDelivered(down.PeerDelivered()) })
-	up.OnDelivered(func() { down.SetDelivered(up.PeerDelivered()) })
+	settled := make(chan struct{}, 1)
+	pass := func(to, from Hop) func() {
+		return func() {
+			to.SetDelivered(from.PeerDelivered())
+			select {
+			case settled <- struct{}{}:
+			default:
+			}
+		}
+	}
+	down.OnDelivered(pass(up, down))
+	up.OnDelivered(pass(down, up))
 	stop := context.AfterFunc(ctx, func() { up.Abort(); down.Abort() })
 	defer stop()
 	fail := func() {
@@ -788,6 +884,22 @@ func RelayHops(ctx context.Context, up, down Hop) error {
 	go copyTo(down, up)
 	go copyTo(up, down)
 	err := errors.Join(<-errs, <-errs)
+	// The ends finish the connection once they learn that the other end
+	// delivered everything; the hops carry that after both directions ended.
+wait:
+	for err == nil && !(up.PeerEnded() && down.PeerEnded()) {
+		select {
+		case <-settled:
+		case <-up.Done():
+			break wait
+		case <-down.Done():
+			break wait
+		case <-ctx.Done():
+			break wait
+		}
+	}
+	up.SetDelivered(down.PeerDelivered())
+	down.SetDelivered(up.PeerDelivered())
 	up.Close()
 	down.Close()
 	return err

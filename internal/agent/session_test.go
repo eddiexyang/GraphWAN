@@ -180,6 +180,14 @@ func TestTCPSessionFollowsRouteChange(t *testing.T) {
 	if agents[0].Counters()["session_rebuilds"] == 0 {
 		t.Fatal("no rebuild counted")
 	}
+	waitFor(t, 5*time.Second, "ended sessions to release what they kept", func() bool {
+		for _, agent := range agents {
+			if agent.Counters()["session_retained_bytes"] != 0 {
+				return false
+			}
+		}
+		return true
+	})
 }
 
 // A relay that fails mid-transfer loses what it buffered; the ingress

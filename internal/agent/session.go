@@ -467,5 +467,6 @@ func (r *DataPlane) sessionCounters() map[string]uint64 {
 		"session_replay_requests": c.ReplayRequests.Load(),
 		"session_route_resets":    resets,
 		"session_exit_resets":     exits,
+		"session_retained_bytes":  c.Retained(),
 	}
 }
