@@ -523,7 +523,10 @@ func (r *DataPlane) readTunnelBatch(network model.ID, device *runtimeTunnel, bat
 		if n > 1 {
 			// A nonblocking TUN can supply consecutive bursts indefinitely.
 			// Let notified packet writers drain before another input quantum,
-			// especially when the Agent has only one runnable processor.
+			// especially when the Agent has only one runnable processor. One
+			// yield is not enough: every 61st schedule takes the global queue,
+			// where Gosched put this goroutine, before the local writers.
+			runtime.Gosched()
 			runtime.Gosched()
 		}
 	}
