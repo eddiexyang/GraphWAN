@@ -406,7 +406,7 @@ func TestMuxSparseACKAndCredit(t *testing.T) {
 		var owners [128]*packetbuf.Buffer
 		n := from.PullStream(nil, dst[:], owners[:])
 		for i, raw := range dst[:n] {
-			if !to.ReceiveStream(nil, raw[1:]) {
+			if !to.ReceiveStream(nil, raw[1:], nil) {
 				t.Fatal("invalid frame")
 			}
 			owners[i].Release()
@@ -503,7 +503,7 @@ func TestMuxRestartKeepsNewStreamsDistinct(t *testing.T) {
 				if _, err := s.Write([]byte(payload)); err != nil {
 					t.Fatal(err)
 				}
-				if !p.b.ReceiveStream(nil, s.frames[0].raw[1:]) || len(p.accepted) != 1 {
+				if !p.b.ReceiveStream(nil, s.frames[0].raw[1:], nil) || len(p.accepted) != 1 {
 					t.Fatal("surviving peer rejected the new stream")
 				}
 				r := <-p.accepted
@@ -587,4 +587,34 @@ func TestMuxFrameHeaderInReusedStorage(t *testing.T) {
 		t.Fatalf("header %x, want %x", frame.raw[:muxDataHeader], want)
 	}
 	builder.release()
+}
+
+// Received bytes stay in the Link's buffer, which returns once they are read.
+func TestMuxReceiveKeepsLinkBuffer(t *testing.T) {
+	p := newMuxPair(t)
+	s := p.a.newStreamLocked(2)
+	if _, err := s.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	var dst [4][]byte
+	var owners [4]*packetbuf.Buffer
+	n := p.a.PullStream(nil, dst[:], owners[:])
+	packetbuf.ReleaseAll(owners[:n])
+	received := packetbuf.Get(len(dst[0]) - 1)
+	copy(received.Data, dst[0][1:])
+	if !p.b.ReceiveStream(nil, received.Data, received) {
+		t.Fatal("invalid frame")
+	}
+	received.Release() // the Link is done with it
+	if received.Data == nil {
+		t.Fatal("buffer returned while its bytes were unread")
+	}
+	r := <-p.accepted
+	got := make([]byte, 5)
+	if _, err := io.ReadFull(r, got); err != nil || string(got) != "hello" {
+		t.Fatal(string(got), err)
+	}
+	if received.Data != nil {
+		t.Fatal("buffer kept after its bytes were read")
+	}
 }

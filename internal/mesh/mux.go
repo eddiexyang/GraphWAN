@@ -69,6 +69,12 @@ type streamError struct{ errno syscall.Errno }
 func (e *streamError) Error() string { return "peer stream reset" }
 func (e *streamError) Unwrap() error { return e.errno }
 
+// recvChunk is received bytes and the Link buffer holding them, or nil.
+type recvChunk struct {
+	data  []byte
+	owner *packetbuf.Buffer
+}
+
 type muxFrame struct {
 	end uint64 // offset after this frame; a FIN occupies one virtual byte
 	raw []byte
@@ -397,8 +403,9 @@ func (m *mux) PullStream(l *link.Link, dst [][]byte, owners []*packetbuf.Buffer)
 	return n
 }
 
-// ReceiveStream copies what it keeps: the Link reuses raw after returning.
-func (m *mux) ReceiveStream(l *link.Link, raw []byte) bool {
+// ReceiveStream keeps received data in the Link's buffer as one of its owners,
+// or copies it when raw is not pooled: the Link reuses raw after returning.
+func (m *mux) ReceiveStream(l *link.Link, raw []byte, owner *packetbuf.Buffer) bool {
 	if len(raw) < muxHeader-1 {
 		return false
 	}
@@ -411,7 +418,7 @@ func (m *mux) ReceiveStream(l *link.Link, raw []byte) bool {
 		if len(raw) < muxDataHeader-1 {
 			return false
 		}
-		return m.receiveData(id, binary.BigEndian.Uint64(raw[9:17]), raw[17], raw[18:])
+		return m.receiveData(id, binary.BigEndian.Uint64(raw[9:17]), raw[17], raw[18:], owner)
 	case muxAck:
 		switch len(raw) {
 		case muxAckSize - 1:
@@ -438,7 +445,9 @@ func (m *mux) ReceiveStream(l *link.Link, raw []byte) bool {
 	}
 }
 
-func (m *mux) receiveData(id, offset uint64, flags byte, data []byte) bool {
+// receiveData keeps received bytes in the Link's buffer when owner is not nil,
+// as an owner until they are read, and copies them otherwise.
+func (m *mux) receiveData(id, offset uint64, flags byte, data []byte, owner *packetbuf.Buffer) bool {
 	if flags&^(muxFin|muxEnd) != 0 || flags&muxEnd != 0 && flags&muxFin == 0 || flags&muxFin != 0 && len(data) != 0 {
 		return false
 	}
@@ -480,8 +489,13 @@ func (m *mux) receiveData(id, offset uint64, flags byte, data []byte) bool {
 	// Frames arrive in order on one Link; after a Link change the sender starts
 	// again at our acknowledged offset, so only duplicates precede received.
 	if offset <= s.received && end > s.received {
-		chunk := append([]byte(nil), data[s.received-offset:]...)
-		s.recv = append(s.recv, chunk)
+		chunk := data[s.received-offset:]
+		if owner != nil {
+			owner.Retain()
+		} else {
+			chunk = append([]byte(nil), chunk...)
+		}
+		s.recv = append(s.recv, recvChunk{chunk, owner})
 		s.recvBytes += len(chunk)
 		s.received = end
 		s.rx.Add(uint64(len(chunk)))
@@ -569,7 +583,7 @@ type muxStream struct {
 	writeClosed bool
 	finOffset   uint64
 
-	recv        [][]byte
+	recv        []recvChunk
 	recvBytes   int
 	received    uint64
 	ackReceived uint64
@@ -911,13 +925,14 @@ func (s *muxStream) Read(p []byte) (int, error) {
 	m.mu.Lock()
 	n := 0
 	for n < len(p) && len(s.recv) > 0 {
-		c := copy(p[n:], s.recv[0])
+		c := copy(p[n:], s.recv[0].data)
 		n += c
-		if c == len(s.recv[0]) {
-			s.recv[0] = nil
+		if c == len(s.recv[0].data) {
+			s.recv[0].owner.Release()
+			s.recv[0] = recvChunk{}
 			s.recv = s.recv[1:]
 		} else {
-			s.recv[0] = s.recv[0][c:]
+			s.recv[0].data = s.recv[0].data[c:]
 		}
 	}
 	s.recvBytes -= n
@@ -992,6 +1007,9 @@ func (s *muxStream) failLocked(err error) {
 	s.err = err
 	for _, frame := range s.frames {
 		frame.buf.Release()
+	}
+	for _, chunk := range s.recv {
+		chunk.owner.Release()
 	}
 	s.frames, s.recv, s.recvBytes = nil, nil, 0
 	s.ackDue = false

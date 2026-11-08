@@ -124,7 +124,9 @@ type LinkStateHandler interface {
 // the Link releases each frame's owner, if any, once it sent the frame.
 type StreamHandler interface {
 	StreamsReady(*Link)
-	ReceiveStream(*Link, []byte) bool
+	// ReceiveStream may keep raw beyond the call only as an owner of its
+	// buffer (nil when raw is not pooled).
+	ReceiveStream(*Link, []byte, *packetbuf.Buffer) bool
 	PullStream(*Link, [][]byte, []*packetbuf.Buffer) int
 }
 
@@ -691,7 +693,7 @@ func (l *Link) readLoop() {
 				return
 			}
 			l.rx.Add(uint64(len(raw) - 1))
-			if !l.options.Streams.ReceiveStream(l, raw[1:]) {
+			if !l.options.Streams.ReceiveStream(l, raw[1:], current) {
 				return
 			}
 		case pingMessage:
