@@ -68,8 +68,7 @@ func (m *Mesh) TCPCarrier(network, remote model.ID) bool {
 	if g == nil {
 		return false
 	}
-	active := g.edge.Active()
-	return active != nil && active.TCPBacked()
+	return g.edge.ActiveTCPBacked()
 }
 
 // ResumeAvailable reports whether a stream to remote can carry a resumable TCP

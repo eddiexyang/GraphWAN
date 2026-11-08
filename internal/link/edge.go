@@ -5,6 +5,7 @@ import (
 	"context"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/eWloYW8/GraphWAN/internal/model"
@@ -20,6 +21,9 @@ type Edge struct {
 	aliases      map[string]string
 	switched     time.Time
 	selection    *selectionState
+	// activeTCP is whether the selected Link is TCP-backed, read per packet
+	// without the lock.
+	activeTCP atomic.Bool
 }
 
 func newEdge(preferred string) *Edge {
@@ -97,6 +101,7 @@ func (e *Edge) Remove(id string) {
 	}
 	if e.active == id {
 		e.active = ""
+		e.activeTCP.Store(false)
 	}
 }
 func (e *Edge) Send(ctx context.Context, frame []byte) error {
@@ -132,6 +137,10 @@ func (e *Edge) sendLinkLocked() *Link {
 	}
 	return selected
 }
+
+// ActiveTCPBacked reports whether the selected Link is TCP-backed, healthy or
+// not, without taking the Edge lock.
+func (e *Edge) ActiveTCPBacked() bool { return e.activeTCP.Load() }
 
 // Active returns the selected Link while it is healthy, or nil. Both ends of
 // a coordinated Edge select the same Link.
@@ -188,6 +197,7 @@ func (e *Edge) activateLocked(selected *Link, now time.Time) {
 			old.setActive(false)
 		}
 		e.active, e.switched = id, now
+		e.activeTCP.Store(selected != nil && selected.tcpBacked())
 		if selected != nil {
 			selected.setActive(true)
 		}
