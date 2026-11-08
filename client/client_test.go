@@ -290,7 +290,7 @@ func TestClientConnectionFollowsRouteChange(t *testing.T) {
 	}
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(60 * time.Second))
-	payload := make([]byte, 8<<20)
+	payload := make([]byte, 16<<20) // 8 s at 2 MiB/s, so the route changes mid-transfer
 	rand.Read(payload)
 	go func() {
 		start := time.Now()
@@ -313,11 +313,13 @@ func TestClientConnectionFollowsRouteChange(t *testing.T) {
 	time.Sleep(time.Second)
 	// D reaches C through A and B (21) until A-D costs 100; then directly (30).
 	cn.update(t, ctx, func(s *model.State) { s.Networks[0].Edges[2].Weight = 100 })
+	for deadline := time.Now().Add(5 * time.Second); c.runtime.Counters()["session_rebuilds"] == 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the client's connection did not move as a session")
+		}
+	}
 	if err := <-got; err != nil {
 		t.Fatal(err)
-	}
-	if c.runtime.Counters()["session_rebuilds"] == 0 {
-		t.Fatal("the client's connection did not move as a session")
 	}
 	for _, runtime := range append(cn.runtimes, c.runtime) {
 		for _, l := range runtime.Report() {
