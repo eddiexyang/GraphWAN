@@ -162,6 +162,15 @@ func (r *DataPlane) startSession(ctx context.Context, request streamproxy.Reques
 	end, err := streamproxy.StartIngress(ctx, func(ctx context.Context, gen uint32, down, up uint64) (streamproxy.Hop, uint64, error) {
 		chain := request
 		chain.Gen, chain.Down, chain.Up, chain.At = gen, down, up, gen > 0
+		// The attempt's first hop is the session's: a route away from it
+		// reroutes the session, which cancels the attempt.
+		if state := r.state.Load(); state != nil {
+			if next, _, err := state.router.TCPRoute(chain, ""); err == nil {
+				r.sessions.mu.Lock()
+				entry.next = next
+				r.sessions.mu.Unlock()
+			}
+		}
 		hop, next, at, err := r.openChain(ctx, chain, "")
 		if err == nil {
 			r.sessions.mu.Lock()

@@ -108,3 +108,26 @@ func TestTCPSessionSurvivesStalledHop(t *testing.T) {
 	}
 	assertNoTCPOverTCP(t, agents)
 }
+
+// With the default detection time, the stalled hop's rebuild starts while the
+// route still uses it, and that attempt never gets an answer. Once the route
+// moves, the session moves at once instead of waiting for the attempt.
+func TestTCPSessionLeavesAStalledAttempt(t *testing.T) {
+	var proxy *pausingProxy
+	agents, devices, state := graphAgents(t, model.TCP, streamOptions{}, 4, 4, func(s *model.State) {
+		target := strings.TrimPrefix(s.Agents[1].Endpoints[0].URL, "tcp://")
+		proxy = newPausingProxy(t, target)
+		s.Agents[1].Endpoints[0].URL = "tcp://" + proxy.port()
+		s.Agents[0].Endpoints = []model.Endpoint{}
+	})
+	sessionExchange(t, devices, state, 2, 24<<20, 4<<20, func() {
+		waitFor(t, 5*time.Second, "a chain through B", func() bool { return relaying(agents[1]) > 0 })
+		paused := time.Now()
+		proxy.paused.Store(true)
+		waitFor(t, 15*time.Second, "the chain to move to D", func() bool { return relaying(agents[3]) > 0 })
+		detection := model.FailureDetectionTime(0)
+		if moved := time.Since(paused); moved > detection+3*time.Second {
+			t.Errorf("moved %v after the stall, want within %v", moved, detection+3*time.Second)
+		}
+	})
+}

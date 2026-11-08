@@ -356,6 +356,11 @@ type End struct {
 	ended    bool   // the received direction ended
 	leftover []byte
 	busy     bool
+	// attempt cancels the chain being opened, so a route change does not
+	// wait for an attempt along the old route; rerouted asks the next
+	// attempt to start at once.
+	attempt  context.CancelFunc
+	rerouted bool
 	orphan   time.Time
 	done     bool
 	closed   bool
@@ -492,7 +497,14 @@ func (e *End) Accept(hop Hop, gen uint32, down, up uint64, at bool, answer func(
 func (e *End) Reroute() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.done || e.busy || e.open == nil {
+	if e.done || e.open == nil {
+		return
+	}
+	if e.busy {
+		if e.attempt != nil {
+			e.rerouted = true
+			e.attempt()
+		}
 		return
 	}
 	if e.hop == nil {
@@ -558,7 +570,17 @@ func (e *End) rebuild() {
 		down, _ := e.keep.bounds()
 		up := e.read
 		e.mu.Unlock()
-		hop, from, err := e.open(e.ctx, gen, down, up)
+		ctx, cancel := context.WithTimeout(e.ctx, ConnectTimeout)
+		e.mu.Lock()
+		e.attempt = cancel
+		e.mu.Unlock()
+		hop, from, err := e.open(ctx, gen, down, up)
+		e.mu.Lock()
+		e.attempt = nil
+		rerouted := e.rerouted
+		e.rerouted = false
+		e.mu.Unlock()
+		cancel()
 		if err == nil {
 			// The old chain, if a reroute left it running, stops here: what it
 			// carried past from is sent again on the new one.
@@ -593,6 +615,11 @@ func (e *End) rebuild() {
 			return
 		}
 		e.mu.Unlock()
+		if rerouted {
+			// The route changed during the attempt: try the new one now.
+			delay = rebuildMin
+			continue
+		}
 		select {
 		case <-e.ctx.Done():
 		case <-time.After(delay):
