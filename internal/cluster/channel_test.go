@@ -135,10 +135,21 @@ func TestOneWayClusterChannel(t *testing.T) {
 	}
 	blockedBefore := reverse.Load()
 	next := 1 - leader
-	if err := nodes[leader].Raft.LeadershipTransferToServer(raft.ServerID(identities[next].ID), raft.ServerAddress(identities[next].ID)).Error(); err != nil {
-		t.Fatal(err)
+	// A transfer that times out on a loaded machine leaves the old leader in
+	// place; it is asked again, as an operator would.
+	deadline := time.Now().Add(8 * time.Second)
+	for nodes[next].Raft.State() != raft.Leader {
+		if time.Now().After(deadline) {
+			t.Fatal("leadership was not transferred")
+		}
+		if nodes[leader].Raft.State() != raft.Leader {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if err := nodes[leader].Raft.LeadershipTransferToServer(raft.ServerID(identities[next].ID), raft.ServerAddress(identities[next].ID)).Error(); err != nil {
+			t.Logf("leadership transfer: %v", err)
+		}
 	}
-	wait(func() bool { return nodes[next].Raft.State() == raft.Leader })
 	write(next, "after-transfer")
 	if reverse.Load() != blockedBefore || forward.Load() != 1 {
 		t.Fatal("reverse RPCs dialed instead of reusing the channel")
@@ -162,9 +173,10 @@ func TestOneWayClusterChannel(t *testing.T) {
 	nodes[0].layer.channels.mu.Unlock()
 	session.Close()
 	wait(func() bool { return forward.Load() > 1 })
-	// An election may follow the reconnect; a write that loses its leader
-	// is retried on the next one, as a client would.
-	deadline := time.Now().Add(8 * time.Second)
+	// An election may follow the reconnect; a write that loses its leader,
+	// or was based on a revision the new leader has passed, is retried on the
+	// next one, as a client would.
+	deadline = time.Now().Add(8 * time.Second)
 	for {
 		wait(func() bool { return nodes[0].Raft.State() == raft.Leader || nodes[1].Raft.State() == raft.Leader })
 		leader = 0
@@ -183,7 +195,7 @@ func TestOneWayClusterChannel(t *testing.T) {
 		if err == nil {
 			break
 		}
-		if !errors.Is(err, store.ErrUnavailable) || time.Now().After(deadline) {
+		if !errors.Is(err, store.ErrUnavailable) && !errors.Is(err, store.ErrConflict) || time.Now().After(deadline) {
 			t.Fatal(err)
 		}
 	}
