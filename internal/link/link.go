@@ -49,6 +49,9 @@ const (
 	tcpQueueBytes = 256 * 1024
 	// acceptedProbe paces an accepted Link's own RTT samples.
 	acceptedProbe = 30 * time.Second
+	// pingSize is a ping: its nonce, then the last pong nonce its sender
+	// received.
+	pingSize = 17
 )
 
 var ErrQueueFull = errors.New("link packet queue is full")
@@ -171,20 +174,27 @@ type Link struct {
 	loggedActive atomic.Bool
 	// loggedUp records that "link up" was logged: the Link became healthy.
 	// up, set by its Edge, then runs once.
-	loggedUp        atomic.Bool
-	up              atomic.Pointer[func()]
-	control         chan []byte
-	packets         chan []byte
-	ownedPackets    *packetbuf.Queue
-	queueMu         sync.Mutex
-	mu              sync.Mutex
-	pending         map[uint64]time.Time
-	nextPing        uint64
-	lastPong        time.Time
-	lastPing        time.Time
-	probeSince      time.Time
-	started         time.Time
-	peerPing        time.Time
+	loggedUp     atomic.Bool
+	up           atomic.Pointer[func()]
+	control      chan []byte
+	packets      chan []byte
+	ownedPackets *packetbuf.Queue
+	queueMu      sync.Mutex
+	mu           sync.Mutex
+	pending      map[uint64]time.Time
+	nextPing     uint64
+	lastPong     time.Time
+	lastPing     time.Time
+	probeSince   time.Time
+	started      time.Time
+	peerPing     time.Time
+	// A ping carries the nonce of the last pong its sender received. When
+	// that grows, the peer has received a newer message from this side:
+	// confirmed is the largest such nonce, peerHeard when it last grew, and
+	// lastPongNonce what this side's own pings confirm.
+	confirmed       uint64
+	peerHeard       time.Time
+	lastPongNonce   uint64
 	lastTraffic     time.Time
 	sampledRX       uint64
 	sampledTX       uint64
@@ -518,12 +528,22 @@ func (l *Link) healthy() bool {
 
 // Healthy avoids allocating formatted telemetry during connection maintenance.
 func (l *Link) Healthy() bool { return l.healthy() }
+
+// heardLocked is when this side last sent a message that the peer confirmed
+// receiving, or when the Link started.
+func (l *Link) heardLocked() time.Time {
+	if l.peerHeard.After(l.started) {
+		return l.peerHeard
+	}
+	return l.started
+}
+
 func (l *Link) healthyLocked(now time.Time) bool {
 	if l.ctx.Err() != nil || l.unverified {
 		return false
 	}
 	if l.options.Accepted {
-		return !l.peerPing.IsZero() && now.Sub(l.peerPing) < l.options.Timeout
+		return !l.peerPing.IsZero() && now.Sub(l.peerPing) < l.options.Timeout && now.Sub(l.heardLocked()) < l.options.Timeout
 	}
 	return !l.lastPong.IsZero() && (l.probeSince.IsZero() || now.Sub(l.probeSince) < l.options.Timeout)
 }
@@ -698,24 +718,13 @@ func (l *Link) readLoop() {
 				return
 			}
 		case pingMessage:
-			if len(raw) != 9 {
+			if len(raw) != pingSize {
 				return
 			}
-			if l.options.Accepted {
-				l.mu.Lock()
-				now := time.Now()
-				if l.expiredLocked(now) {
-					l.mu.Unlock()
-					continue
-				}
-				first := l.peerPing.IsZero() && !l.unverified
-				l.peerPing = now
-				l.mu.Unlock()
-				if first {
-					l.logUp()
-				}
+			if !l.receivePing(binary.BigEndian.Uint64(raw[1:9]), binary.BigEndian.Uint64(raw[9:]), time.Now()) {
+				continue
 			}
-			response := append([]byte{}, raw...)
+			response := append([]byte{}, raw[:9]...)
 			response[0] = pongMessage
 			select {
 			case l.control <- response:
@@ -949,6 +958,29 @@ func (l *Link) logDown(reason string) {
 	slog.Info("link down", l.logAttrs("reason", reason, "was_up", wasUp, "age", time.Since(l.started).Round(time.Second).String(), "rx_bytes", l.rx.Load(), "tx_bytes", l.tx.Load())...)
 }
 
+// receivePing records a peer's ping, which is answered unless the Link
+// expired: an accepted Link's liveness, and when the ping confirms a newer
+// pong of this side's, that this side's messages arrive.
+func (l *Link) receivePing(nonce, confirmed uint64, now time.Time) bool {
+	l.mu.Lock()
+	if l.expiredLocked(now) {
+		l.mu.Unlock()
+		return false
+	}
+	if confirmed > l.confirmed {
+		l.confirmed, l.peerHeard = confirmed, now
+	}
+	first := l.options.Accepted && l.peerPing.IsZero() && !l.unverified
+	if l.options.Accepted {
+		l.peerPing = now
+	}
+	l.mu.Unlock()
+	if first {
+		l.logUp()
+	}
+	return true
+}
+
 func (l *Link) recordPong(nonce uint64, now time.Time) {
 	l.mu.Lock()
 	sent, ok := l.pending[nonce]
@@ -956,6 +988,7 @@ func (l *Link) recordPong(nonce uint64, now time.Time) {
 		l.mu.Unlock()
 		return
 	}
+	l.lastPongNonce = max(l.lastPongNonce, nonce)
 	first := l.lastPong.IsZero() && !l.options.Accepted && !l.unverified
 	sample := now.Sub(sent)
 	if l.rtt == 0 {
@@ -1027,7 +1060,9 @@ func (l *Link) heartbeat(now time.Time) bool {
 		if l.peerPing.After(heard) {
 			heard = l.peerPing
 		}
-		if now.Sub(heard) >= l.options.Timeout {
+		// Both directions must work: the dialer's pings arrive, and they
+		// confirm that this side's pongs arrive too.
+		if now.Sub(heard) >= l.options.Timeout || now.Sub(l.heardLocked()) >= l.options.Timeout {
 			return false
 		}
 		interval = acceptedProbe
@@ -1038,9 +1073,10 @@ func (l *Link) heartbeat(now time.Time) bool {
 		return true
 	}
 	l.nextPing++
-	raw := make([]byte, 9)
+	raw := make([]byte, pingSize)
 	raw[0] = pingMessage
 	binary.BigEndian.PutUint64(raw[1:], l.nextPing)
+	binary.BigEndian.PutUint64(raw[9:], l.lastPongNonce)
 	select {
 	case l.control <- raw:
 		l.pending[l.nextPing] = now

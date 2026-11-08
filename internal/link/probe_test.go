@@ -97,7 +97,8 @@ func TestAcceptedLinkLiveness(t *testing.T) {
 	var now time.Time
 	for tick := 0; tick < 60; tick++ {
 		now = start.Add(time.Duration(tick) * h)
-		l.peerPing = now
+		// The dialer's ping confirms the pong for its previous one.
+		l.receivePing(uint64(tick+1), uint64(tick), now)
 		if !l.heartbeat(now) || !l.healthyLocked(now.Add(time.Millisecond)) {
 			t.Fatalf("pinged accepted link unhealthy at tick %d", tick)
 		}
@@ -106,9 +107,10 @@ func TestAcceptedLinkLiveness(t *testing.T) {
 	if want := uint64(60 * h / acceptedProbe); l.sent != want || l.rtt == 0 {
 		t.Fatalf("accepted probes = %d, rtt = %v; want %d RTT samples", l.sent, l.rtt, want)
 	}
-	// Liveness ends one timeout after the dialer's last ping.
+	// Liveness ends within one timeout after the dialer's last ping, which
+	// confirmed this side's pong of one heartbeat earlier.
 	silent := now
-	if !l.heartbeat(silent.Add(o.Timeout-time.Millisecond)) || l.heartbeat(silent.Add(o.Timeout)) || l.healthyLocked(silent.Add(o.Timeout)) {
+	if !l.heartbeat(silent.Add(o.Timeout-h-time.Millisecond)) || l.heartbeat(silent.Add(o.Timeout)) || l.healthyLocked(silent.Add(o.Timeout)) {
 		t.Fatal("accepted link outlived its silent dialer")
 	}
 	// A dialer that never pings cannot keep an accepted link, even if the
@@ -118,6 +120,31 @@ func TestAcceptedLinkLiveness(t *testing.T) {
 	answer(l, start)
 	if l.healthyLocked(start.Add(time.Second)) || l.heartbeat(start.Add(o.Timeout)) {
 		t.Fatal("accepted link survived without dialer pings")
+	}
+}
+
+// An accepted Link whose own messages stop arriving fails within one timeout,
+// although the dialer's pings still arrive: they stop confirming its pongs.
+func TestAcceptedLinkDetectsOneWayLoss(t *testing.T) {
+	o := (Options{Accepted: true}).defaults()
+	h := o.Heartbeat
+	start := time.Unix(1000, 0)
+	l := &Link{ctx: context.Background(), options: o, control: make(chan []byte, 8), pending: map[uint64]time.Time{}, started: start}
+	tick := 0
+	for ; tick < 10; tick++ {
+		l.receivePing(uint64(tick+1), uint64(tick), start.Add(time.Duration(tick)*h))
+	}
+	lost := start.Add(time.Duration(tick-1) * h) // the last pong that arrived
+	var failed time.Time
+	for ; tick < 40 && failed.IsZero(); tick++ {
+		now := start.Add(time.Duration(tick) * h)
+		l.receivePing(uint64(tick+1), uint64(10), now) // still confirms pong 10
+		if !l.heartbeat(now) || !l.healthyLocked(now) {
+			failed = now
+		}
+	}
+	if failed.IsZero() || failed.Sub(lost) > o.Timeout+h {
+		t.Fatalf("one-way loss detected %v after the last confirmed pong, want within %v", failed.Sub(lost), o.Timeout+h)
 	}
 }
 
@@ -160,7 +187,7 @@ func TestLinkClosesAtHealthDeadline(t *testing.T) {
 			silent := muted
 			mute.Unlock()
 			if raw[0] == pingMessage && !silent {
-				reply := append([]byte{}, raw...)
+				reply := append([]byte{}, raw[:9]...)
 				reply[0] = pongMessage
 				b.Send(context.Background(), reply)
 			}
@@ -194,5 +221,31 @@ func TestLinkClosesAtHealthDeadline(t *testing.T) {
 	// Closing on the following heartbeat would take up to Timeout+Heartbeat.
 	if elapsed := time.Since(since); elapsed > options.Timeout+options.Heartbeat/2 {
 		t.Fatalf("link closed %v after its first unanswered probe, want about %v", elapsed, options.Timeout)
+	}
+}
+
+// A dialer and an accepted Link over one channel keep each other healthy for
+// many timeouts: each ping confirms the pong for the one before.
+func TestAcceptedLinkConfirmedByDialer(t *testing.T) {
+	options := Options{Heartbeat: 100 * time.Millisecond, Timeout: 300 * time.Millisecond}
+	a, b := pipePair()
+	dialer := newCompactTestLink(t, a, options)
+	accepted := options
+	accepted.Accepted = true
+	acceptor := newCompactTestLink(t, b, accepted)
+	deadline := time.Now().Add(3 * time.Second)
+	for !(dialer.Healthy() && acceptor.Healthy()) && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	for end := time.Now().Add(5 * options.Timeout); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		if !dialer.Healthy() || !acceptor.Healthy() {
+			acceptor.mu.Lock()
+			heard, ping, started, answered := acceptor.peerHeard, acceptor.peerPing, acceptor.started, acceptor.confirmed
+			acceptor.mu.Unlock()
+			dialer.mu.Lock()
+			echo := dialer.lastPongNonce
+			dialer.mu.Unlock()
+			t.Fatalf("dialer healthy %v, acceptor healthy %v; heard %v ago, ping %v ago, started %v ago, confirmed %d, dialer echo %d", dialer.Healthy(), acceptor.Healthy(), time.Since(heard), time.Since(ping), time.Since(started), answered, echo)
+		}
 	}
 }
