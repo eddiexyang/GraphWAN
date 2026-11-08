@@ -2,6 +2,7 @@ package agent
 
 import (
 	"testing"
+	"time"
 
 	"github.com/eWloYW8/GraphWAN/internal/model"
 	"github.com/eWloYW8/GraphWAN/internal/testutil"
@@ -31,12 +32,12 @@ func TestTCPOnAsymmetricEqualCostPaths(t *testing.T) {
 		t.Run(string(carrier), func(t *testing.T) {
 			agents, devices, state := graphAgents(t, carrier, streamOptions{}, 5, 0, asymmetricPaths(func(int) model.Transport { return carrier }))
 			n := state.Networks[0]
-			if next, _, _ := agents[0].state.Load().router.NextHop(n.ID, n.Nodes[2].Address); next != n.Nodes[1].ID {
-				t.Fatalf("A reaches C through %s, want B", next)
-			}
-			if next, _, _ := agents[2].state.Load().router.NextHop(n.ID, n.Nodes[0].Address); next != n.Nodes[3].ID {
-				t.Fatalf("C reaches A through %s, want D", next)
-			}
+			// Link-state routes settle after the Links come up.
+			waitFor(t, 10*time.Second, "A to reach C through B and C to reach A through D", func() bool {
+				forward, _, _ := agents[0].state.Load().router.NextHop(n.ID, n.Nodes[2].Address)
+				back, _, _ := agents[2].state.Load().router.NextHop(n.ID, n.Nodes[0].Address)
+				return forward == n.Nodes[1].ID && back == n.Nodes[3].ID
+			})
 			transferApplication(t, devices[0], devices[2], n.Nodes[2].Address)
 			assertNoTCPOverTCP(t, agents)
 		})
