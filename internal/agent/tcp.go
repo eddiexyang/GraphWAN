@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -110,7 +111,7 @@ func (r *DataPlane) captureTCP(state *runtimeState, network model.ID, raw []byte
 		}
 		next = hop
 	}
-	if !state.mesh.StreamsAvailable(network, next) {
+	if !state.mesh.StreamCarrier(network, next) {
 		return false
 	}
 	tcp.flows.add(source, destination, false)
@@ -220,10 +221,14 @@ func (r *DataPlane) newTCP(network model.ID, fingerprint string, mtu int, offloa
 		}
 		// A session survives route changes and failed relays; it needs every
 		// hop to support them, else the connection uses a plain stream.
-		if session, err := r.startSession(ctx, request); session != nil || err != nil {
-			return session, err
+		session, err := r.startSession(ctx, request)
+		if session == nil && err == nil {
+			session, err = r.openTCP(ctx, request, "")
 		}
-		return r.openTCP(ctx, request, "")
+		if err != nil && noRoute(err) {
+			err = fmt.Errorf("%w: %w", streamproxy.ErrNoRoute, err)
+		}
+		return session, err
 	}
 	batch := func(packets [][]byte) error {
 		state := r.state.Load()
@@ -302,6 +307,17 @@ func (r *DataPlane) accessPacket(state *runtimeState, ctx context.Context, netwo
 	return state.router.FromTunnel(ctx, network, raw)
 }
 
+// waitStreams waits while the Edge to next carries streams but they are
+// moving between its Links, which leaves them no Link for a moment.
+func waitStreams(ctx context.Context, state *runtimeState, network, next model.ID) {
+	for !state.mesh.StreamsAvailable(network, next) && state.mesh.StreamCarrier(network, next) && ctx.Err() == nil {
+		select {
+		case <-ctx.Done():
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 func (r *DataPlane) openTCP(ctx context.Context, request streamproxy.Request, ingress model.ID) (streamproxy.Conn, error) {
 	state := r.state.Load()
 	if state == nil {
@@ -310,6 +326,9 @@ func (r *DataPlane) openTCP(ctx context.Context, request streamproxy.Request, in
 	next, local, err := state.router.TCPRoute(request, ingress)
 	if err != nil {
 		return nil, err
+	}
+	if !local {
+		waitStreams(ctx, state, request.Network, next)
 	}
 	if local || !state.mesh.StreamsAvailable(request.Network, next) {
 		// The connection leaves the stream here: either it is delivered on this

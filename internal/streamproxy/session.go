@@ -46,10 +46,20 @@ const (
 	StatusLegacy = 2
 	// StatusUnknown: the egress has no such session.
 	StatusUnknown = 3
+	// StatusOKAt answers a request with At: 8 bytes follow, the offset of the
+	// first upstream byte the egress needs, which is what it has read.
+	StatusOKAt = 4
+	// StatusNoRoute: a hop has no route or no Link toward the destination
+	// for now, as while routes converge. An older hop answers StatusRefused.
+	StatusNoRoute = 5
 )
 
 var ErrLegacy = errors.New("a hop does not support resumable TCP")
 var ErrUnknownSession = errors.New("egress has no such TCP session")
+
+// ErrNoRoute is a connection that has no path for now. As for a packet with
+// no route, its SYN is dropped rather than answered, so the client retries.
+var ErrNoRoute = errors.New("TCP connection has no route for now")
 var errNoPath = errors.New("TCP session has no path")
 
 type SessionID [16]byte
@@ -76,12 +86,14 @@ func (id *SessionID) UnmarshalText(text []byte) error {
 // ResponseError maps a chain response status to an error.
 func ResponseError(status byte) error {
 	switch status {
-	case StatusOK:
+	case StatusOK, StatusOKAt:
 		return nil
 	case StatusLegacy:
 		return ErrLegacy
 	case StatusUnknown:
 		return ErrUnknownSession
+	case StatusNoRoute:
+		return ErrNoRoute
 	default:
 		return errors.New("TCP stream target refused")
 	}
@@ -318,7 +330,9 @@ func (c *Counters) Retained() uint64 { return c.retained.total() }
 
 // OpenChain opens a chain of generation gen whose downstream bytes start at
 // down and upstream bytes at up.
-type OpenChain func(ctx context.Context, gen uint32, down, up uint64) (Hop, error)
+// It returns the offset from which the chain carries the downstream bytes:
+// what the egress has read when it told, or down.
+type OpenChain func(ctx context.Context, gen uint32, down, up uint64) (Hop, uint64, error)
 
 // End is a session's ingress or egress: the connection Relay copies with the
 // local one. Its writes go to the current chain and are kept until delivered;
@@ -362,7 +376,7 @@ func newEnd(parent context.Context, counters *Counters) *End {
 // StartIngress opens the first chain before the access connection is
 // accepted, as a connected stream would be.
 func StartIngress(ctx context.Context, open OpenChain, counters *Counters) (*End, error) {
-	hop, err := open(ctx, 0, 0, 0)
+	hop, _, err := open(ctx, 0, 0, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -434,9 +448,11 @@ func (e *End) resend(hop Hop, out uint64) error {
 	return nil
 }
 
-// Accept takes an egress's newer chain: its downstream bytes start at down,
-// and it carries the upstream bytes from up, which this end kept.
-func (e *End) Accept(hop Hop, gen uint32, down, up uint64) error {
+// Accept takes an egress's newer chain: it carries the upstream bytes from
+// up, which this end kept, and its downstream bytes start at down, or with at
+// at what this end has read. answer sends the chain's response with that
+// offset before any byte is resent.
+func (e *End) Accept(hop Hop, gen uint32, down, up uint64, at bool, answer func(from uint64) error) error {
 	e.mu.Lock()
 	if e.done || gen <= e.gen {
 		e.mu.Unlock()
@@ -449,7 +465,13 @@ func (e *End) Accept(hop Hop, gen uint32, down, up uint64) error {
 	if e.orphan.IsZero() {
 		e.orphan = time.Now()
 	}
+	if at {
+		down = max(down, e.read)
+	}
 	e.mu.Unlock()
+	if err := answer(down); err != nil {
+		return err
+	}
 	if err := e.resend(hop, up); err != nil {
 		return err
 	}
@@ -465,13 +487,19 @@ func (e *End) Accept(hop Hop, gen uint32, down, up uint64) error {
 	return nil
 }
 
-// Reroute moves the session to a chain along the current routes.
+// Reroute moves the session to a chain along the current routes. The
+// current chain keeps carrying bytes until the new one is open.
 func (e *End) Reroute() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.hop != nil {
-		e.failLocked(e.hop)
+	if e.done || e.busy || e.open == nil {
+		return
 	}
+	if e.hop == nil {
+		return
+	}
+	e.busy = true
+	go e.rebuild()
 }
 
 // RequestReplay handles the egress's report that generation gen failed.
@@ -530,16 +558,25 @@ func (e *End) rebuild() {
 		down, _ := e.keep.bounds()
 		up := e.read
 		e.mu.Unlock()
-		hop, err := e.open(e.ctx, gen, down, up)
+		hop, from, err := e.open(e.ctx, gen, down, up)
 		if err == nil {
-			err = e.resend(hop, down)
+			// The old chain, if a reroute left it running, stops here: what it
+			// carried past from is sent again on the new one.
+			e.mu.Lock()
+			if old := e.hop; old != nil {
+				e.hop = nil
+				old.Abort()
+			}
+			e.mu.Unlock()
+			e.keep.Release(from)
+			err = e.resend(hop, from)
 		}
 		e.mu.Lock()
 		switch {
 		case err == nil && !e.done:
 			e.counters.Rebuilds.Add(1)
 			e.gen = gen
-			e.useLocked(hop, down, up)
+			e.useLocked(hop, from, up)
 			if e.eof {
 				hop.CloseWrite()
 			}
@@ -784,10 +821,11 @@ func (e *End) discard(hop Hop, n uint64) error {
 func (e *End) received(hop Hop, n int, err error) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	// Bytes of a chain that was just replaced still reached the caller.
 	if hop == e.hop {
 		e.inRead += uint64(n)
-		e.read += uint64(n)
 	}
+	e.read += uint64(n)
 	switch {
 	case err == nil:
 		return nil

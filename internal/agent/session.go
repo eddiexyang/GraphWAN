@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/eWloYW8/GraphWAN/internal/forwarding"
 	"github.com/eWloYW8/GraphWAN/internal/model"
 	"github.com/eWloYW8/GraphWAN/internal/packet"
 	"github.com/eWloYW8/GraphWAN/internal/streamproxy"
@@ -158,16 +159,16 @@ func (r *DataPlane) startSession(ctx context.Context, request streamproxy.Reques
 	request.Conn = streamproxy.NewSessionID()
 	key := sessionKey{request.Network, request.Source, request.Conn}
 	entry := &ingressSession{request: request}
-	end, err := streamproxy.StartIngress(ctx, func(ctx context.Context, gen uint32, down, up uint64) (streamproxy.Hop, error) {
+	end, err := streamproxy.StartIngress(ctx, func(ctx context.Context, gen uint32, down, up uint64) (streamproxy.Hop, uint64, error) {
 		chain := request
-		chain.Gen, chain.Down, chain.Up = gen, down, up
-		hop, next, err := r.openChain(ctx, chain, "")
+		chain.Gen, chain.Down, chain.Up, chain.At = gen, down, up, gen > 0
+		hop, next, at, err := r.openChain(ctx, chain, "")
 		if err == nil {
 			r.sessions.mu.Lock()
 			entry.next = next
 			r.sessions.mu.Unlock()
 		}
-		return hop, err
+		return hop, at, err
 	}, &r.sessions.counters)
 	if errors.Is(err, streamproxy.ErrLegacy) {
 		return nil, nil
@@ -192,55 +193,89 @@ func (r *DataPlane) startSession(ctx context.Context, request streamproxy.Reques
 // for the chain to reach the egress. Toward an Agent without sessions, or an
 // Edge whose Link carries only packets, it fails with ErrLegacy: with no TCP
 // over TCP, the chain cannot continue. An Edge without a Link yet is retried.
-func (r *DataPlane) openChain(ctx context.Context, request streamproxy.Request, upstream model.ID) (streamproxy.Hop, model.ID, error) {
+// openChain opens the next hop of a chain and returns it with the offset from
+// which it carries the downstream bytes: the egress's answer to At, or Down.
+func (r *DataPlane) openChain(ctx context.Context, request streamproxy.Request, upstream model.ID) (streamproxy.Hop, model.ID, uint64, error) {
 	state := r.state.Load()
 	if state == nil {
-		return nil, "", net.ErrClosed
+		return nil, "", 0, net.ErrClosed
 	}
 	next, local, err := state.router.TCPRoute(request, upstream)
 	if err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
 	if local {
-		return nil, "", errors.New("TCP session egress is this Agent")
+		return nil, "", 0, errors.New("TCP session egress is this Agent")
 	}
+	waitStreams(ctx, state, request.Network, next)
 	if !state.mesh.ResumeAvailable(request.Network, next) {
 		if state.mesh.StreamsAvailable(request.Network, next) || state.mesh.PacketsOnly(request.Network, next) {
-			return nil, "", streamproxy.ErrLegacy
+			return nil, "", 0, streamproxy.ErrLegacy
 		}
-		return nil, "", errNoCarriage
+		return nil, "", 0, errNoCarriage
 	}
 	s, err := state.mesh.OpenStream(ctx, request.Network, next)
 	if err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
 	hop, ok := s.(streamproxy.Hop)
 	if !ok {
 		s.Close()
-		return nil, "", streamproxy.ErrLegacy
+		return nil, "", 0, streamproxy.ErrLegacy
 	}
 	request.Hops--
+	from := request.Down
 	err = streamproxy.During(ctx, hop, func() error {
 		if err := streamproxy.WriteRequest(hop, request); err != nil {
 			return err
 		}
-		var response [1]byte
-		if _, err := io.ReadFull(hop, response[:]); err != nil {
+		var response [9]byte
+		if _, err := io.ReadFull(hop, response[:1]); err != nil {
 			return err
+		}
+		if response[0] == streamproxy.StatusOKAt && request.At {
+			if _, err := io.ReadFull(hop, response[1:]); err != nil {
+				return err
+			}
+			from = binary.BigEndian.Uint64(response[1:])
+			if from < request.Down {
+				return errors.New("egress resumes before its delivered offset")
+			}
+			return nil
 		}
 		return streamproxy.ResponseError(response[0])
 	})
 	if err != nil {
 		hop.Abort()
-		return nil, "", err
+		return nil, "", 0, err
 	}
-	return hop, next, nil
+	return hop, next, from, nil
+}
+
+// chainAnswer is a chain's success response: with the egress's offset when
+// the request asked for it.
+func chainAnswer(request streamproxy.Request, from uint64) []byte {
+	if !request.At {
+		return []byte{streamproxy.StatusOK}
+	}
+	answer := make([]byte, 9)
+	answer[0] = streamproxy.StatusOKAt
+	binary.BigEndian.PutUint64(answer[1:], from)
+	return answer
 }
 
 var errNoCarriage = errors.New("the TCP session's next Edge has no Link")
 
+// noRoute reports a path that is missing for now: no route, or no Link on
+// the next Edge.
+func noRoute(err error) bool {
+	return errors.Is(err, streamproxy.ErrNoRoute) || errors.Is(err, forwarding.ErrUnreachable) || errors.Is(err, errNoCarriage)
+}
+
 func chainStatus(err error) byte {
 	switch {
+	case noRoute(err):
+		return streamproxy.StatusNoRoute
 	case errors.Is(err, streamproxy.ErrLegacy):
 		return streamproxy.StatusLegacy
 	case errors.Is(err, streamproxy.ErrUnknownSession):
@@ -277,27 +312,27 @@ func (r *DataPlane) acceptChain(parent, ctx context.Context, network, remote mod
 	}
 	_, local, err := state.router.TCPRoute(request, remote)
 	if err != nil {
-		refuse(ctx, s, streamproxy.StatusRefused)
+		refuse(ctx, s, chainStatus(err))
 		return
 	}
 	if local {
 		r.acceptEgress(parent, ctx, network, remote, hop, request)
 		return
 	}
-	down, next, err := r.openChain(ctx, request, remote)
+	down, next, from, err := r.openChain(ctx, request, remote)
 	if err != nil {
 		refuse(ctx, s, chainStatus(err))
 		return
 	}
 	if err := streamproxy.During(ctx, hop, func() error {
-		_, err := hop.Write([]byte{streamproxy.StatusOK})
+		_, err := hop.Write(chainAnswer(request, from))
 		return err
 	}); err != nil {
 		down.Abort()
 		return
 	}
 	hop.Begin(request.Up)
-	down.Begin(request.Down)
+	down.Begin(from)
 	c := &relayChain{request: request, upstream: remote, next: next, up: hop, down: down}
 	r.sessions.mu.Lock()
 	r.sessions.relays[c] = struct{}{}
@@ -342,10 +377,11 @@ func (r *DataPlane) acceptEgress(parent, ctx context.Context, network, remote mo
 			refuse(ctx, hop, streamproxy.StatusUnknown)
 			return
 		}
-		if _, err := hop.Write([]byte{streamproxy.StatusOK}); err != nil {
-			return
+		answer := func(from uint64) error {
+			_, err := hop.Write(chainAnswer(request, from))
+			return err
 		}
-		if err := entry.end.Accept(hop, request.Gen, request.Down, request.Up); err != nil {
+		if err := entry.end.Accept(hop, request.Gen, request.Down, request.Up, request.At, answer); err != nil {
 			hop.Abort()
 			return
 		}

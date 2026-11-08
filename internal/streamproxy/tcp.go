@@ -216,7 +216,7 @@ func (e *Engine) forward(request *tcp.ForwarderRequest) {
 	remote, err := e.open(ctx, from, to)
 	cancel()
 	if err != nil {
-		request.Complete(true)
+		request.Complete(!errors.Is(err, ErrNoRoute))
 		return
 	}
 	defer remote.Close()

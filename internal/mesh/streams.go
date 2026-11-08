@@ -50,13 +50,38 @@ func (m *Mesh) StreamsAvailable(network, remote model.ID) bool {
 	return g != nil && g.mux.Available()
 }
 
+// StreamCarrier reports whether the Edge to remote carries TCP as streams:
+// its streams have a Link, or are moving between its TCP-backed Links, which
+// never carry TCP as packets.
+func (m *Mesh) StreamCarrier(network, remote model.ID) bool {
+	m.mu.Lock()
+	g := m.groups[key{network, remote}]
+	m.mu.Unlock()
+	return g != nil && (g.mux.Available() || g.tcpBacked())
+}
+
+// tcpBacked reports whether the Edge has a TCP-backed Link.
+func (g *group) tcpBacked() bool {
+	if g.edge.ActiveTCPBacked() {
+		return true
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, l := range g.links {
+		if l.TCPBacked() {
+			return true
+		}
+	}
+	return false
+}
+
 // PacketsOnly reports whether the Edge to remote has a selected Link that
 // carries no streams, such as UDP or QUIC: TCP crosses it only as packets.
 func (m *Mesh) PacketsOnly(network, remote model.ID) bool {
 	m.mu.Lock()
 	g := m.groups[key{network, remote}]
 	m.mu.Unlock()
-	return g != nil && g.edge.Active() != nil && !g.mux.Available()
+	return g != nil && g.edge.Active() != nil && !g.mux.Available() && !g.tcpBacked()
 }
 
 // TCPCarrier reports whether the Edge to remote sends on a TCP, WS, WSS or

@@ -33,6 +33,10 @@ type Request struct {
 	Gen  uint32    `json:"gen,omitempty"`
 	Down uint64    `json:"down,omitempty"`
 	Up   uint64    `json:"up,omitempty"`
+	// At asks the egress to answer StatusOKAt with what it has read, so the
+	// ingress resends only past it. A relay that predates it drops it, and the
+	// egress then answers StatusOK.
+	At bool `json:"at,omitempty"`
 }
 
 // Resumable reports whether the request opens a chain of a session.
