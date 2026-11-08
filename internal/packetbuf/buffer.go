@@ -22,10 +22,16 @@ type Buffer struct {
 	refs     atomic.Int32 // owners beyond the first
 }
 
-var small, large sync.Pool
+var small, frame, large sync.Pool
+
+// FrameSize holds a full-size overlay frame or stream frame with its message
+// byte and the peer crypto overhead, so retained frames do not pin the
+// 16 KiB class.
+const FrameSize = 9216
 
 func init() {
 	small.New = func() any { return &Buffer{storage: make([]byte, 2048), pool: &small} }
+	frame.New = func() any { return &Buffer{storage: make([]byte, FrameSize), pool: &frame} }
 	large.New = func() any { return &Buffer{storage: make([]byte, 16384), pool: &large} }
 }
 
@@ -37,6 +43,8 @@ func Get(size int) *Buffer {
 	switch {
 	case size <= 2048:
 		b = small.Get().(*Buffer)
+	case size <= FrameSize:
+		b = frame.Get().(*Buffer)
 	case size <= 16384:
 		b = large.Get().(*Buffer)
 	default:
