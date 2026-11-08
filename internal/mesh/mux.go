@@ -83,25 +83,35 @@ type muxFrame struct {
 }
 
 type mux struct {
-	g         *group
-	even      bool
-	handler   func(*muxStream)
-	mu        sync.Mutex
-	ready     map[*link.Link]bool
-	current   *link.Link
-	next      uint64
-	ended     map[uint64]time.Time
-	lastPurge time.Time
-	streams   map[uint64]*muxStream
-	pending   []*muxStream
-	queued    map[*muxStream]bool
-	resets    []muxResetEntry
-	lostSince time.Time
-	closed    bool
+	g             *group
+	even          bool
+	handler       func(*muxStream)
+	mu            sync.Mutex
+	ready         map[*link.Link]bool
+	current       *link.Link
+	next          uint64
+	ended         map[uint64]time.Time
+	lastPurge     time.Time
+	streams       map[uint64]*muxStream
+	pending       []*muxStream
+	queuedStreams map[*muxStream]bool
+	resets        []muxResetEntry
+	lostSince     time.Time
+	closed        bool
+	// queued is the bytes of frames waiting for the Link writer; writers wait
+	// while it reaches muxQueue, so a stream reads no further ahead of its
+	// Link than that and the rest waits in its source. drained is closed when
+	// it falls below.
+	queued  int
+	drained chan struct{}
 }
 
+// muxQueue bounds the frames an Edge holds for its Link writer: a few of its
+// write batches.
+const muxQueue = 2 << 20
+
 func newMux(g *group, even bool, handler func(*muxStream)) *mux {
-	m := &mux{g: g, even: even, handler: handler, ready: map[*link.Link]bool{}, streams: map[uint64]*muxStream{}, queued: map[*muxStream]bool{}, ended: map[uint64]time.Time{}}
+	m := &mux{g: g, even: even, handler: handler, ready: map[*link.Link]bool{}, streams: map[uint64]*muxStream{}, queuedStreams: map[*muxStream]bool{}, ended: map[uint64]time.Time{}, drained: make(chan struct{})}
 	// The peer's mux can outlive this Agent, retaining live stream IDs and
 	// tombstones across Link reconnections. A fresh random counter origin
 	// avoids deterministic reuse after an Agent restart or group recreation.
@@ -247,6 +257,9 @@ func (m *mux) switchLocked(l *link.Link) {
 	resent := 0
 	for _, s := range m.streams {
 		resent += s.unsent
+		for _, frame := range s.frames[:s.unsent] {
+			m.queueLocked(s, len(frame.raw))
+		}
 		s.unsent = 0
 		s.ackDue = true
 		m.enqueueLocked(s)
@@ -321,9 +334,20 @@ func (m *mux) close() {
 	m.mu.Unlock()
 }
 
+// queueLocked adds n bytes of frames waiting for the Link writer to s and to
+// the Edge, or removes them when n is negative.
+func (m *mux) queueLocked(s *muxStream, n int) {
+	s.queued += n
+	m.queued += n
+	if n < 0 && m.queued < muxQueue {
+		close(m.drained)
+		m.drained = make(chan struct{})
+	}
+}
+
 func (m *mux) enqueueLocked(s *muxStream) {
-	if !m.queued[s] {
-		m.queued[s] = true
+	if !m.queuedStreams[s] {
+		m.queuedStreams[s] = true
 		m.pending = append(m.pending, s)
 	}
 }
@@ -392,13 +416,14 @@ func (m *mux) PullStream(l *link.Link, dst [][]byte, owners []*packetbuf.Buffer)
 			frame := s.frames[s.unsent]
 			frame.buf.Retain()
 			dst[n], owners[n] = frame.raw, frame.buf
+			m.queueLocked(s, -len(frame.raw))
 			s.unsent++
 			n++
 		}
 		if s.ackDue || s.unsent < len(s.frames) {
 			m.pending = append(m.pending, s)
 		} else {
-			delete(m.queued, s)
+			delete(m.queuedStreams, s)
 		}
 	}
 	return n
@@ -539,6 +564,9 @@ func (m *mux) receiveAck(id, received, limit, delivered uint64, explicit bool) {
 		s.acked = received
 		drop := 0
 		for drop < len(s.frames) && s.frames[drop].end <= received {
+			if drop >= s.unsent {
+				m.queueLocked(s, -len(s.frames[drop].raw)) // acknowledged before this Link sent it
+			}
 			s.frames[drop].buf.Release()
 			s.frames[drop] = muxFrame{}
 			drop++
@@ -581,6 +609,7 @@ type muxStream struct {
 	acked       uint64
 	frames      []muxFrame
 	unsent      int
+	queued      int // bytes of frames[unsent:], counted in the mux's queued
 	writeClosed bool
 	finOffset   uint64
 
@@ -720,7 +749,18 @@ func (s *muxStream) reserve() (uint64, int, error) {
 		}
 		available := s.peerLimit - s.sendNext
 		start := s.sendNext
+		drained, full := m.drained, m.queued >= muxQueue
 		m.mu.Unlock()
+		if full {
+			// The Link writer has enough waiting: the bytes stay in their
+			// source until it catches up.
+			select {
+			case <-drained:
+			case <-s.ctx.Done():
+				return 0, 0, s.errOr(net.ErrClosed)
+			}
+			continue
+		}
 		if available > 0 {
 			return start, int(min(available, muxBurst*muxMaxData)), nil
 		}
@@ -745,6 +785,9 @@ func (s *muxStream) publish(b *frameBuilder) error {
 	frames := b.finish()
 	if len(s.frames) == 0 {
 		s.progress = time.Now()
+	}
+	for _, frame := range frames {
+		m.queueLocked(s, len(frame.raw))
 	}
 	s.frames = append(s.frames, frames...)
 	s.sendNext += uint64(b.bytes)
@@ -937,6 +980,7 @@ func (s *muxStream) CloseWrite() error {
 		s.progress = time.Now()
 	}
 	s.frames = append(s.frames, muxFrame{end: s.sendNext + 1, raw: raw})
+	m.queueLocked(s, len(raw))
 	m.enqueueLocked(s)
 	l := m.current
 	m.mu.Unlock()
@@ -1065,6 +1109,9 @@ func (s *muxStream) failLocked(err error) {
 		return
 	}
 	s.err = err
+	if s.queued != 0 {
+		s.m.queueLocked(s, -s.queued)
+	}
 	for _, frame := range s.frames {
 		frame.buf.Release()
 	}

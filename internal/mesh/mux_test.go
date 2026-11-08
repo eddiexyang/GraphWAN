@@ -684,3 +684,54 @@ func TestMuxResendsKeptBuffers(t *testing.T) {
 		t.Fatal("resent bytes changed", err)
 	}
 }
+
+// A stream reads no further ahead of its Link than muxQueue: a writer waits
+// while the Link writer has that much waiting, and continues once it pulls.
+func TestMuxWritersWaitForTheLink(t *testing.T) {
+	p := newMuxPair(t)
+	s := p.a.newStreamLocked(2)
+	wrote := make(chan int, 1)
+	go func() {
+		n, _ := s.Write(make([]byte, 3*muxQueue))
+		wrote <- n
+	}()
+	waitFor(t, "the queue to fill", func() bool {
+		p.a.mu.Lock()
+		defer p.a.mu.Unlock()
+		return p.a.queued >= muxQueue
+	})
+	select {
+	case n := <-wrote:
+		t.Fatalf("wrote %d bytes past a full queue", n)
+	case <-time.After(50 * time.Millisecond):
+	}
+	p.a.mu.Lock()
+	if p.a.queued > muxQueue+muxBurst*(muxDataHeader+muxMaxData) {
+		t.Errorf("%d bytes queued, want about %d", p.a.queued, muxQueue)
+	}
+	p.a.mu.Unlock()
+	var dst [128][]byte
+	var owners [128]*packetbuf.Buffer
+	done := time.After(10 * time.Second)
+	for {
+		select {
+		case n := <-wrote:
+			if n != 3*muxQueue {
+				t.Fatalf("wrote %d", n)
+			}
+			p.a.mu.Lock()
+			defer p.a.mu.Unlock()
+			if p.a.queued != s.queued {
+				t.Fatalf("Edge queues %d, its one stream %d", p.a.queued, s.queued)
+			}
+			return
+		case <-done:
+			t.Fatal("writer did not continue as the Link pulled")
+		default:
+		}
+		n := p.a.PullStream(nil, dst[:], owners[:])
+		packetbuf.ReleaseAll(owners[:n])
+		p.a.receiveAck(s.id, s.sendNext, s.sendNext+muxWindow, 0, false)
+		time.Sleep(time.Millisecond)
+	}
+}

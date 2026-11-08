@@ -168,6 +168,14 @@ func newEngine(parent context.Context, mtu int, output func([]byte) error, open 
 		e.stack.Close()
 		return nil, errors.New(err.String())
 	}
+	// The receive side is local too: what the Agent has not read yet waits in
+	// the sender's own socket, not here as well.
+	receiveBuffer := tcpip.TCPReceiveBufferSizeRangeOption{Min: tcp.MinBufferSize, Default: 256 << 10, Max: 1 << 20}
+	if err := e.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &receiveBuffer); err != nil {
+		cancel()
+		e.stack.Close()
+		return nil, errors.New(err.String())
+	}
 	e.link = channel.New(accessPacketQueue, uint32(mtu), "")
 	e.ingress = &accessLink{Endpoint: e.link, writeTCP: outputGSO}
 	if outputGSO != nil {
