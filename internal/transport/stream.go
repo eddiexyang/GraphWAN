@@ -95,6 +95,47 @@ func (s *Stream) SendFramedBatch(ctx context.Context, frames []byte) (err error)
 	return err
 }
 
+// SendFramedParts writes frames whose length prefixes the producer wrote:
+// parts, gathered by the kernel without a copy, hold frames whole frames, the
+// prefix of each counting the parts after it up to the next frame. The
+// producer keeps ownership until the write completes.
+func (s *Stream) SendFramedParts(ctx context.Context, parts [][]byte, frames int) (err error) {
+	if frames == 0 || frames > 128 || len(parts) == 0 {
+		return errors.New("invalid transport batch size")
+	}
+	size := 0
+	for _, part := range parts {
+		size += len(part)
+	}
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	cleanup, err := deadline(ctx, s.conn.SetWriteDeadline)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	defer func() {
+		if err != nil {
+			s.conn.Close()
+		}
+	}()
+	if s.writeBuffers != nil {
+		n, writeErr := s.writeBuffers(net.Buffers(parts))
+		if writeErr == nil && n != int64(size) {
+			writeErr = io.ErrShortWrite
+		}
+		return ctxError(ctx, writeErr)
+	}
+	if cap(s.writeBuffer) < size {
+		s.writeBuffer = make([]byte, size)
+	}
+	frame := s.writeBuffer[:0]
+	for _, part := range parts {
+		frame = append(frame, part...)
+	}
+	return ctxError(ctx, writeFull(s.conn, frame))
+}
+
 func (s *Stream) SendBatch(ctx context.Context, messages [][]byte) (err error) {
 	if len(messages) == 0 || len(messages) > 128 {
 		return errors.New("invalid transport batch size")

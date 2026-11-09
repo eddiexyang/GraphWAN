@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"net"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,6 +27,11 @@ type framedChannelTransport struct {
 func (c *framedChannelTransport) SendFramedBatch(ctx context.Context, data []byte) error {
 	c.framed.Add(1)
 	return c.Stream.SendFramedBatch(ctx, data)
+}
+
+func (c *framedChannelTransport) SendFramedParts(ctx context.Context, parts [][]byte, frames int) error {
+	c.framed.Add(1)
+	return c.Stream.SendFramedParts(ctx, parts, frames)
 }
 
 func TestPacketChannelBatchWithLegacyReceiver(t *testing.T) {
@@ -116,12 +122,21 @@ func TestPacketChannelBatchWithLegacyReceiver(t *testing.T) {
 
 type recordingTransport struct {
 	*transport.Stream
-	sent bytes.Buffer
+	sent  bytes.Buffer
+	parts [][]byte // the parts of the last gathered write
 }
 
 func (c *recordingTransport) SendFramedBatch(ctx context.Context, data []byte) error {
 	c.sent.Write(data)
 	return c.Stream.SendFramedBatch(ctx, data)
+}
+
+func (c *recordingTransport) SendFramedParts(ctx context.Context, parts [][]byte, frames int) error {
+	c.parts = append(c.parts[:0], parts...)
+	for _, part := range parts {
+		c.sent.Write(part)
+	}
+	return c.Stream.SendFramedParts(ctx, parts, frames)
 }
 
 // A sealed payload's header, or a prefixed payload's prefix, is encrypted and
@@ -192,6 +207,10 @@ func TestSealedPayloadIsEncryptedOnce(t *testing.T) {
 		for _, m := range batch {
 			if rest := m[prefix(m):]; len(rest) > 0 && !bytes.Contains(wire, rest) {
 				t.Fatal("the channel encrypted bytes already sealed")
+			}
+			// The rest went to the transport where it was, not copied.
+			if rest := m[prefix(m):]; len(rest) > 0 && !slices.ContainsFunc(recording.parts, func(part []byte) bool { return len(part) > 0 && &part[0] == &rest[0] }) {
+				t.Fatal("the channel copied bytes past its seal")
 			}
 		}
 	}

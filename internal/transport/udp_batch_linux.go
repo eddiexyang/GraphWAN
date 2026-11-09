@@ -71,7 +71,7 @@ func setUDPReadBuffer(socket *net.UDPConn, size int) error {
 
 type udpBatchSend struct {
 	messages   [128]ipv6.Message
-	buffers    [256][]byte
+	buffers    [384][]byte
 	controls   [128][128]byte
 	starts     [128]int
 	header     [udpHeaderSize]byte
@@ -82,15 +82,21 @@ type udpBatchSend struct {
 // prepare preserves every original datagram, including its token. Scatter/gather
 // avoids concatenating payloads in userspace. GSO allows only equal-size segments
 // followed by at most one smaller final segment, at most 32 per super-packet.
-func (b *udpBatchSend) prepare(payloads [][]byte, reply []byte, gso bool) []ipv6.Message {
-	count := 0
+func (b *udpBatchSend) prepare(payloads, tails [][]byte, reply []byte, gso bool) []ipv6.Message {
+	length := func(i int) int {
+		if tails == nil {
+			return len(payloads[i])
+		}
+		return len(payloads[i]) + len(tails[i])
+	}
+	count, used := 0, 0
 	for start := 0; start < len(payloads); {
 		end := start + 1
-		size := udpHeaderSize + len(payloads[start])
+		size := udpHeaderSize + length(start)
 		total := size
 		if gso {
 			for end < len(payloads) && end-start < maxUDPGSOSegments {
-				next := udpHeaderSize + len(payloads[end])
+				next := udpHeaderSize + length(end)
 				if next > size || total+next > maxUDPSuperPacket {
 					break
 				}
@@ -101,8 +107,14 @@ func (b *udpBatchSend) prepare(payloads [][]byte, reply []byte, gso bool) []ipv6
 				}
 			}
 		}
+		first := used
 		for i := start; i < end; i++ {
-			b.buffers[2*i], b.buffers[2*i+1] = b.header[:], payloads[i]
+			b.buffers[used], b.buffers[used+1] = b.header[:], payloads[i]
+			used += 2
+			if tails != nil && len(tails[i]) > 0 {
+				b.buffers[used] = tails[i]
+				used++
+			}
 		}
 		control := reply
 		if end-start > 1 {
@@ -110,7 +122,7 @@ func (b *udpBatchSend) prepare(payloads [][]byte, reply []byte, gso bool) []ipv6
 			control = appendUDPSegment(control, uint16(size))
 		}
 		b.starts[count] = start
-		b.messages[count] = ipv6.Message{Buffers: b.buffers[2*start : 2*end], Addr: b.remote, OOB: control}
+		b.messages[count] = ipv6.Message{Buffers: b.buffers[first:used], Addr: b.remote, OOB: control}
 		count++
 		start = end
 	}
@@ -134,11 +146,21 @@ func udpGSOUnsupported(err error) bool {
 // SendBatch uses sendmmsg and, when supported by the route, UDP segmentation.
 // The receiver still sees the same independent datagrams and wire protocol.
 func (d *Datagram) SendBatch(ctx context.Context, payloads [][]byte) error {
-	if len(payloads) == 0 || len(payloads) > 128 {
+	return d.SendBatchParts(ctx, payloads, nil)
+}
+
+// SendBatchParts sends datagram i as payloads[i] followed by tails[i], when
+// tails is not nil, gathered by the kernel without a copy.
+func (d *Datagram) SendBatchParts(ctx context.Context, payloads, tails [][]byte) error {
+	if len(payloads) == 0 || len(payloads) > 128 || tails != nil && len(tails) != len(payloads) {
 		return errors.New("invalid UDP batch size")
 	}
-	for _, raw := range payloads {
-		if len(raw) == 0 || len(raw) > MaxMessage {
+	for i, raw := range payloads {
+		size := len(raw)
+		if tails != nil {
+			size += len(tails[i])
+		}
+		if size == 0 || size > MaxMessage {
 			return errors.New("invalid UDP message size")
 		}
 	}
@@ -165,7 +187,7 @@ func (d *Datagram) SendBatch(ctx context.Context, payloads [][]byte) error {
 	defer cleanup()
 	batchSocket := h.batchSockets[socket]
 	gso := batchSocket.gso && !b.disableGSO
-	messages := b.prepare(payloads, d.replyControl, gso)
+	messages := b.prepare(payloads, tails, d.replyControl, gso)
 	sent := 0
 	for sent < len(messages) {
 		n, err := batchSocket.conn.WriteBatch(messages[sent:], 0)
@@ -178,9 +200,12 @@ func (d *Datagram) SendBatch(ctx context.Context, payloads [][]byte) error {
 			if gso && sent < len(messages) && udpGSOUnsupported(err) {
 				// Do not retransmit any successfully submitted prefix. Retrying only the
 				// unsent messages also preserves legacy IP fragmentation for large MTUs.
-				remaining := payloads[b.starts[sent]:]
+				remaining, rest := payloads[b.starts[sent]:], tails
+				if tails != nil {
+					rest = tails[b.starts[sent]:]
+				}
 				b.disableGSO, gso = true, false
-				messages = b.prepare(remaining, d.replyControl, false)
+				messages = b.prepare(remaining, rest, d.replyControl, false)
 				sent = 0
 				continue
 			}

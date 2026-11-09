@@ -116,6 +116,7 @@ type Channel struct {
 	session        *secure.Session
 	sendMu         sync.Mutex
 	sendBuffer     []byte
+	parts          [256][]byte // a batch's sealed parts and the rest of each message
 	opened         [128][]byte // a received batch's messages while they open
 	unreliable     bool
 	repeatRequest  []byte
@@ -320,6 +321,10 @@ func (c *Channel) Send(ctx context.Context, payload []byte) error {
 // SendBatch encrypts each message with its own nonce, retaining compatibility
 // with peers that read one message at a time. Transports without batching fall
 // back to individual sends under the same bounded operation context.
+//
+// A message the channel seals only in part keeps the rest where it is: the
+// sealed part goes to the send buffer and the rest is a separate part of the
+// same write, so the bytes past the seal are never copied.
 func (c *Channel) SendBatch(ctx context.Context, payloads [][]byte) error {
 	if len(payloads) == 0 || len(payloads) > 128 {
 		return errors.New("invalid peer batch size")
@@ -338,14 +343,15 @@ func (c *Channel) SendBatch(ctx context.Context, payloads [][]byte) error {
 		if len(payload) == 0 || len(payload) > secure.MaxPlaintext {
 			return errors.New("invalid peer message size")
 		}
-		needed += headroom + 2 + secure.Overhead + len(payload)
+		needed += headroom + 2 + secure.Overhead + prefix(payload)
 	}
 	if cap(c.sendBuffer) < needed {
 		c.sendBuffer = make([]byte, needed)
 	}
 	c.sendBuffer = c.sendBuffer[:needed]
-	var messages, sealed [128][]byte
-	offset := 0
+	var messages, sealed, tails [128][]byte
+	var starts [129]int
+	offset, split := 0, false
 	for i, payload := range payloads {
 		kind, k := byte(dataKind), prefix(payload)
 		switch {
@@ -355,16 +361,18 @@ func (c *Channel) SendBatch(ctx context.Context, payloads [][]byte) error {
 		default:
 			kind = prefixKind
 		}
-		size := 1 + secure.Overhead + len(payload)
+		head := 1 + secure.Overhead + k
 		if kind == prefixKind {
-			size++
+			head++
 		}
-		end := offset + headroom + size
+		starts[i] = offset
+		end := offset + headroom + head
 		if headroom != 0 {
-			binary.BigEndian.PutUint32(c.sendBuffer[offset:], uint32(size))
+			binary.BigEndian.PutUint32(c.sendBuffer[offset:], uint32(head+len(payload)-k))
 			offset += headroom
 		}
-		c.sendBuffer[offset], sealed[i] = kind, payload[:k]
+		c.sendBuffer[offset], sealed[i], tails[i] = kind, payload[:k], payload[k:]
+		split = split || k < len(payload)
 		messages[i] = c.sendBuffer[offset : offset+1 : end]
 		if kind == prefixKind {
 			c.sendBuffer[offset+1] = byte(k)
@@ -372,20 +380,53 @@ func (c *Channel) SendBatch(ctx context.Context, payloads [][]byte) error {
 		}
 		offset = end
 	}
+	starts[len(payloads)] = offset
 	c.sendBuffer = c.sendBuffer[:offset]
 	if err := c.session.SealBatchAppend(messages[:len(payloads)], sealed[:len(payloads)]); err != nil {
 		return err
 	}
-	for i, payload := range payloads {
-		if len(sealed[i]) != len(payload) {
-			messages[i] = append(messages[i], payload[len(sealed[i]):]...)
+	if headroom != 0 {
+		if !split {
+			// Prefixes and independently authenticated records already occupy
+			// one contiguous allocation.
+			return framed.SendFramedBatch(ctx, c.sendBuffer)
+		}
+		if parted, ok := c.conn.(interface {
+			SendFramedParts(context.Context, [][]byte, int) error
+		}); ok {
+			parts := c.parts[:0]
+			for i := range payloads {
+				parts = append(parts, c.sendBuffer[starts[i]:starts[i+1]])
+				if len(tails[i]) > 0 {
+					parts = append(parts, tails[i])
+				}
+			}
+			err := parted.SendFramedParts(ctx, parts, len(payloads))
+			clear(parts)
+			return err
 		}
 	}
-	if headroom != 0 {
-		// Prefixes and independently authenticated records already occupy one
-		// contiguous allocation. Packet channels retain the same independent
-		// records while avoiding tiny gather vectors or a framing copy.
-		return framed.SendFramedBatch(ctx, c.sendBuffer)
+	if split {
+		if batch, ok := c.conn.(interface {
+			SendBatchParts(context.Context, [][]byte, [][]byte) error
+		}); ok && headroom == 0 {
+			return batch.SendBatchParts(ctx, messages[:len(payloads)], tails[:len(payloads)])
+		}
+		// A transport that cannot gather gets each message whole.
+		size := offset
+		for i := range payloads {
+			size += len(tails[i])
+		}
+		frames := make([]byte, 0, size)
+		for i := range payloads {
+			start := len(frames)
+			frames = append(frames, c.sendBuffer[starts[i]:starts[i+1]]...)
+			frames = append(frames, tails[i]...)
+			messages[i] = frames[start+headroom:]
+		}
+		if headroom != 0 {
+			return framed.SendFramedBatch(ctx, frames)
+		}
 	}
 	if batch, ok := c.conn.(interface {
 		SendBatch(context.Context, [][]byte) error

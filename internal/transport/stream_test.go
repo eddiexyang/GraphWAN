@@ -219,3 +219,47 @@ func TestStreamGatherCancellation(t *testing.T) {
 		t.Fatal("gather write ignored cancellation")
 	}
 }
+
+// Frames in parts, each prefix counting the parts up to the next frame, arrive
+// as whole messages; over TCP the parts leave in one gathered write.
+func TestStreamFramedPartsArriveWhole(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, _ := listener.Accept()
+		accepted <- conn
+	}()
+	a, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b := <-accepted
+	defer b.Close()
+	sender, receiver := NewStream(a), NewStream(b)
+	if sender.writeBuffers == nil {
+		t.Fatal("a TCP stream does not gather")
+	}
+	head1, tail1 := []byte("sealed head"), bytes.Repeat([]byte("tail"), 3000)
+	whole := []byte("one part")
+	var parts [][]byte
+	parts = append(parts, binary.BigEndian.AppendUint32(nil, uint32(len(head1)+len(tail1))), head1, tail1)
+	parts = append(parts, append(binary.BigEndian.AppendUint32(nil, uint32(len(whole))), whole...))
+	done := make(chan error, 1)
+	go func() { done <- sender.SendFramedParts(ctx, parts, 2) }()
+	for _, want := range [][]byte{append(bytes.Clone(head1), tail1...), whole} {
+		got, err := receiver.Receive(ctx)
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatal("a framed part arrived changed", len(got), err)
+		}
+	}
+	if err := <-done; err != nil || sender.writeBuffer != nil {
+		t.Fatal("the parts were copied", err)
+	}
+}
