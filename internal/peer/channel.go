@@ -19,13 +19,16 @@ import (
 )
 
 const (
-	helloKind          = 1
-	replyKind          = 2
-	finishKind         = 3
-	readyKind          = 4
-	dataKind           = 5
+	helloKind  = 1
+	replyKind  = 2
+	finishKind = 3
+	readyKind  = 4
+	dataKind   = 5
 	// [sealedKind][nonce][header ciphertext][tag][payload]: see SealedPayload.
-	sealedKind         = 6
+	sealedKind = 6
+	// [prefixKind][k][nonce][ciphertext of k bytes][tag][payload]: see
+	// SealedPrefix.
+	prefixKind         = 7
 	helloHeader        = 67
 	handshakeTimeout   = 10 * time.Second
 	retransmitInterval = 250 * time.Millisecond
@@ -43,6 +46,23 @@ const (
 // sealedOpen is the part of a sealedKind message that opens: the nonce, the
 // header and its tag.
 const sealedOpen = secure.Overhead + SealedHeader
+
+// A payload that starts with SealedPrefix and a length k, at least 2, is k
+// bytes the channel seals, these two included, and then bytes already sealed
+// end to end, which travel as they are: a Link's frame of a packet sealed end
+// to end, whose readable headers the channel seals.
+const SealedPrefix = 23
+
+// prefix returns how many leading bytes of payload the channel seals.
+func prefix(payload []byte) int {
+	switch {
+	case payload[0] == SealedPayload && len(payload) > SealedHeader:
+		return SealedHeader
+	case payload[0] == SealedPrefix && len(payload) > 2 && int(payload[1]) >= 2 && int(payload[1]) < len(payload):
+		return int(payload[1])
+	}
+	return len(payload)
+}
 
 type Hello struct {
 	Network, Edge, Initiator, Responder model.ID
@@ -318,7 +338,7 @@ func (c *Channel) SendBatch(ctx context.Context, payloads [][]byte) error {
 		if len(payload) == 0 || len(payload) > secure.MaxPlaintext {
 			return errors.New("invalid peer message size")
 		}
-		needed += headroom + 1 + secure.Overhead + len(payload)
+		needed += headroom + 2 + secure.Overhead + len(payload)
 	}
 	if cap(c.sendBuffer) < needed {
 		c.sendBuffer = make([]byte, needed)
@@ -327,24 +347,38 @@ func (c *Channel) SendBatch(ctx context.Context, payloads [][]byte) error {
 	var messages, sealed [128][]byte
 	offset := 0
 	for i, payload := range payloads {
-		end := offset + headroom + 1 + secure.Overhead + len(payload)
+		kind, k := byte(dataKind), prefix(payload)
+		switch {
+		case k == len(payload):
+		case payload[0] == SealedPayload:
+			kind = sealedKind
+		default:
+			kind = prefixKind
+		}
+		size := 1 + secure.Overhead + len(payload)
+		if kind == prefixKind {
+			size++
+		}
+		end := offset + headroom + size
 		if headroom != 0 {
-			binary.BigEndian.PutUint32(c.sendBuffer[offset:], uint32(end-offset-headroom))
+			binary.BigEndian.PutUint32(c.sendBuffer[offset:], uint32(size))
 			offset += headroom
 		}
-		c.sendBuffer[offset], sealed[i] = dataKind, payload
-		if payload[0] == SealedPayload && len(payload) > SealedHeader {
-			c.sendBuffer[offset], sealed[i] = sealedKind, payload[:SealedHeader]
-		}
+		c.sendBuffer[offset], sealed[i] = kind, payload[:k]
 		messages[i] = c.sendBuffer[offset : offset+1 : end]
+		if kind == prefixKind {
+			c.sendBuffer[offset+1] = byte(k)
+			messages[i] = c.sendBuffer[offset : offset+2 : end]
+		}
 		offset = end
 	}
+	c.sendBuffer = c.sendBuffer[:offset]
 	if err := c.session.SealBatchAppend(messages[:len(payloads)], sealed[:len(payloads)]); err != nil {
 		return err
 	}
 	for i, payload := range payloads {
 		if len(sealed[i]) != len(payload) {
-			messages[i] = append(messages[i], payload[SealedHeader:]...)
+			messages[i] = append(messages[i], payload[len(sealed[i]):]...)
 		}
 	}
 	if headroom != 0 {
@@ -448,26 +482,45 @@ func (c *Channel) decodeBatches(ctx context.Context, receive func(context.Contex
 		}
 	}
 }
-// encrypted reports a data or sealed message.
+
+// encrypted reports a data, sealed or prefix message.
 func encrypted(raw []byte) bool {
-	return len(raw) > 1 && raw[0] == dataKind || len(raw) > 1+sealedOpen && raw[0] == sealedKind
+	switch {
+	case len(raw) > 1 && raw[0] == dataKind:
+		return true
+	case len(raw) > 1+sealedOpen && raw[0] == sealedKind:
+		return true
+	case len(raw) > 2 && raw[0] == prefixKind:
+		k := int(raw[1])
+		return k >= 2 && len(raw) > 2+secure.Overhead+k
+	}
+	return false
 }
 
 // openPart is what of an encrypted message opens in place.
 func openPart(raw []byte) []byte {
-	if raw[0] == sealedKind {
+	switch raw[0] {
+	case sealedKind:
 		return raw[1 : 1+sealedOpen]
+	case prefixKind:
+		return raw[2 : 2+secure.Overhead+int(raw[1])]
 	}
 	return raw[1:]
 }
 
 // opened returns an encrypted message's payload once plaintext, its opened
-// part, is open: a sealed message's header moves next to the bytes after it.
+// part, is open: a sealed or prefix message's opened bytes move next to the
+// bytes after them.
 func opened(raw, plaintext []byte) []byte {
-	if raw[0] != sealedKind {
+	var start int
+	switch raw[0] {
+	case sealedKind:
+		start = 1 + secure.Overhead
+	case prefixKind:
+		start = 2 + secure.Overhead
+	default:
 		return plaintext
 	}
-	start := 1 + sealedOpen - SealedHeader
 	copy(raw[start:], plaintext)
 	return raw[start:]
 }

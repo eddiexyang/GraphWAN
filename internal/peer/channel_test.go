@@ -124,8 +124,9 @@ func (c *recordingTransport) SendFramedBatch(ctx context.Context, data []byte) e
 	return c.Stream.SendFramedBatch(ctx, data)
 }
 
-// A sealed payload's header is encrypted and the rest travels as it is; the
-// receiver gets the payload back, alone or among data messages in a batch.
+// A sealed payload's header, or a prefixed payload's prefix, is encrypted and
+// the rest travels as it is; the receiver gets the payload back, alone or
+// among data messages in a batch.
 func TestSealedPayloadIsEncryptedOnce(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -160,7 +161,9 @@ func TestSealedPayloadIsEncryptedOnce(t *testing.T) {
 	header := append([]byte{SealedPayload}, bytes.Repeat([]byte("H"), SealedHeader-1)...)
 	sealed := append(bytes.Clone(header), bytes.Repeat([]byte("already sealed"), 500)...)
 	data := bytes.Repeat([]byte("D"), 1000)
-	for _, batch := range [][][]byte{{sealed}, {data, sealed, data, sealed}} {
+	readable := append([]byte{SealedPrefix, 40}, bytes.Repeat([]byte("R"), 38)...)
+	packet := append(bytes.Clone(readable), bytes.Repeat([]byte("sealed packet"), 100)...)
+	for _, batch := range [][][]byte{{sealed}, {packet}, {data, sealed, packet, data, sealed}} {
 		recording.sent.Reset()
 		done := make(chan error, 1)
 		go func() { done <- sender.SendBatch(ctx, batch) }()
@@ -183,8 +186,13 @@ func TestSealedPayloadIsEncryptedOnce(t *testing.T) {
 			}
 		}
 		wire := recording.sent.Bytes()
-		if !bytes.Contains(wire, sealed[SealedHeader:]) || bytes.Contains(wire, header) || bytes.Contains(wire, data[:64]) {
-			t.Fatal("the channel encrypted the wrong bytes")
+		if bytes.Contains(wire, header) || bytes.Contains(wire, readable[2:]) || bytes.Contains(wire, data[:64]) {
+			t.Fatal("the channel sent bytes it should have encrypted")
+		}
+		for _, m := range batch {
+			if rest := m[prefix(m):]; len(rest) > 0 && !bytes.Contains(wire, rest) {
+				t.Fatal("the channel encrypted bytes already sealed")
+			}
 		}
 	}
 }

@@ -482,7 +482,7 @@ func (r *DataPlane) egressRecords(network model.ID, request streamproxy.Request)
 	if request.E2E == (e2eID{}) {
 		return nil, false
 	}
-	if _, keyed := e2eKeys(state)[e2ePeer{network, request.Source}]; keyed && request.Sealer != request.Source {
+	if _, keyed := state.keys[e2ePeer{network, request.Source}]; keyed && request.Sealer != request.Source {
 		return nil, false
 	}
 	s := r.e2eAccepted(network, request.Sealer, request.E2E)

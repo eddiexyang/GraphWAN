@@ -17,8 +17,9 @@ const (
 	// A fresh handshake must replace the session before either limit is reached.
 	MaxMessages   = uint64(1) << 32
 	MaxSessionAge = time.Hour
-	// Plaintext includes a message type and, for data, a complete overlay frame.
-	MaxPlaintext = packet.MaxFrame + 1
+	// Plaintext includes a message type and, for data, a complete overlay
+	// frame, which a sealed packet's envelope precedes with two more bytes.
+	MaxPlaintext = packet.MaxFrame + 3
 	Overhead     = 8 + 16
 )
 
@@ -136,7 +137,8 @@ const TagSize = 16
 // connections. A channel message's nonce is the channel in its high 32 bits
 // and the message's index within the channel in its low 32 bits: no nonce
 // travels, and a reordered, repeated or missing message fails to open.
-// Channel 0 is reserved. SealChannel and Seal must not share a Session.
+// Channel 0 is the session's packets: Seal and SealPacket take its nonces
+// from one sequence.
 func channelNonce(channel, index uint32) uint64 { return uint64(channel)<<32 | uint64(index) }
 
 // SealChannel seals plaintext in place; it needs TagSize bytes of spare
@@ -151,6 +153,63 @@ func (s *Session) OpenChannel(channel, index uint32, sealed []byte) ([]byte, err
 		return nil, errors.New("invalid channel message size")
 	}
 	return s.receive.Decrypt(sealed[:0], channelNonce(channel, index), s.binding, sealed)
+}
+
+// PacketSequence is what SealPacket adds after the tag: the packet's
+// sequence, its nonce in channel 0.
+const PacketSequence = 4
+
+// SealPacket seals body in place, authenticating ad with it, and appends the
+// tag and the sequence; body needs TagSize+PacketSequence spare capacity.
+func (s *Session) SealPacket(ad, body []byte) ([]byte, error) {
+	if cap(body)-len(body) < TagSize+PacketSequence {
+		return nil, errors.New("invalid end-to-end packet")
+	}
+	s.sendMu.Lock()
+	if s.sequence >= MaxMessages-1 || time.Since(s.created) >= MaxSessionAge {
+		s.sendMu.Unlock()
+		return nil, ErrRekey
+	}
+	s.sequence++
+	nonce := s.sequence
+	s.sendMu.Unlock()
+	sealed := s.send.Encrypt(body[:0], nonce, ad, body)
+	return binary.BigEndian.AppendUint32(sealed, uint32(nonce)), nil
+}
+
+// Sequence reports how many channel 0 nonces the session used.
+func (s *Session) Sequence() uint64 {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	return s.sequence
+}
+
+// OpenPacket opens a SealPacket body in place. Like Open, it accepts bounded
+// out-of-order delivery and refuses a sequence it already opened.
+func (s *Session) OpenPacket(ad, sealed []byte) ([]byte, error) {
+	if len(sealed) < TagSize+PacketSequence {
+		return nil, errors.New("invalid end-to-end packet")
+	}
+	if time.Since(s.created) >= MaxSessionAge {
+		return nil, ErrRekey
+	}
+	end := len(sealed) - PacketSequence
+	nonce := uint64(binary.BigEndian.Uint32(sealed[end:]))
+	if nonce == 0 {
+		return nil, ErrReplay
+	}
+	s.receiveMu.Lock()
+	defer s.receiveMu.Unlock()
+	if s.seen[nonce%ReplayWindow] == nonce || s.highest >= ReplayWindow && nonce <= s.highest-ReplayWindow {
+		return nil, ErrReplay
+	}
+	plaintext, err := s.receive.Decrypt(sealed[:0], nonce, ad, sealed[:end])
+	if err != nil {
+		return nil, err
+	}
+	s.seen[nonce%ReplayWindow] = nonce
+	s.highest = max(s.highest, nonce)
+	return plaintext, nil
 }
 
 // Open accepts bounded out-of-order delivery. Replay state advances only after

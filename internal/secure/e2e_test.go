@@ -100,3 +100,54 @@ func TestEndToEndHandshakeIsDistinct(t *testing.T) {
 		t.Fatal("a Link handshake completed an end-to-end one")
 	}
 }
+
+// Packets open out of order within the window, each once, with the headers
+// they were sealed with; their nonces never meet a channel's.
+func TestEndToEndPackets(t *testing.T) {
+	ea, eb := e2eConfigs(t)
+	initiator, err := NewEndToEndHandshake(ea)
+	if err != nil {
+		t.Fatal(err)
+	}
+	responder, err := NewEndToEndHandshake(eb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	as, bs, err := run(t, initiator, responder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ad, body := []byte("headers"), []byte("datagram")
+	seal := func() []byte {
+		buf := make([]byte, len(body), len(body)+TagSize+PacketSequence)
+		copy(buf, body)
+		sealed, err := as.SealPacket(ad, buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sealed
+	}
+	first, second := seal(), seal()
+	if len(first) != len(body)+TagSize+PacketSequence {
+		t.Fatalf("sealed %d bytes", len(first))
+	}
+	if opened, err := bs.OpenPacket(ad, bytes.Clone(second)); err != nil || !bytes.Equal(opened, body) {
+		t.Fatal("open", err)
+	}
+	if opened, err := bs.OpenPacket(ad, bytes.Clone(first)); err != nil || !bytes.Equal(opened, body) {
+		t.Fatal("open out of order", err)
+	}
+	if _, err := bs.OpenPacket(ad, bytes.Clone(first)); err == nil {
+		t.Fatal("opened a packet twice")
+	}
+	third := seal()
+	if _, err := bs.OpenPacket([]byte("Headers"), bytes.Clone(third)); err == nil {
+		t.Fatal("opened with changed headers")
+	}
+	if _, err := bs.OpenChannel(0, 3, bytes.Clone(third[:len(third)-PacketSequence])); err == nil {
+		t.Fatal("a packet opened as a channel message")
+	}
+	if opened, err := bs.OpenPacket(ad, third); err != nil || !bytes.Equal(opened, body) {
+		t.Fatal("a failed open used the sequence", err)
+	}
+}

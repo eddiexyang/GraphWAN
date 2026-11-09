@@ -48,6 +48,8 @@ type runtimeState struct {
 	// selfAddress is this Agent's overlay address per network, for replay
 	// requests of its TCP sessions.
 	selfAddress map[model.ID]netip.Addr
+	// keys are the Agent keys of the directory's other Nodes.
+	keys map[e2ePeer]ed25519.PublicKey
 }
 
 type DataPlane struct {
@@ -118,6 +120,7 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 	for _, network := range snapshot.Networks {
 		next.selfAddress[network.ID] = network.Self.Address
 	}
+	next.keys = e2eKeys(next)
 	prepared := []tunnel.Device{}
 	var preparedTCP []*runtimeTCP
 	type tunnelUpdate struct {
@@ -213,6 +216,7 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 	}
 	router.SetTCPIntercept(r.interceptTCP)
 	router.SetTCPCarrier(next.mesh.TCPCarrier)
+	router.SetEndToEnd(e2ePackets{r})
 	next.router = router
 	for _, network := range snapshot.Networks {
 		fingerprint := tcpFingerprint(network)

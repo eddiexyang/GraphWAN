@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
@@ -258,6 +259,56 @@ func TestTCPBackedLinkRefusesTCPPackets(t *testing.T) {
 		}
 		if queued := uint64(l.dataCount); queued != 2-want {
 			t.Fatalf("%s Link queued %d packets", transport, queued)
+		}
+	}
+}
+
+// A sealed packet's frame travels in its envelope, compact or not, owned or
+// copied; a compact one keeps its Nodes, which no inner address implies.
+func TestSealedFrames(t *testing.T) {
+	ip := packet.UDP(netip.MustParseAddrPort("10.0.0.1:1"), netip.MustParseAddrPort("10.0.0.2:2"), []byte("sealed payload"))
+	frame := compactTestFrame(t, append(ip, bytes.Repeat([]byte{7}, packet.Trailer)...))
+	packet.SetSealed(frame, true)
+	unroutable := func([]byte, [16]byte, uint8, []byte) bool { return false }
+	for _, compact := range []bool{false, true} {
+		dialerEnd, acceptorEnd := pipePair()
+		dialer := newCompactTestLink(t, dialerEnd, Options{Compact: unroutable})
+		acceptor := newCompactTestLink(t, acceptorEnd, Options{Compact: unroutable, CompactHello: compact})
+		owned := packetbuf.GetHeadroom(len(frame), 3)
+		copy(owned.Data, frame)
+		if err := acceptor.SendOwnedBatch(context.Background(), []*packetbuf.Buffer{owned}); err != nil {
+			t.Fatal(err)
+		}
+		if err := acceptor.Send(context.Background(), frame); err != nil {
+			t.Fatal(err)
+		}
+		want := frame
+		if compact {
+			want = wantRebuilt(frame)
+		}
+		for range 2 {
+			if got := receiveFrame(t, dialer); !bytes.Equal(got, want) {
+				t.Fatalf("compact %v: received %x", compact, got)
+			}
+		}
+		acceptorEnd.mu.Lock()
+		envelopes := 0
+		for _, m := range acceptorEnd.sent {
+			if m[0] != sealedFrame {
+				continue
+			}
+			envelopes++
+			kind, readable := byte(dataMessage), 3+packet.HeaderSize+28
+			if compact {
+				kind, readable = compactSealedMessage, 4+32+28
+			}
+			if m[2] != kind || int(m[1]) != readable {
+				t.Fatalf("compact %v: envelope %x", compact, m[:4])
+			}
+		}
+		acceptorEnd.mu.Unlock()
+		if envelopes != 2 {
+			t.Fatalf("compact %v: %d envelopes", compact, envelopes)
 		}
 	}
 }

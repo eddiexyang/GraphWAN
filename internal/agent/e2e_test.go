@@ -1,9 +1,13 @@
 package agent
 
 import (
+	"bytes"
+	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eWloYW8/GraphWAN/internal/packet"
 	"github.com/eWloYW8/GraphWAN/internal/streamproxy"
 )
 
@@ -64,3 +68,85 @@ func TestTCPSessionAfterEgressLostItsKeys(t *testing.T) {
 		t.Fatal("the ingress kept the lost session")
 	}
 }
+
+// sendUDP writes a datagram from one device's application until another
+// device receives it: the first may drop while the end-to-end session forms.
+func sendUDP(t *testing.T, from, to *kernelTUN, raw []byte) []byte {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case from.packets <- kernelPacket{raw: bytes.Clone(raw)}:
+		case <-time.After(time.Second):
+		}
+		select {
+		case got := <-to.udp:
+			return got
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	t.Fatal("the datagram did not arrive")
+	return nil
+}
+
+// A datagram through a relay is sealed by its ends: only the egress opens it,
+// once, with the headers it was sent with, and it drops one that comes
+// unsealed. An egress that lost its sessions has the ingress replace its own.
+func TestPacketsAreSealedEndToEnd(t *testing.T) {
+	agents, devices, state := graphAgents(t, model.UDP, streamOptions{}, 3, 2)
+	network, nodes := state.Networks[0].ID, state.Networks[0].Nodes
+	devices[2].udp = make(chan []byte, 16)
+	from := netip.AddrPortFrom(nodes[0].Address, 5000)
+	to := netip.AddrPortFrom(nodes[2].Address, 5001)
+	message := []byte("a datagram sealed end to end")
+	raw := packet.UDP(from, to, message)
+	got := sendUDP(t, devices[0], devices[2], raw)
+	if source, destination, payload, ok := packet.UDPDatagram(got); !ok || source != from || destination != to || !bytes.Equal(payload, message) {
+		t.Fatal("the datagram changed")
+	}
+
+	seal := func() []byte {
+		buf := make([]byte, len(raw), len(raw)+packet.Trailer)
+		copy(buf, raw)
+		sealed, ok, err := e2ePackets{agents[0]}.Seal(network, nodes[2].ID, buf)
+		if err != nil || !ok || len(sealed) != len(raw)+packet.Trailer {
+			t.Fatal("seal", ok, err)
+		}
+		return sealed
+	}
+	sealed := seal()
+	if bytes.Contains(sealed, message) || !bytes.Equal(sealed[:packet.Readable(raw)], raw[:packet.Readable(raw)]) {
+		t.Fatal("sealed the wrong bytes")
+	}
+	if _, err := (e2ePackets{agents[1]}).Open(network, nodes[0].ID, bytes.Clone(sealed), true); err == nil {
+		t.Fatal("the relay opened the datagram")
+	}
+	hop := bytes.Clone(sealed)
+	packet.DecrementIPHopLimit(hop)
+	if opened, err := (e2ePackets{agents[2]}).Open(network, nodes[0].ID, hop, true); err != nil || !bytes.Equal(opened[udpPayload:], message) {
+		t.Fatal("the egress did not open the datagram after a hop", err)
+	}
+	if _, err := (e2ePackets{agents[2]}).Open(network, nodes[0].ID, bytes.Clone(sealed), true); err == nil {
+		t.Fatal("the egress opened the datagram twice")
+	}
+	if _, err := (e2ePackets{agents[2]}).Open(network, nodes[0].ID, bytes.Clone(raw), false); err == nil {
+		t.Fatal("the egress took an unsealed datagram")
+	}
+	changed := seal()
+	changed[23]++ // the destination port
+	if _, err := (e2ePackets{agents[2]}).Open(network, nodes[0].ID, changed, true); err == nil {
+		t.Fatal("the egress opened a datagram with changed headers")
+	}
+
+	before := outgoingE2E(agents[0], network, nodes[2].ID)
+	agents[2].e2e.mu.Lock()
+	clear(agents[2].e2e.incoming)
+	agents[2].e2e.mu.Unlock()
+	sendUDP(t, devices[0], devices[2], raw)
+	if after := outgoingE2E(agents[0], network, nodes[2].ID); after == nil || after == before {
+		t.Fatal("the ingress kept the lost session")
+	}
+}
+
+// udpPayload is where an IPv4 UDP datagram's payload starts.
+const udpPayload = 28

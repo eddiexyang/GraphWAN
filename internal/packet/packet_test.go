@@ -52,7 +52,8 @@ func TestRejectMalformed(t *testing.T) {
 	for name, change := range map[string]func([]byte) []byte{
 		"short":            func(b []byte) []byte { return b[:20] },
 		"version":          func(b []byte) []byte { b[2] = 2; return b },
-		"reserved":         func(b []byte) []byte { b[6] = 1; return b },
+		"flag":             func(b []byte) []byte { b[6] = 2; return b },
+		"reserved":         func(b []byte) []byte { b[7] = 1; return b },
 		"hop limit":        func(b []byte) []byte { b[3] = 0; return b },
 		"length":           func(b []byte) []byte { b[5]++; return b },
 		"zero ID":          func(b []byte) []byte { clear(b[8:24]); return b },

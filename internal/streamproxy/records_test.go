@@ -2,9 +2,9 @@ package streamproxy
 
 import (
 	"bytes"
-	"errors"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"testing"
 
 	"github.com/eWloYW8/GraphWAN/internal/model"

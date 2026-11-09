@@ -46,6 +46,13 @@ const (
 	// A stream message whose data is sealed end to end, which the channel
 	// does not encrypt again; see peer.SealedPayload.
 	sealedStreamMessage = peer.SealedPayload
+	// A compact frame of a packet sealed end to end keeps its source and
+	// destination Nodes, which its seal depends on: [compactSealedMessage][hop
+	// limit][source][destination][IP packet][trailer]. A frame of such a
+	// packet, compact or not, travels in a sealedFrame envelope, whose
+	// readable part the channel seals: [peer.SealedPrefix][k][message].
+	compactSealedMessage = 22
+	sealedFrame          = peer.SealedPrefix
 	// Leave room for multiple kernel GSO bursts while writers process bounded
 	// batches. The queue is still finite; control messages use a separate queue.
 	queueSize = 512
@@ -453,7 +460,9 @@ func (l *Link) enqueue(ctx context.Context, frames [][]byte, owners []*packetbuf
 			break
 		}
 		var buffer *packetbuf.Buffer
-		if l.compactOut.Load() {
+		if packet.IsSealed(frame) {
+			buffer = sealedFrameOf(frame, owners, i, l.compactOut.Load())
+		} else if l.compactOut.Load() {
 			buffer = compactFrame(frame, owners, i)
 		} else if owners != nil && owners[i].PrependByte(dataMessage) {
 			buffer = owners[i]
@@ -496,6 +505,46 @@ func compactFrame(frame []byte, owners []*packetbuf.Buffer, i int) *packetbuf.Bu
 	buffer := packetbuf.Get(len(frame) - packet.HeaderSize + 2)
 	buffer.Data[0], buffer.Data[1] = compactDataMessage, frame[3]
 	copy(buffer.Data[2:], frame[packet.HeaderSize:])
+	return buffer
+}
+
+// sealedFrameOf wraps the frame of a sealed packet in its envelope, in place
+// for an owned buffer with the headroom; the channel seals the envelope, the
+// message's kind, the packet header or hop limit, and the readable headers.
+func sealedFrameOf(frame []byte, owners []*packetbuf.Buffer, i int, compact bool) *packetbuf.Buffer {
+	readable := packet.Readable(frame[packet.HeaderSize : len(frame)-packet.Trailer])
+	var buffer *packetbuf.Buffer
+	if compact {
+		const prefix = 4 + 32
+		hop := frame[3]
+		if owners != nil {
+			// The destination moves first: the source's new place covers it.
+			buffer = owners[i]
+			buffer.Data = buffer.Data[packet.HeaderSize-prefix:]
+			copy(buffer.Data[20:36], frame[40:56])
+			copy(buffer.Data[4:20], frame[24:40])
+		} else {
+			buffer = packetbuf.Get(len(frame) - packet.HeaderSize + prefix)
+			copy(buffer.Data[4:20], frame[24:40])
+			copy(buffer.Data[20:36], frame[40:56])
+			copy(buffer.Data[prefix:], frame[packet.HeaderSize:])
+		}
+		buffer.Data[2], buffer.Data[3] = compactSealedMessage, hop
+		readable += prefix
+	} else {
+		if owners != nil && owners[i].PrependByte(dataMessage) && owners[i].PrependByte(0) && owners[i].PrependByte(sealedFrame) {
+			buffer = owners[i]
+		} else {
+			buffer = packetbuf.Get(len(frame) + 3)
+			buffer.Data[2] = dataMessage
+			copy(buffer.Data[3:], frame)
+			if owners != nil {
+				owners[i].Release()
+			}
+		}
+		readable += 3 + packet.HeaderSize
+	}
+	buffer.Data[0], buffer.Data[1] = sealedFrame, byte(readable)
 	return buffer
 }
 
@@ -626,6 +675,12 @@ func (l *Link) readLoop() {
 		if len(raw) == 0 {
 			return
 		}
+		if raw[0] == sealedFrame {
+			if len(raw) < 3 || raw[2] != dataMessage && raw[2] != compactSealedMessage {
+				return
+			}
+			raw = raw[2:]
+		}
 		switch raw[0] {
 		case pathMessage, retireMessage, retiredMessage:
 			if !l.handlePathControl(raw) {
@@ -657,6 +712,34 @@ func (l *Link) readLoop() {
 			}
 			l.sizeProbeUnsupported()
 			l.compactOut.Store(true)
+		case compactSealedMessage:
+			const prefix = 2 + 32
+			if len(raw) <= prefix || len(raw)-prefix > packet.MaxPayload {
+				return
+			}
+			var buffer *packetbuf.Buffer
+			if owning {
+				buffer = packetbuf.Get(packet.HeaderSize + len(raw) - prefix)
+			} else {
+				buffer = packetbuf.Wrap(make([]byte, packet.HeaderSize+len(raw)-prefix))
+			}
+			packet.PutHeader(buffer.Data, l.networkWire, [16]byte(raw[2:18]), [16]byte(raw[18:34]), raw[1], len(raw)-prefix)
+			packet.SetSealed(buffer.Data, true)
+			copy(buffer.Data[packet.HeaderSize:], raw[prefix:])
+			l.rx.Add(uint64(len(buffer.Data)))
+			if owning {
+				ready[count] = buffer
+				count++
+				if count == len(ready) {
+					flush()
+				}
+				continue
+			}
+			select {
+			case l.packets <- buffer.Data:
+			default:
+				l.dropped.Add(1)
+			}
 		case compactDataMessage:
 			if l.options.Compact == nil || len(raw) <= 2 || len(raw)-2 > packet.MaxPayload {
 				return
@@ -864,11 +947,16 @@ func (l *Link) writeLoop() {
 			return
 		}
 		for i, raw := range messages[:count] {
+			if raw[0] == sealedFrame {
+				raw = raw[2:]
+			}
 			switch raw[0] {
 			case dataMessage, streamMessage, sealedStreamMessage:
 				l.tx.Add(uint64(len(raw) - 1))
 			case compactDataMessage:
 				l.tx.Add(uint64(len(raw) - 2 + packet.HeaderSize))
+			case compactSealedMessage:
+				l.tx.Add(uint64(len(raw) - 34 + packet.HeaderSize))
 			}
 			messages[i] = nil
 			owners[i].Release()

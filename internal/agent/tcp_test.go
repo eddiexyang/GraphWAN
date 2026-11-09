@@ -51,6 +51,9 @@ type kernelTUN struct {
 	gsos     atomic.Uint64
 	readGSOs atomic.Uint64
 	once     sync.Once
+	// udp, when set, receives the UDP packets written to the device, which
+	// its stack does not take.
+	udp chan []byte
 }
 
 type kernelPacket struct {
@@ -113,6 +116,13 @@ func (d *kernelTUN) Read(p []byte) (int, error) {
 }
 func (d *kernelTUN) Write(p []byte) (int, error) {
 	d.writes.Add(1)
+	if d.udp != nil && packet.IsUDP(p) {
+		select {
+		case d.udp <- bytes.Clone(p):
+		default:
+		}
+		return len(p), nil
+	}
 	packet := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(append([]byte(nil), p...))})
 	protocol := ipv4.ProtocolNumber
 	if p[0]>>4 == 6 {

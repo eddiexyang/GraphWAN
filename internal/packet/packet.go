@@ -12,9 +12,10 @@ import (
 )
 
 const (
-	Version         = 1
-	HeaderSize      = 80
-	MaxPayload      = model.MaxMTU
+	Version    = 1
+	HeaderSize = 80
+	// MaxPayload holds an IP packet of the largest MTU and its trailer.
+	MaxPayload      = model.MaxMTU + Trailer
 	MaxFrame        = HeaderSize + MaxPayload
 	DefaultHopLimit = 32
 )
@@ -55,7 +56,7 @@ func (p Packet) AppendBinary(dst []byte) ([]byte, error) {
 	out[2] = Version
 	out[3] = p.Header.HopLimit
 	binary.BigEndian.PutUint16(out[4:6], uint16(len(p.Payload)))
-	// Bytes 6:8 are reserved and must remain zero.
+	// Byte 6 is the Sealed flag; byte 7 is reserved and must remain zero.
 	for i, id := range []model.ID{p.Header.Network, p.Header.Source, p.Header.Destination} {
 		if err := id.Validate(); err != nil {
 			return nil, err
@@ -93,6 +94,7 @@ type View struct {
 	Network, Source, Destination [16]byte
 	HopLimit                     uint8
 	Epoch, Flow, Sequence        uint64
+	Sealed                       bool
 	Payload                      []byte
 }
 
@@ -101,7 +103,7 @@ func ParseView(frame []byte) (View, error) {
 	if len(frame) < HeaderSize || len(frame) > MaxFrame {
 		return p, errors.New("invalid frame length")
 	}
-	if frame[0] != 'G' || frame[1] != 'W' || frame[2] != Version || frame[6] != 0 || frame[7] != 0 {
+	if frame[0] != 'G' || frame[1] != 'W' || frame[2] != Version || frame[6] > Sealed || frame[7] != 0 {
 		return p, errors.New("unsupported packet header")
 	}
 	if frame[3] == 0 {
@@ -122,6 +124,7 @@ func ParseView(frame []byte) (View, error) {
 		*dest = [16]byte(raw)
 	}
 	p.HopLimit = frame[3]
+	p.Sealed = frame[6] == Sealed
 	p.Epoch = binary.BigEndian.Uint64(frame[56:64])
 	p.Flow = binary.BigEndian.Uint64(frame[64:72])
 	p.Sequence = binary.BigEndian.Uint64(frame[72:80])
