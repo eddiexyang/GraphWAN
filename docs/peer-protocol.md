@@ -350,6 +350,10 @@ ten minutes and answers late chains with status 3.
 A session ends when each end has delivered the other's end. A reset of the
 connection resets every hop of the chain and the other end's connection.
 
+Nothing bounds the number of sessions or of streams on an Edge. Only
+connections in their handshake are bounded, at 256 per Network's access
+stack, as the kernel's SYN backlog bounds them.
+
 The dialer offers `resume` in its Link introduction, and the acceptor confirms
 it with a resume hello message. When the first hop toward the destination does
 not carry sessions, the connection uses a plain stream, as before.
@@ -394,7 +398,10 @@ sealed per hop only.
 On a Link a stream frame of such a session is message kind 21 rather than 12,
 and the peer channel seals only its 19-byte header: channel message kind 6 is
 `[6][sequence][header ciphertext][tag][records]`. Each byte is thus encrypted
-once by its end and never by a hop.
+once by its end and never by a hop. A relay passes each received frame on in
+the buffer it arrived in, with the next hop's header written over its own,
+and the egress opens a record that arrived whole in one frame where it
+arrived; neither copies the records.
 
 ### Packets
 
@@ -403,11 +410,14 @@ handshake's own datagrams, with its session toward that Node; the Node drops
 a packet from a keyed Node that should be sealed and is not, or does not open.
 The IP header and, unless the packet is a later fragment, the 8-byte header of
 UDP, ICMP or ICMPv6 stay readable, so hops can route, admit and hash it, and a
-24-byte trailer follows the IP packet: the 16-byte tag, the 4-byte sequence and
-the first 4 bytes of the session ID. The sequence is the packet's nonce, and a
-1024-packet window takes reordering and refuses repeats. The seal
+24-byte trailer follows the IP packet: the 4-byte sequence, the first 4 bytes
+of the session ID and the 16-byte tag. The sequence is the packet's nonce, and
+a 1024-packet window takes reordering and refuses repeats. The seal
 authenticates the readable headers except the hop limit, the IPv4 header
-checksum and ECN, which hops change. The overlay header's flag marks the frame.
+checksum and ECN, which hops change, and the UDP, ICMP or ICMPv6 checksum: the
+destination computes the IPv4 header checksum and, unless the packet is a
+fragment, the L4 checksum again after opening it. The overlay header's flag
+marks the frame.
 A packet toward a keyed Node with no session yet is dropped; the receiver of a
 packet sealed by a session it does not hold sends kind 5, with the 4 bytes as
 the session ID, at most every 200 ms, and the sender replaces the session.
