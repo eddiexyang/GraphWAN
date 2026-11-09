@@ -410,3 +410,89 @@ func TestTCPPacketFlowResetsOnTCPPath(t *testing.T) {
 	}
 	assertNoTCPOverTCP(t, agents)
 }
+
+// Connections whose receivers stopped reading keep what they have in flight,
+// and no more than that, without holding back another connection of the
+// same Agents.
+func TestTCPSessionStalledConnectionsDoNotBlockOthers(t *testing.T) {
+	agents, devices, state := graphAgents(t, model.TCP, streamOptions{}, 3, 2)
+	address := state.Networks[0].Nodes[2].Address
+	listen := func(port uint16) *gonet.TCPListener {
+		listener, err := gonet.ListenTCP(devices[2].stack, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(address.As4()), Port: port}, ipv4.ProtocolNumber)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { listener.Close() })
+		return listener
+	}
+	dial := func(port uint16) net.Conn {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		conn, err := gonet.DialContextTCP(ctx, devices[0].stack, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(address.As4()), Port: port}, ipv4.ProtocolNumber)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { conn.Close() })
+		return conn
+	}
+
+	// Receivers that accept and never read.
+	stalled := listen(8091)
+	go func() {
+		for {
+			conn, err := stalled.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { conn.Close() })
+		}
+	}()
+	payload := make([]byte, 96<<20)
+	for range 2 {
+		conn := dial(8091)
+		conn.SetWriteDeadline(time.Now().Add(60 * time.Second))
+		go conn.Write(payload)
+	}
+	// Together they keep more than the 64 MiB an Agent's ends could keep
+	// before.
+	waitFor(t, 30*time.Second, "the stalled connections to fill what is in flight", func() bool {
+		return agents[0].Counters()["session_retained_bytes"] > 64<<20
+	})
+
+	active := listen(8092)
+	request := make([]byte, 4<<20)
+	rand.Read(request)
+	served := make(chan error, 1)
+	go func() {
+		conn, err := active.Accept()
+		if err != nil {
+			served <- err
+			return
+		}
+		defer conn.Close()
+		conn.SetDeadline(time.Now().Add(20 * time.Second))
+		got, err := io.ReadAll(conn)
+		if err == nil && !bytes.Equal(got, request) {
+			err = errors.New("request bytes changed")
+		}
+		if err == nil {
+			_, err = conn.Write([]byte("done"))
+		}
+		served <- err
+	}()
+	conn := dial(8092)
+	conn.SetDeadline(time.Now().Add(20 * time.Second))
+	if _, err := conn.Write(request); err != nil {
+		t.Fatal("the active connection could not send:", err)
+	}
+	if err := conn.(*gonet.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := io.ReadAll(conn)
+	if err != nil || string(reply) != "done" {
+		t.Fatal("the active connection got no reply:", err)
+	}
+	if err := <-served; err != nil {
+		t.Fatal(err)
+	}
+}

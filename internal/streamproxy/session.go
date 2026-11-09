@@ -23,14 +23,11 @@ import (
 // and the ingress opens one of the next generation along the current routes,
 // resending from E; the egress takes the newest generation and discards what
 // it already has.
+//
+// An end keeps only what it sent and the far end has not yet delivered: what
+// is in flight along the chain, which the hops' stream windows bound. It has
+// no budget of its own, so one connection never waits on another's bytes.
 const (
-	// Retention bounds what an end keeps unconfirmed; reading its socket waits
-	// while it is full.
-	Retention = 32 << 20
-	// AgentRetention bounds what all of an Agent's ends keep together, the
-	// kernel's largest socket send buffer; reading any of their sockets waits
-	// while it is full. Bytes already sent are always kept.
-	AgentRetention = 64 << 20
 	// An end without a working chain this long resets the connection.
 	orphanLifetime = 2 * time.Minute
 	rebuildMin     = 200 * time.Millisecond
@@ -145,11 +142,10 @@ type Keep struct {
 	base   uint64
 	end    uint64
 	closed bool
-	wake   chan struct{}
 	budget *retained // the Agent's total, or nil
 }
 
-func NewKeep() *Keep { return &Keep{wake: make(chan struct{})} }
+func NewKeep() *Keep { return &Keep{} }
 
 // Add appends data, which must not change afterwards, and becomes an owner of
 // its buffer (nil when data is not pooled), where data starts at owner.Data[at].
@@ -169,85 +165,22 @@ func (k *Keep) Add(data []byte, owner *packetbuf.Buffer, at int) {
 	k.mu.Unlock()
 }
 
-// Wait returns once fewer than Retention bytes are kept, and the Agent's ends
-// keep fewer than AgentRetention together.
-func (k *Keep) Wait(ctx context.Context) error {
-	for {
-		k.mu.Lock()
-		if k.closed {
-			k.mu.Unlock()
-			return nil
-		}
-		wake := k.wake
-		own := k.end-k.base >= Retention
-		k.mu.Unlock()
-		shared, full := k.budget.full()
-		if !own && !full {
-			return nil
-		}
-		select {
-		case <-wake:
-		case <-shared:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-}
-
-// retained totals the bytes an Agent's ends keep.
-type retained struct {
-	mu    sync.Mutex
-	bytes uint64
-	wake  chan struct{}
-}
-
-// agentRetention is AgentRetention; tests lower it.
-var agentRetention uint64 = AgentRetention
+// retained totals the bytes an Agent's ends keep, for its report.
+type retained struct{ bytes atomic.Uint64 }
 
 func (r *retained) add(n int) {
-	if r == nil {
-		return
+	if r != nil {
+		r.bytes.Add(uint64(n))
 	}
-	r.mu.Lock()
-	r.bytes += uint64(n)
-	r.mu.Unlock()
 }
 
 func (r *retained) release(n uint64) {
-	if r == nil || n == 0 {
-		return
+	if r != nil {
+		r.bytes.Add(-n)
 	}
-	r.mu.Lock()
-	r.bytes -= n
-	if r.wake != nil {
-		close(r.wake)
-		r.wake = nil
-	}
-	r.mu.Unlock()
 }
 
-// full reports whether the total reached agentRetention, and a channel
-// closed when it next falls.
-func (r *retained) full() (<-chan struct{}, bool) {
-	if r == nil {
-		return nil, false
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.bytes < agentRetention {
-		return nil, false
-	}
-	if r.wake == nil {
-		r.wake = make(chan struct{})
-	}
-	return r.wake, true
-}
-
-func (r *retained) total() uint64 {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.bytes
-}
+func (r *retained) total() uint64 { return r.bytes.Load() }
 
 // Release drops what the other end delivered.
 func (k *Keep) Release(delivered uint64) {
@@ -270,8 +203,6 @@ func (k *Keep) Release(delivered uint64) {
 		k.base = limit
 	}
 	k.budget.release(released)
-	close(k.wake)
-	k.wake = make(chan struct{})
 }
 
 // Kept is a chunk of kept bytes, which start at Owner.Data[At], or Owner is
@@ -317,7 +248,6 @@ func (k *Keep) close() {
 		packetbuf.ReleaseAll(k.owners)
 		k.chunks, k.owners, k.at = nil, nil, nil
 		k.base = k.end
-		close(k.wake)
 	}
 	k.mu.Unlock()
 }
@@ -327,7 +257,7 @@ type Counters struct {
 	HopFailures    atomic.Uint64 // chains an end saw fail or reset
 	Rebuilds       atomic.Uint64 // chains the ingress opened after one failed
 	ReplayRequests atomic.Uint64 // replay requests the egress sent
-	retained       retained      // bytes the ends keep, against AgentRetention
+	retained       retained      // bytes the ends keep
 }
 
 // Retained reports the bytes the Agent's ends keep now.

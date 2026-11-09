@@ -909,17 +909,6 @@ func (b *frameBuilder) payload() []byte {
 	return out
 }
 
-// waitKeep holds a session end's writes while it keeps the most it may.
-func (s *muxStream) waitKeep() error {
-	s.m.mu.Lock()
-	keep := s.keep
-	s.m.mu.Unlock()
-	if keep == nil {
-		return nil
-	}
-	return keep.Wait(s.ctx)
-}
-
 // keptExclusive bounds how long WriteKept waits for a Link still sending a
 // kept buffer's earlier frame before it copies the bytes instead.
 const keptExclusive = time.Second
@@ -987,9 +976,6 @@ func (s *muxStream) Write(p []byte) (int, error) {
 	defer s.writeMu.Unlock()
 	written := 0
 	for len(p) > 0 {
-		if err := s.waitKeep(); err != nil {
-			return written, s.errOr(err)
-		}
 		start, limit, err := s.reserve()
 		if err != nil {
 			return written, err
@@ -1025,9 +1011,6 @@ func (s *muxStream) ReadFrom(src io.Reader) (int64, error) {
 	defer s.writeMu.Unlock()
 	var total int64
 	for {
-		if err := s.waitKeep(); err != nil {
-			return total, s.errOr(err)
-		}
 		start, limit, err := s.reserve()
 		if err != nil {
 			return total, err
