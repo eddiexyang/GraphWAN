@@ -345,7 +345,9 @@ ingress takes before its TUN. The egress takes only the newest generation and
 discards bytes it already delivered. A chain toward an Agent without sessions
 or an Edge carrying only packets resets the connection. Without any chain for
 two minutes, either end resets it. The egress remembers an ended session for
-ten minutes and answers late chains with status 3.
+ten minutes and answers late chains with status 7 when each end had delivered
+the other's end, which the asking end takes as the session's end, and with
+status 3 otherwise.
 
 A session ends when each end has delivered the other's end. A reset of the
 connection resets every hop of the chain and the other end's connection.

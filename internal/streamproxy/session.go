@@ -51,11 +51,15 @@ const (
 	StatusNoRoute = 5
 	// StatusNoKey: the egress has no such end-to-end session, or requires one.
 	StatusNoKey = 6
+	// StatusEnded: the egress ended the session after each end delivered the
+	// other's end, so the asking end lacks only that news.
+	StatusEnded = 7
 )
 
 var ErrLegacy = errors.New("a hop does not support resumable TCP")
 var ErrUnknownSession = errors.New("egress has no such TCP session")
 var ErrNoKey = errors.New("egress has no such end-to-end session")
+var ErrSessionEnded = errors.New("egress ended the TCP session")
 
 // ErrNoRoute is a connection that has no path for now. As for a packet with
 // no route, its SYN is dropped rather than answered, so the client retries.
@@ -96,6 +100,8 @@ func ResponseError(status byte) error {
 		return ErrNoRoute
 	case StatusNoKey:
 		return ErrNoKey
+	case StatusEnded:
+		return ErrSessionEnded
 	default:
 		return errors.New("TCP stream target refused")
 	}
@@ -481,6 +487,14 @@ func (e *End) RequestReplay(gen uint32) {
 // Done is closed when the session ended.
 func (e *End) Done() <-chan struct{} { return e.ctx.Done() }
 
+// Clean reports, once the session is done, that it ended with each end
+// delivering the other's end.
+func (e *End) Clean() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.done && e.err == nil
+}
+
 // Gen returns the current generation.
 func (e *End) Gen() uint32 {
 	e.mu.Lock()
@@ -562,6 +576,17 @@ func (e *End) rebuild() {
 			return
 		case hop != nil:
 			hop.Abort()
+		}
+		if errors.Is(err, ErrSessionEnded) {
+			// Everything was delivered both ways, the egress's end included,
+			// which this end took from the old chain: only the news of it was
+			// lost with the chain. What this end holds is still read, then the
+			// end.
+			e.ended = true
+			e.finishLocked(nil)
+			e.busy = false
+			e.mu.Unlock()
+			return
 		}
 		if errors.Is(err, ErrUnknownSession) || errors.Is(err, ErrLegacy) || errors.Is(err, errNoPath) {
 			e.finishLocked(err)

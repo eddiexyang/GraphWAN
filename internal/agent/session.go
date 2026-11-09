@@ -39,7 +39,7 @@ type sessions struct {
 	ingress  map[sessionKey]*ingressSession
 	relays   map[*relayChain]struct{}
 	egress   map[sessionKey]*egressSession
-	ended    map[sessionKey]time.Time
+	ended    map[sessionKey]endedSession
 	purged   time.Time
 	wake     chan struct{}
 	counters streamproxy.Counters
@@ -69,7 +69,7 @@ func (s *sessions) init() {
 	s.ingress = map[sessionKey]*ingressSession{}
 	s.relays = map[*relayChain]struct{}{}
 	s.egress = map[sessionKey]*egressSession{}
-	s.ended = map[sessionKey]time.Time{}
+	s.ended = map[sessionKey]endedSession{}
 	s.wake = make(chan struct{}, 1)
 }
 
@@ -324,6 +324,8 @@ func chainStatus(err error) byte {
 		return streamproxy.StatusUnknown
 	case errors.Is(err, streamproxy.ErrNoKey):
 		return streamproxy.StatusNoKey
+	case errors.Is(err, streamproxy.ErrSessionEnded):
+		return streamproxy.StatusEnded
 	default:
 		return streamproxy.StatusRefused
 	}
@@ -398,14 +400,14 @@ func (r *DataPlane) acceptEgress(parent, ctx context.Context, network, remote mo
 	now := time.Now()
 	if now.Sub(r.sessions.purged) > sessionTombstone {
 		r.sessions.purged = now
-		for k, at := range r.sessions.ended {
-			if now.Sub(at) > sessionTombstone {
+		for k, e := range r.sessions.ended {
+			if now.Sub(e.at) > sessionTombstone {
 				delete(r.sessions.ended, k)
 			}
 		}
 	}
 	entry := r.sessions.egress[key]
-	_, ended := r.sessions.ended[key]
+	tombstone, ended := r.sessions.ended[key]
 	create := entry == nil && !ended && request.Gen == 0 && request.Down == 0 && request.Up == 0
 	if create {
 		entry = &egressSession{ready: make(chan struct{})}
@@ -413,7 +415,11 @@ func (r *DataPlane) acceptEgress(parent, ctx context.Context, network, remote mo
 	}
 	r.sessions.mu.Unlock()
 	if entry == nil {
-		refuse(ctx, hop, streamproxy.StatusUnknown)
+		status := byte(streamproxy.StatusUnknown)
+		if tombstone.clean {
+			status = streamproxy.StatusEnded
+		}
+		refuse(ctx, hop, status)
 		return
 	}
 	if !create {
@@ -498,7 +504,14 @@ func (r *DataPlane) endEgress(key sessionKey, entry *egressSession) {
 	if r.sessions.egress[key] == entry {
 		delete(r.sessions.egress, key)
 	}
-	r.sessions.ended[key] = time.Now()
+	r.sessions.ended[key] = endedSession{at: time.Now(), clean: entry.end != nil && entry.end.Clean()}
+}
+
+// endedSession is an egress's tombstone of a session: when it ended, and
+// whether each end delivered the other's end.
+type endedSession struct {
+	at    time.Time
+	clean bool
 }
 
 // selfID returns this Agent's Node in a network.
