@@ -377,6 +377,11 @@ func (r *DataPlane) acceptChain(parent, ctx context.Context, network, remote mod
 	}
 	hop.Begin(request.Up)
 	down.Begin(from)
+	if request.E2E != (e2eID{}) {
+		// The ends seal the session: this relay copies records.
+		streamproxy.CarrySealed(hop)
+		streamproxy.CarrySealed(down)
+	}
 	c := &relayChain{request: request, upstream: remote, next: next, up: hop, down: down}
 	r.sessions.mu.Lock()
 	r.sessions.relays[c] = struct{}{}

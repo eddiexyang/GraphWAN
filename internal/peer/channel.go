@@ -24,10 +24,25 @@ const (
 	finishKind         = 3
 	readyKind          = 4
 	dataKind           = 5
+	// [sealedKind][nonce][header ciphertext][tag][payload]: see SealedPayload.
+	sealedKind         = 6
 	helloHeader        = 67
 	handshakeTimeout   = 10 * time.Second
 	retransmitInterval = 250 * time.Millisecond
 )
+
+// A payload that starts with SealedPayload is SealedHeader bytes of header
+// and then bytes already sealed end to end, as a Link's stream frame of a
+// sealed TCP session is: the channel seals only the header, so no byte is
+// encrypted twice, and the rest travels as it is.
+const (
+	SealedPayload = 21
+	SealedHeader  = 19
+)
+
+// sealedOpen is the part of a sealedKind message that opens: the nonce, the
+// header and its tag.
+const sealedOpen = secure.Overhead + SealedHeader
 
 type Hello struct {
 	Network, Edge, Initiator, Responder model.ID
@@ -81,6 +96,7 @@ type Channel struct {
 	session        *secure.Session
 	sendMu         sync.Mutex
 	sendBuffer     []byte
+	opened         [128][]byte // a received batch's messages while they open
 	unreliable     bool
 	repeatRequest  []byte
 	repeatResponse []byte
@@ -308,7 +324,7 @@ func (c *Channel) SendBatch(ctx context.Context, payloads [][]byte) error {
 		c.sendBuffer = make([]byte, needed)
 	}
 	c.sendBuffer = c.sendBuffer[:needed]
-	var messages [128][]byte
+	var messages, sealed [128][]byte
 	offset := 0
 	for i, payload := range payloads {
 		end := offset + headroom + 1 + secure.Overhead + len(payload)
@@ -316,12 +332,20 @@ func (c *Channel) SendBatch(ctx context.Context, payloads [][]byte) error {
 			binary.BigEndian.PutUint32(c.sendBuffer[offset:], uint32(end-offset-headroom))
 			offset += headroom
 		}
-		c.sendBuffer[offset] = dataKind
+		c.sendBuffer[offset], sealed[i] = dataKind, payload
+		if payload[0] == SealedPayload && len(payload) > SealedHeader {
+			c.sendBuffer[offset], sealed[i] = sealedKind, payload[:SealedHeader]
+		}
 		messages[i] = c.sendBuffer[offset : offset+1 : end]
 		offset = end
 	}
-	if err := c.session.SealBatchAppend(messages[:len(payloads)], payloads); err != nil {
+	if err := c.session.SealBatchAppend(messages[:len(payloads)], sealed[:len(payloads)]); err != nil {
 		return err
+	}
+	for i, payload := range payloads {
+		if len(sealed[i]) != len(payload) {
+			messages[i] = append(messages[i], payload[SealedHeader:]...)
+		}
 	}
 	if headroom != 0 {
 		// Prefixes and independently authenticated records already occupy one
@@ -373,16 +397,18 @@ func (c *Channel) decodeBatches(ctx context.Context, receive func(context.Contex
 		if err != nil {
 			return nil, err
 		}
-		allEncrypted := len(messages) > 1
+		allEncrypted := len(messages) > 1 && len(messages) <= len(c.opened)
 		for _, raw := range messages {
-			if len(raw) < 2 || raw[0] != dataKind {
+			if !encrypted(raw) {
 				allEncrypted = false
 				break
 			}
 		}
 		if allEncrypted {
-			for i := range messages {
-				messages[i] = messages[i][1:]
+			raws := c.opened[:len(messages)]
+			copy(raws, messages)
+			for i, raw := range raws {
+				messages[i] = openPart(raw)
 			}
 			errs := c.session.OpenBatchInPlace(messages)
 			count := 0
@@ -391,11 +417,13 @@ func (c *Channel) decodeBatches(ctx context.Context, receive func(context.Contex
 					if errors.Is(err, secure.ErrReplay) || c.unreliable && !errors.Is(err, secure.ErrRekey) {
 						continue
 					}
+					clear(raws)
 					return nil, err
 				}
-				messages[count] = messages[i]
+				messages[count] = opened(raws[i], messages[i])
 				count++
 			}
+			clear(raws)
 			clear(messages[count:])
 			if count > 0 {
 				markAlive(c.conn)
@@ -420,9 +448,33 @@ func (c *Channel) decodeBatches(ctx context.Context, receive func(context.Contex
 		}
 	}
 }
+// encrypted reports a data or sealed message.
+func encrypted(raw []byte) bool {
+	return len(raw) > 1 && raw[0] == dataKind || len(raw) > 1+sealedOpen && raw[0] == sealedKind
+}
+
+// openPart is what of an encrypted message opens in place.
+func openPart(raw []byte) []byte {
+	if raw[0] == sealedKind {
+		return raw[1 : 1+sealedOpen]
+	}
+	return raw[1:]
+}
+
+// opened returns an encrypted message's payload once plaintext, its opened
+// part, is open: a sealed message's header moves next to the bytes after it.
+func opened(raw, plaintext []byte) []byte {
+	if raw[0] != sealedKind {
+		return plaintext
+	}
+	start := 1 + sealedOpen - SealedHeader
+	copy(raw[start:], plaintext)
+	return raw[start:]
+}
+
 func (c *Channel) decode(ctx context.Context, raw []byte) ([]byte, error) {
-	if len(raw) > 1 && raw[0] == dataKind {
-		plaintext, err := c.session.OpenInPlace(raw[1:])
+	if encrypted(raw) {
+		plaintext, err := c.session.OpenInPlace(openPart(raw))
 		if err != nil {
 			if errors.Is(err, secure.ErrReplay) || c.unreliable && !errors.Is(err, secure.ErrRekey) {
 				return nil, nil
@@ -430,7 +482,7 @@ func (c *Channel) decode(ctx context.Context, raw []byte) ([]byte, error) {
 			return nil, err
 		}
 		markAlive(c.conn)
-		return plaintext, nil
+		return opened(raw, plaintext), nil
 	}
 	if c.unreliable {
 		if bytes.Equal(raw, c.repeatRequest) {
@@ -472,7 +524,7 @@ func (c *Channel) ReceiveOwnedBatch(ctx context.Context) ([]*packetbuf.Buffer, e
 		}
 		allEncrypted := len(buffers) > 1
 		for _, b := range buffers {
-			if len(b.Data) < 2 || b.Data[0] != dataKind {
+			if !encrypted(b.Data) {
 				allEncrypted = false
 				break
 			}
@@ -480,10 +532,13 @@ func (c *Channel) ReceiveOwnedBatch(ctx context.Context) ([]*packetbuf.Buffer, e
 		if allEncrypted {
 			frames := make([][]byte, len(buffers))
 			for i, b := range buffers {
-				frames[i] = b.Data[1:]
+				frames[i] = openPart(b.Data)
 			}
 			errs := c.session.OpenBatchInPlace(frames)
 			for i, decodeErr := range errs {
+				if frames[i] != nil {
+					frames[i] = opened(buffers[i].Data, frames[i])
+				}
 				buffers[i].Data = frames[i]
 				if decodeErr != nil && !errors.Is(decodeErr, secure.ErrReplay) && !(c.unreliable && !errors.Is(decodeErr, secure.ErrRekey)) {
 					err = decodeErr

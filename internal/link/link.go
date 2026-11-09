@@ -14,6 +14,7 @@ import (
 	"github.com/eWloYW8/GraphWAN/internal/model"
 	"github.com/eWloYW8/GraphWAN/internal/packet"
 	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
+	"github.com/eWloYW8/GraphWAN/internal/peer"
 )
 
 const (
@@ -42,6 +43,9 @@ const (
 	// The acceptor confirms resumable TCP sessions offered in the
 	// introduction; see Options.Resume.
 	resumeHelloMessage = 20
+	// A stream message whose data is sealed end to end, which the channel
+	// does not encrypt again; see peer.SealedPayload.
+	sealedStreamMessage = peer.SealedPayload
 	// Leave room for multiple kernel GSO bursts while writers process bounded
 	// batches. The queue is still finite; control messages use a separate queue.
 	queueSize = 512
@@ -712,7 +716,7 @@ func (l *Link) readLoop() {
 				return
 			}
 			l.options.LinkState.ReceiveLinkState(l, raw[1:])
-		case streamMessage:
+		case streamMessage, sealedStreamMessage:
 			if !l.streamsReady.Load() {
 				return
 			}
@@ -847,7 +851,7 @@ func (l *Link) writeLoop() {
 		if count == 0 {
 			continue
 		}
-		preferStreams = len(messages[0]) == 0 || messages[0][0] != streamMessage
+		preferStreams = len(messages[0]) == 0 || messages[0][0] != streamMessage && messages[0][0] != sealedStreamMessage
 		ctx, cancel := context.WithTimeout(l.ctx, l.options.WriteTimeout)
 		var err error
 		if batching {
@@ -861,7 +865,7 @@ func (l *Link) writeLoop() {
 		}
 		for i, raw := range messages[:count] {
 			switch raw[0] {
-			case dataMessage, streamMessage:
+			case dataMessage, streamMessage, sealedStreamMessage:
 				l.tx.Add(uint64(len(raw) - 1))
 			case compactDataMessage:
 				l.tx.Add(uint64(len(raw) - 2 + packet.HeaderSize))

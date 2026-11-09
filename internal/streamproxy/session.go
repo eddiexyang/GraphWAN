@@ -415,6 +415,7 @@ func NewEgress(parent context.Context, hop Hop, askReplay func(gen uint32), coun
 // useLocked makes hop the session's chain; its received bytes start at in.
 // Callers began it at its sent offset and resent the kept bytes from there.
 func (e *End) useLocked(hop Hop, out, in uint64) {
+	e.sealHop(hop)
 	hop.DeliverLocal()
 	hop.SetRetention(e.keep)
 	hop.OnDelivered(func() {
@@ -431,6 +432,7 @@ func (e *End) useLocked(hop Hop, out, in uint64) {
 // resend begins a new chain at out and writes the kept bytes it lacks. It
 // runs without the lock: the writes wait for the hop's acknowledgements.
 func (e *End) resend(hop Hop, out uint64) error {
+	e.sealHop(hop)
 	hop.Begin(out)
 	chunks, ok := e.keep.From(out)
 	if !ok {
@@ -458,6 +460,22 @@ func (e *End) resend(hop Hop, out uint64) error {
 		}
 	}
 	return nil
+}
+
+// sealHop tells a hop of a session sealed end to end that what it carries
+// from now on is sealed already.
+func (e *End) sealHop(hop Hop) {
+	if e.records != nil {
+		CarrySealed(hop)
+	}
+}
+
+// CarrySealed tells a hop, if it can be told, that the bytes written to it
+// from now on are sealed end to end.
+func CarrySealed(hop Hop) {
+	if sealed, ok := hop.(interface{ CarrySealed() }); ok {
+		sealed.CarrySealed()
+	}
 }
 
 // Accept takes an egress's newer chain: it carries the upstream bytes from
