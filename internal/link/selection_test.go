@@ -69,3 +69,35 @@ func TestPrepareWhenLinkBecomesHealthy(t *testing.T) {
 		t.Fatal("no prepare for a Link healthy before it was added")
 	}
 }
+
+// A selected Link that misses its health checks for a while is deselected and,
+// once healthy again, selected again at each end, though it stays the target
+// and no new round starts.
+func TestSelectedLinkResumesAfterRecovering(t *testing.T) {
+	now := time.Now()
+	for _, leader := range []bool{true, false} {
+		local, remote := model.ID("a"), model.ID("b")
+		if !leader {
+			local, remote = remote, local
+		}
+		l := &Link{channel: selectionTestChannel{id: "only", created: now}, ctx: context.Background(), options: (Options{}).defaults(), info: Info{CandidateID: "only"}, lastPong: now, control: make(chan []byte, 8)}
+		e := NewCoordinatedEdge(local, remote, "")
+		e.Add(l)
+		e.activateLocked(l, now)
+		e.selection.target, e.selection.accepted, e.selection.confirmed = "only", true, true
+		l.mu.Lock()
+		l.probeSince = now.Add(-time.Minute)
+		l.mu.Unlock()
+		e.Tick()
+		if e.Active() != nil || e.active != "" {
+			t.Fatalf("leader %v: an unhealthy Link stayed selected", leader)
+		}
+		l.mu.Lock()
+		l.probeSince = time.Time{}
+		l.mu.Unlock()
+		e.Tick()
+		if e.Active() != l {
+			t.Fatalf("leader %v: the recovered Link was not selected again", leader)
+		}
+	}
+}

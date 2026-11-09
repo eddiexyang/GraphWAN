@@ -64,6 +64,14 @@ func (e *Edge) advanceLocked(now time.Time) {
 	if active := e.links[e.active]; active != nil && !active.healthy() {
 		e.activateLocked(nil, now)
 	}
+	// A confirmed target that failed and recovered resumes at either end
+	// without a new round: the other end is still on it or resumes it too,
+	// and a new round clears confirmed before it changes the target.
+	if e.active == "" && s.confirmed {
+		if target := e.links[s.target]; target != nil && target.healthy() {
+			e.activateLocked(target, now)
+		}
+	}
 	if !s.leader {
 		return
 	}
