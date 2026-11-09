@@ -731,7 +731,10 @@ func TestMuxWritersWaitForTheLink(t *testing.T) {
 		}
 		n := p.a.PullStream(nil, dst[:], owners[:])
 		packetbuf.ReleaseAll(owners[:n])
-		p.a.receiveAck(s.id, s.sendNext, s.sendNext+muxWindow, 0, false)
+		p.a.mu.Lock()
+		sent := s.sendNext
+		p.a.mu.Unlock()
+		p.a.receiveAck(s.id, sent, sent+muxWindow, 0, false)
 		time.Sleep(time.Millisecond)
 	}
 }
