@@ -61,8 +61,12 @@ and client authentication. Peer connections authenticate the identities permitte
 by the compiled Edge configuration. Network-wide cipher selection does not mean
 network-wide shared private keys. Transport-independent authenticated encryption
 uses ephemeral session secrets, direction-specific keys, unique nonces and replay
-protection. Intermediate forwarding Nodes are trusted to see hop-decrypted packets;
-end-to-end confidentiality is not claimed by this hop-encrypted design.
+protection. Between Nodes with Agent keys, TCP session bytes and the payload of
+other packets are also sealed end to end by sessions between the two Agents, so
+relays neither read nor change them, and no byte is encrypted twice; their IP
+and UDP/ICMP headers stay readable for routing. TCP carried as packets, and
+traffic of WireGuard leaves, which have no Agent key, are sealed per hop only,
+and their intermediate Nodes are trusted to see hop-decrypted packets.
 
 Browser authentication uses a salted password hash and bounded sessions with
 HttpOnly cookies. State-changing requests require same-origin/CSRF protection.

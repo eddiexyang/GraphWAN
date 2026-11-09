@@ -230,9 +230,13 @@ TCP headers, sequence numbers, options and payload traverse the same packet
 path. Peer tunnels are admitted and selected during convergence; new application
 TCP tuples reuse those tunnels without a new peer handshake or candidate probe.
 
-Intermediate Nodes are trusted hop forwarders and see plaintext. Source/address
-checks enforce admission but do not provide cryptographic end-to-end origin
-attestation against a compromised transit Node. Configuration replacement swaps
+Between Nodes with Agent keys, the payload of packets other than TCP and the
+bytes of TCP sessions are sealed end to end, so relays carry them without
+reading or changing them; see [End-to-end sealing](#end-to-end-sealing). Other
+traffic is sealed per hop only: TCP carried as packets, and traffic from or to
+WireGuard leaves, which have no Agent key. Its relays are trusted hop
+forwarders and see plaintext; source and address checks enforce admission but
+do not attest its origin against a compromised transit Node. Configuration replacement swaps
 an immutable routing table; packets already in flight may belong to an older
 epoch and are bounded by hop limits during convergence.
 
@@ -247,8 +251,10 @@ UDP relies on the host IP stack's fragmentation behavior, and QUIC splits peer
 messages into its bounded application fragments. Networks that discard outer
 fragments can require a smaller configured MTU or another transport.
 
-Packet parsing checks the wire version, reserved fields, nonzero IDs and hop
-limit, declared payload length and maximum frame length. Inner-IP inspection
+Packet parsing checks the wire version, the flag byte (6: 0, or 1 for a sealed
+packet), the reserved byte 7, nonzero IDs and hop limit, declared payload
+length and maximum frame length. A sealed packet's payload is its IP packet
+and a 24-byte trailer, and the MTU bounds the IP packet. Inner-IP inspection
 checks the version, base header size and exact IP length; the forwarding layer
 also enforces configured Node/address admission. Upper-layer checksums and full
 IPv6 extension-header semantics remain the receiving host stack's responsibility.
@@ -347,6 +353,72 @@ connection resets every hop of the chain and the other end's connection.
 The dialer offers `resume` in its Link introduction, and the acceptor confirms
 it with a resume hello message. When the first hop toward the destination does
 not carry sessions, the connection uses a plain stream, as before.
+
+## End-to-end sealing
+
+Every Agent keeps an end-to-end session toward every other Node of its
+directory with an Agent key, as the initiator, and accepts the sessions those
+Nodes open toward it. A session is a Noise XX handshake between the two Agent
+keys, with the prologue `GraphWAN/e2e/v1` and the Network and Node IDs, so no
+Link handshake can complete one. Its messages are UDP datagrams from and to
+port 18264 of the two Nodes' overlay addresses, routed like any packet and
+taken before the TUN: `[kind][8-byte session ID][Noise message]`, kind 1 hello
+(message 1), 2 reply (message 2), 3 finish (message 3), 4 confirm. The
+initiator resends an unanswered message after 200 ms, doubling to 2 s, and
+starts over after 10 s. It uses a session once it is confirmed, and replaces
+it 10 minutes before its hour is up or once half of its packet sequences are
+used. The responder keeps a Node's two newest sessions, and at most eight
+handshakes in progress per Node, dropping the oldest. A session's keys are
+never stored: a restarted Agent has none.
+
+A session has independent channels. A channel message's nonce is the channel
+in its high 32 bits and the message's index in its low 32, so no nonce travels
+and a dropped, repeated or reordered message fails to open. Channel 0 is the
+session's packets.
+
+### TCP sessions
+
+The ingress of a TCP session (see [Resumable TCP sessions](#resumable-tcp-sessions))
+seals its bytes with its session toward the egress, on a channel of its own,
+and the egress seals the other direction on the same channel. A chain's
+request names them: `sealer`, the ingress Node; `e2e`, the session ID
+(base64url); `channel`. The bytes are records: a 2-byte length and that many
+bytes of ciphertext, ending in its tag; the session's offsets count record
+bytes, so a resend after a reroute repeats the same ciphertext. The egress
+refuses a request from a keyed Node that is not sealed, or sealed by another
+Node, and answers a session ID it does not hold with status 6: the ingress
+drops its session, waits for a new one and asks once more. A record that
+fails to open resets the connection. Connections to WireGuard leaves are
+sealed per hop only.
+
+On a Link a stream frame of such a session is message kind 21 rather than 12,
+and the peer channel seals only its 19-byte header: channel message kind 6 is
+`[6][sequence][header ciphertext][tag][records]`. Each byte is thus encrypted
+once by its end and never by a hop.
+
+### Packets
+
+An Agent seals every packet it sends toward a keyed Node, except TCP and the
+handshake's own datagrams, with its session toward that Node; the Node drops
+a packet from a keyed Node that should be sealed and is not, or does not open.
+The IP header and, unless the packet is a later fragment, the 8-byte header of
+UDP, ICMP or ICMPv6 stay readable, so hops can route, admit and hash it, and a
+24-byte trailer follows the IP packet: the 16-byte tag, the 4-byte sequence and
+the first 4 bytes of the session ID. The sequence is the packet's nonce, and a
+1024-packet window takes reordering and refuses repeats. The seal
+authenticates the readable headers except the hop limit, the IPv4 header
+checksum and ECN, which hops change. The overlay header's flag marks the frame.
+A packet toward a keyed Node with no session yet is dropped; the receiver of a
+packet sealed by a session it does not hold sends kind 5, with the 4 bytes as
+the session ID, at most every 200 ms, and the sender replaces the session.
+
+A Link frame of a sealed packet travels in an envelope `[23][k][message]`,
+where the message is a data message or a compact sealed one, kind 22:
+`[22][hop limit][source Node][destination Node][IP packet][trailer]`. A
+compact sealed frame keeps its Nodes, which the seal depends on, so no hop
+chooses another gateway for it. The peer channel seals only the first `k`
+bytes of the envelope, its kind, the message's header and the readable
+headers: channel message kind 7 is `[7][k][sequence][ciphertext][tag][rest]`.
 
 ## Link control inside the authenticated channel
 

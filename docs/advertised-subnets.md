@@ -48,9 +48,10 @@ GraphWAN chooses the longest matching advertised prefix, then follows the existi
 weighted topology to its owner. Down-edge filtering still applies. If no gateway
 of that prefix is reachable, packets drop instead of falling back to a broader
 prefix. Both requests and replies must come from and go to a Node that advertises
-a prefix containing the address, including on intermediate hops. This extends the
-existing hop-authenticated admission model; it does not introduce end-to-end
-source authentication across untrusted relays.
+a prefix containing the address, including on intermediate hops. Traffic
+between two Nodes with Agent keys, such as an ingress and a gateway, is also
+sealed end to end between them, except TCP carried as packets; see
+[End-to-end sealing](peer-protocol.md#end-to-end-sealing).
 
 ## Several gateways for one prefix
 
@@ -59,11 +60,12 @@ Several Nodes may advertise the same prefix, each once, with an optional
 advertiser with the lowest path cost plus metric, so when a gateway fails,
 link-state routing moves traffic to the next one. Each hop makes its own choice
 toward the nearest gateway; a transit Node forwards a packet to any advertiser of
-the prefix.
+the prefix. A packet sealed end to end is the exception: its ingress chose the
+gateway it is sealed for, and every hop carries it there.
 
 Packets, including UDP and TCP carried as packets, choose the gateway with
-every packet, so an existing flow moves at once when another gateway becomes
-cheaper. A TCP connection carried as a stream ends at the gateway its egress
+every packet at their ingress, so an existing flow moves at once when another
+gateway becomes cheaper. A TCP connection carried as a stream ends at the gateway its egress
 holds its state on: when another gateway takes over, the connection is reset
 after the bytes delivered so far, and the client's next connection uses the
 new gateway. It never continues on another gateway. A change of path to the
