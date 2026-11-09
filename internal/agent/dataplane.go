@@ -72,8 +72,8 @@ type DataPlane struct {
 	damper        *edgeDamper
 	sessions      sessions
 	e2e           e2eSessions
-	// kernelEgress: a session's egress connects to a destination on this host
-	// with a kernel socket rather than through the TUN.
+	// kernelEgress: a session's egress connects to a destination on this host,
+	// or in a gateway subnet, with a kernel socket rather than through the TUN.
 	kernelEgress bool
 }
 

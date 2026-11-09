@@ -5,10 +5,11 @@ import (
 	"fmt"
 )
 
-// An Agent connects a TCP session's egress to a destination on its own host
-// with a kernel socket bound, transparently, to the connection's original
-// source. The replies are addressed to that source, which routes into the
-// TUN; these rules bring them back to the socket instead. The socket marks its
+// An Agent connects a TCP session's egress to a destination on its own host,
+// or in a subnet it is a gateway to, with a kernel socket bound,
+// transparently, to the connection's original source. The replies are
+// addressed to that source, which routes into the TUN; these rules bring them
+// back to the socket instead. The socket marks its
 // packets EgressMark, nft records the mark on the connection and marks the
 // connection's replies ReplyMark, and a policy rule delivers packets marked
 // ReplyMark on this host.

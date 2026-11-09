@@ -60,8 +60,8 @@ func localDestination(addr netip.Addr) bool {
 }
 
 // dialKernel connects from the connection's original source to a destination
-// on this host with a kernel socket; the kernel egress rules return the
-// replies to it.
+// on this host, or in a gateway subnet, with a kernel socket; the kernel
+// egress rules return the replies to it, and a SNAT gateway masquerades it.
 func dialKernel(ctx context.Context, from, to netip.AddrPort) (streamproxy.Conn, error) {
 	dialer := net.Dialer{
 		LocalAddr: net.TCPAddrFromAddrPort(from),
