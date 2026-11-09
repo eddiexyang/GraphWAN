@@ -51,9 +51,10 @@ type kernelTUN struct {
 	gsos     atomic.Uint64
 	readGSOs atomic.Uint64
 	once     sync.Once
-	// udp, when set, receives the UDP packets written to the device, which
-	// its stack does not take.
-	udp chan []byte
+	// udp and icmp, when set, receive the UDP and ICMP packets written to the
+	// device, which its stack does not take.
+	udp  chan []byte
+	icmp chan []byte
 }
 
 type kernelPacket struct {
@@ -119,6 +120,13 @@ func (d *kernelTUN) Write(p []byte) (int, error) {
 	if d.udp != nil && packet.IsUDP(p) {
 		select {
 		case d.udp <- bytes.Clone(p):
+		default:
+		}
+		return len(p), nil
+	}
+	if d.icmp != nil && len(p) >= 20 && p[0]>>4 == 4 && p[9] == 1 {
+		select {
+		case d.icmp <- bytes.Clone(p):
 		default:
 		}
 		return len(p), nil

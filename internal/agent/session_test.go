@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"io"
+	mrand "math/rand/v2"
 	"net"
 	"strings"
 	"testing"
@@ -138,6 +139,23 @@ func sessionExchange(t *testing.T, devices []*kernelTUN, state model.State, targ
 	}
 }
 
+// assertSealed fails unless the ingress's connections toward the egress were
+// sealed with a session the egress accepted.
+func assertSealed(t *testing.T, agents []*DataPlane, state model.State, ingress, egress int) {
+	t.Helper()
+	network, nodes := state.Networks[0].ID, state.Networks[0].Nodes
+	s := outgoingE2E(agents[ingress], network, nodes[egress].ID)
+	if s == nil {
+		t.Fatal("no end-to-end session")
+	}
+	s.mu.Lock()
+	used := s.channel
+	s.mu.Unlock()
+	if used == 0 || agents[egress].e2eAccepted(network, nodes[ingress].ID, s.id) == nil {
+		t.Fatal("the connection was not sealed end to end")
+	}
+}
+
 func applyAll(t *testing.T, agents []*DataPlane, state model.State) {
 	t.Helper()
 	for i, agent := range agents {
@@ -176,6 +194,7 @@ func TestTCPSessionFollowsRouteChange(t *testing.T) {
 		applyAll(t, agents, state)
 		waitFor(t, 10*time.Second, "the chain to move to D", func() bool { return relaying(agents[3]) > 0 && relaying(agents[1]) == 0 })
 	})
+	assertSealed(t, agents, state, 0, 2)
 	assertNoTCPOverTCP(t, agents)
 	if agents[0].Counters()["session_rebuilds"] == 0 {
 		t.Fatal("no rebuild counted")
@@ -199,6 +218,7 @@ func TestTCPSessionSurvivesRelayFailure(t *testing.T) {
 		agents[1].Close()
 		waitFor(t, 30*time.Second, "the chain to move to D", func() bool { return relaying(agents[3]) > 0 })
 	})
+	assertSealed(t, agents, state, 0, 2)
 	assertNoTCPOverTCP(t, []*DataPlane{agents[0], agents[2], agents[3]})
 }
 
@@ -216,6 +236,7 @@ func TestTCPSessionSurvivesLinkFlap(t *testing.T) {
 		}
 		waitFor(t, 20*time.Second, "the chain back through B", func() bool { return relaying(agents[1]) > 0 })
 	})
+	assertSealed(t, agents, state, 0, 2)
 	assertNoTCPOverTCP(t, agents)
 }
 
@@ -268,7 +289,9 @@ func TestTCPSessionEndsDuringReroute(t *testing.T) {
 		}
 	}()
 	weight := uint32(100)
-	for i := range 6 {
+	// 20 FINs and 20 resets, each at a random moment within 200 ms of a route
+	// change.
+	for i := range 40 {
 		abort := i%2 == 1
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		conn, err := gonet.DialContextTCP(ctx, devices[0].stack, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(address.As4()), Port: 8091}, ipv4.ProtocolNumber)
@@ -283,10 +306,16 @@ func TestTCPSessionEndsDuringReroute(t *testing.T) {
 		// The end and the route change race.
 		if abort {
 			time.Sleep(20 * time.Millisecond) // the greeting arrives unread
-			go conn.Close()
-		} else {
-			go conn.CloseWrite()
 		}
+		delay := time.Duration(mrand.Int64N(int64(200 * time.Millisecond)))
+		go func() {
+			time.Sleep(delay)
+			if abort {
+				conn.Close()
+			} else {
+				conn.CloseWrite()
+			}
+		}()
 		state.Revision++
 		state.Networks[0].Edges[0].Weight, weight = weight, 110-weight
 		applyAll(t, agents, state)
