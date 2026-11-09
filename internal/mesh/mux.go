@@ -731,32 +731,47 @@ func (s *muxStream) newBuilder(offset uint64, limit int, records *streamproxy.Re
 	return b
 }
 
+// layout reports a frame's plaintext room, the record length bytes before it
+// and the bytes a frame adds to the session's offsets.
+func (b *frameBuilder) layout() (room, prefix, overhead int) {
+	if b.records != nil {
+		return muxMaxData - streamproxy.RecordOverhead, streamproxy.RecordHeader, streamproxy.RecordOverhead
+	}
+	return muxMaxData, 0, 0
+}
+
+// space returns the last frame with room for more plaintext, starting a frame
+// when the last one is full, or nil when the credit is used up.
+func (b *frameBuilder) space() *muxFrame {
+	room, prefix, overhead := b.layout()
+	last := len(b.frames) - 1
+	if last < 0 || len(b.frames[last].raw)-muxDataHeader-prefix == room {
+		if b.bytes >= b.limit || b.limit-b.bytes <= overhead {
+			return nil
+		}
+		buf := packetbuf.Get(muxDataHeader + muxMaxData)
+		// Pooled storage is not cleared: every header byte is written.
+		raw := buf.Data[:muxDataHeader]
+		frameHeader(raw, muxData, b.id)
+		raw[0] = b.kind
+		binary.BigEndian.PutUint64(raw[10:18], b.offset+uint64(b.bytes))
+		raw[18] = 0 // flags
+		raw = raw[:muxDataHeader+prefix]
+		b.bytes += overhead
+		b.frames = append(b.frames, muxFrame{raw: raw, buf: buf})
+		last++
+	}
+	return &b.frames[last]
+}
+
 func (b *frameBuilder) Write(data []byte) (int, error) {
 	written := 0
-	// room is a frame's plaintext, after prefix bytes of record length.
-	room, prefix, overhead := muxMaxData, 0, 0
-	if b.records != nil {
-		room, prefix, overhead = muxMaxData-streamproxy.RecordOverhead, streamproxy.RecordHeader, streamproxy.RecordOverhead
-	}
+	room, prefix, _ := b.layout()
 	for len(data) > 0 && b.bytes < b.limit {
-		last := len(b.frames) - 1
-		if last < 0 || len(b.frames[last].raw)-muxDataHeader-prefix == room {
-			if b.limit-b.bytes <= overhead {
-				break
-			}
-			buf := packetbuf.Get(muxDataHeader + muxMaxData)
-			// Pooled storage is not cleared: every header byte is written.
-			raw := buf.Data[:muxDataHeader]
-			frameHeader(raw, muxData, b.id)
-			raw[0] = b.kind
-			binary.BigEndian.PutUint64(raw[10:18], b.offset+uint64(b.bytes))
-			raw[18] = 0 // flags
-			raw = raw[:muxDataHeader+prefix]
-			b.bytes += overhead
-			b.frames = append(b.frames, muxFrame{raw: raw, buf: buf})
-			last++
+		frame := b.space()
+		if frame == nil {
+			break
 		}
-		frame := &b.frames[last]
 		n := min(len(data), b.limit-b.bytes, room-(len(frame.raw)-muxDataHeader-prefix))
 		frame.raw = append(frame.raw, data[:n]...)
 		b.bytes += n
@@ -769,13 +784,34 @@ func (b *frameBuilder) Write(data []byte) (int, error) {
 	return written, nil
 }
 
+// Fill reads plaintext straight into the frames' room with one call of read,
+// as a socket read takes what has arrived, so the bytes are not copied on
+// their way into the frames.
+func (b *frameBuilder) Fill(read func([]byte) (int, error)) (int, error) {
+	room, prefix, overhead := b.layout()
+	started := len(b.frames)
+	frame := b.space()
+	if frame == nil {
+		return 0, io.ErrShortWrite
+	}
+	used := len(frame.raw)
+	n := min(b.limit-b.bytes, room-(used-muxDataHeader-prefix))
+	got, err := read(frame.raw[used : used+n])
+	frame.raw = frame.raw[:used+got]
+	b.bytes += got
+	if got == 0 && len(b.frames) > started {
+		// The frame started for this read holds nothing.
+		frame.buf.Release()
+		b.frames = b.frames[:started]
+		b.bytes -= overhead
+	}
+	return got, err
+}
+
 // Room is how many bytes Write takes now, for a source that must not read
 // more than it can write.
 func (b *frameBuilder) Room() int {
-	room, prefix, overhead := muxMaxData, 0, 0
-	if b.records != nil {
-		room, prefix, overhead = muxMaxData-streamproxy.RecordOverhead, streamproxy.RecordHeader, streamproxy.RecordOverhead
-	}
+	room, prefix, overhead := b.layout()
 	credit, total := b.limit-b.bytes, 0
 	if last := len(b.frames) - 1; last >= 0 {
 		take := min(credit, room-(len(b.frames[last].raw)-muxDataHeader-prefix))

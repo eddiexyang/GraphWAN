@@ -333,6 +333,11 @@ func (r *DataPlane) openTCP(ctx context.Context, request streamproxy.Request, in
 	if local || !state.mesh.StreamsAvailable(request.Network, next) {
 		// The connection leaves the stream here: either it is delivered on this
 		// node, or its next Edge forwards packets. The local stack keeps the tuple.
+		if local && r.kernelEgress && localDestination(request.To.Addr()) {
+			// The destination is on this host: a kernel socket reaches it
+			// with the original source, without a TCP stack of our own.
+			return dialKernel(ctx, request.From, request.To)
+		}
 		tcp := state.tcp[request.Network]
 		if tcp == nil {
 			return nil, net.ErrClosed

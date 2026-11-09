@@ -101,6 +101,37 @@ func (r *Records) available() int { return r.queued + r.end - r.start }
 // plain is the opened bytes of the window not yet read.
 func (r *Records) plain() []byte { return r.buf[r.start:r.end] }
 
+// views appends the opened bytes not yet read to dst, in order, without
+// copying them.
+func (r *Records) views(dst [][]byte) [][]byte {
+	for _, c := range r.chunks[r.next:] {
+		dst = append(dst, c.plain)
+	}
+	if plain := r.plain(); len(plain) > 0 {
+		dst = append(dst, plain)
+	}
+	return dst
+}
+
+// drop drops n opened bytes, which were read.
+func (r *Records) drop(n int) {
+	for n > 0 && r.next < len(r.chunks) {
+		c := &r.chunks[r.next]
+		taken := min(n, len(c.plain))
+		n -= taken
+		r.queued -= taken
+		if c.plain = c.plain[taken:]; len(c.plain) == 0 {
+			c.owner.Release()
+			*c = openedChunk{}
+			r.next++
+		}
+	}
+	if r.next == len(r.chunks) {
+		r.chunks, r.next = r.chunks[:0], 0
+		r.consume(n)
+	}
+}
+
 // read copies opened bytes to p and drops them.
 func (r *Records) read(p []byte) int {
 	n := 0
