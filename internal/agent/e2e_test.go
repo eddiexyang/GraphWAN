@@ -31,6 +31,10 @@ func TestTCPSessionIsSealedEndToEnd(t *testing.T) {
 			t.Errorf("relayed chains %d", relaying(agents[1]))
 		}
 	})
+	// The relay forwards each frame in the buffer it arrived in.
+	if counters := agents[1].Counters(); counters["relay_forwarded_bytes"] < 2<<20 || counters["relay_copied_bytes"] != 0 {
+		t.Fatalf("relay forwarded %d bytes, copied %d", counters["relay_forwarded_bytes"], counters["relay_copied_bytes"])
+	}
 	network, nodes := state.Networks[0].ID, state.Networks[0].Nodes
 	sealed := outgoingE2E(agents[0], network, nodes[2].ID)
 	if sealed == nil || agents[2].e2eAccepted(network, nodes[0].ID, sealed.id) == nil {

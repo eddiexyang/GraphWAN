@@ -43,6 +43,8 @@ type Mesh struct {
 	// muxResent counts stream frames sent again after a Link change;
 	// stallResets, TCP session hops reset for a stall.
 	muxResent      atomic.Uint64
+	relayForwarded atomic.Uint64 // bytes a relay forwarded in the buffers they arrived in
+	relayCopied    atomic.Uint64 // bytes a relay copied instead
 	stallResets    atomic.Uint64
 	streamHandler  StreamHandler
 	noResume       bool
@@ -325,7 +327,7 @@ func (m *Mesh) Report() []model.LinkStatus {
 
 // Counters reports data-plane event totals for the Agent's report.
 func (m *Mesh) Counters() map[string]uint64 {
-	return map[string]uint64{"mux_resent_frames": m.muxResent.Load(), "session_stall_resets": m.stallResets.Load()}
+	return map[string]uint64{"mux_resent_frames": m.muxResent.Load(), "session_stall_resets": m.stallResets.Load(), "relay_forwarded_bytes": m.relayForwarded.Load(), "relay_copied_bytes": m.relayCopied.Load()}
 }
 
 func (m *Mesh) secure(cfg *policy, kind model.Transport) secure.Config {

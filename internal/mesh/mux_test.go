@@ -833,3 +833,79 @@ func TestMuxCarriesManyStreams(t *testing.T) {
 	})
 }
 
+// A relay forwards a received frame in the Link buffer it arrived in, under
+// its own header, and opens its window by what it queued; forwarding
+// allocates nothing.
+func TestMuxRelayForwardsReceivedBuffers(t *testing.T) {
+	p, q := newMuxPair(t), newMuxPair(t)
+	s := p.a.newStreamLocked(2)
+	payload := bytes.Repeat([]byte("relay"), 1000)
+	if _, err := s.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	var dst [4][]byte
+	var owners [4]*packetbuf.Buffer
+	n := p.a.PullStream(nil, dst[:], owners[:])
+	// As a Link holds it: the message kind, then the frame.
+	received := packetbuf.Get(len(dst[0]))
+	copy(received.Data, dst[0])
+	packetbuf.ReleaseAll(owners[:n])
+	if !p.b.ReceiveStream(nil, received.Data[1:], received) {
+		t.Fatal("invalid frame")
+	}
+	received.Release() // the Link is done with it
+	up := <-p.accepted
+	down := q.a.newStreamLocked(2)
+	go up.RelayTo(down)
+	t.Cleanup(up.Abort)
+	waitFor(t, "the relay to queue the frame", func() bool {
+		q.a.mu.Lock()
+		defer q.a.mu.Unlock()
+		return len(down.frames) == 1
+	})
+	q.a.mu.Lock()
+	frame := down.frames[0]
+	q.a.mu.Unlock()
+	if frame.buf != received || &frame.raw[muxDataHeader] != &received.Data[muxDataHeader] {
+		t.Fatal("the relay copied the frame")
+	}
+	if id, offset := binary.BigEndian.Uint64(frame.raw[2:10]), binary.BigEndian.Uint64(frame.raw[10:18]); id != down.id || offset != 0 || !bytes.Equal(frame.raw[muxDataHeader:], payload) {
+		t.Fatalf("frame for stream %d at %d", id, offset)
+	}
+	waitFor(t, "the relay to read what it queued", func() bool {
+		p.b.mu.Lock()
+		defer p.b.mu.Unlock()
+		return up.consumed == uint64(len(payload))
+	})
+
+	// The forwarded frame arrives unchanged.
+	n = q.a.PullStream(nil, dst[:], owners[:])
+	for i, raw := range dst[:n] {
+		if !q.b.ReceiveStream(nil, raw[1:], nil) {
+			t.Fatal("invalid frame")
+		}
+		owners[i].Release()
+	}
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(<-q.accepted, got); err != nil || !bytes.Equal(got, payload) {
+		t.Fatal("forwarded bytes changed", err)
+	}
+
+	next := q.a.newStreamLocked(4)
+	next.writeMu.Lock()
+	defer next.writeMu.Unlock()
+	allocs := testing.AllocsPerRun(100, func() {
+		buf := packetbuf.Get(muxDataHeader + 1000)
+		if err := next.forward(buf.Data[muxDataHeader:], buf); err != nil {
+			t.Fatal(err)
+		}
+		// The peer acknowledges it, and its buffer returns to the pool.
+		q.a.mu.Lock()
+		sent := next.sendNext
+		q.a.mu.Unlock()
+		q.a.receiveAck(next.id, sent, sent+muxWindow, 0, false)
+	})
+	if allocs != 0 {
+		t.Fatalf("forwarding allocates %v times per frame", allocs)
+	}
+}

@@ -588,7 +588,13 @@ func (m *mux) receiveAck(id, received, limit, delivered uint64, explicit bool) {
 			s.frames[drop] = muxFrame{}
 			drop++
 		}
-		s.frames = s.frames[drop:]
+		if drop == len(s.frames) {
+			// Every frame was acknowledged: the next ones reuse the storage
+			// from its start instead of growing past its end.
+			s.frames = s.frames[:0]
+		} else {
+			s.frames = s.frames[drop:]
+		}
 		s.unsent = max(0, s.unsent-drop)
 	}
 	if limit > s.peerLimit {
@@ -1139,6 +1145,15 @@ func (s *muxStream) Read(p []byte) (int, error) {
 		}
 	}
 	s.recvBytes -= n
+	m.mu.Unlock()
+	s.consume(n)
+	return n, nil
+}
+
+// consume counts n received bytes as read, opening the window by them.
+func (s *muxStream) consume(n int) {
+	m := s.m
+	m.mu.Lock()
 	s.consumed += uint64(n)
 	var l *link.Link
 	// A session hop that read up to its FIN acknowledges at once: the far end
@@ -1152,7 +1167,111 @@ func (s *muxStream) Read(p []byte) (int, error) {
 	if l != nil {
 		l.WakeStreams()
 	}
-	return n, nil
+}
+
+// RelayTo sends what s receives on to, as a TCP session's relay does. A
+// received frame leaves in the Link buffer it arrived in: to's header is
+// written over the bytes before its payload, which held its own header. Bytes
+// not in such a buffer are copied. s opens its window by what to queued, so
+// the relay holds no more than its streams' windows. It returns at s's end;
+// the caller ends to's direction.
+func (s *muxStream) RelayTo(hop streamproxy.Hop) (int64, error) {
+	to, ok := hop.(*muxStream)
+	if !ok {
+		return io.CopyBuffer(muxWriterOnly{hop}, s, make([]byte, 64*1024))
+	}
+	to.writeMu.Lock()
+	defer to.writeMu.Unlock()
+	m := s.m
+	var total int64
+	for {
+		if _, err := s.ReadWindow(); err != nil {
+			if err == io.EOF {
+				return total, nil
+			}
+			return total, err
+		}
+		// The chunk's owner passes to forward with it.
+		m.mu.Lock()
+		if len(s.recv) == 0 {
+			m.mu.Unlock()
+			continue
+		}
+		c := s.recv[0]
+		s.recv[0] = recvChunk{}
+		s.recv = s.recv[1:]
+		s.recvBytes -= len(c.data)
+		m.mu.Unlock()
+		if err := to.forward(c.data, c.owner); err != nil {
+			return total, err
+		}
+		s.consume(len(c.data))
+		total += int64(len(c.data))
+	}
+}
+
+// forward queues data, whose owner passes to it, as the stream's next bytes:
+// in its own buffer under a header written in front of it when the buffer
+// holds the muxDataHeader bytes before data, and copied otherwise. Callers
+// hold writeMu.
+func (s *muxStream) forward(data []byte, owner *packetbuf.Buffer) error {
+	at, inPlace := bufferOffset(data, owner)
+	if !inPlace || at < muxDataHeader || len(data) > muxMaxData {
+		defer owner.Release()
+		if m := s.m; m.g != nil && m.g.mesh != nil {
+			m.g.mesh.relayCopied.Add(uint64(len(data)))
+		}
+		for len(data) > 0 {
+			start, limit, err := s.reserve()
+			if err != nil {
+				return err
+			}
+			b := s.newBuilder(start, min(len(data), limit), nil)
+			b.Write(data[:b.limit])
+			if err := s.publish(b); err != nil {
+				b.release()
+				return err
+			}
+			data = data[b.bytes:]
+		}
+		return nil
+	}
+	start, err := s.reserveAll(len(data))
+	if err != nil {
+		owner.Release()
+		return err
+	}
+	end := at + len(data)
+	raw := owner.Data[at-muxDataHeader : end : end]
+	frameHeader(raw, muxData, s.id)
+	if s.sealed.Load() {
+		raw[0] = sealedStreamKind
+	}
+	binary.BigEndian.PutUint64(raw[10:18], start)
+	raw[18] = 0 // flags
+	frames := [1]muxFrame{{raw: raw, buf: owner, at: at - muxDataHeader}}
+	b := frameBuilder{id: s.id, offset: start, limit: len(data), bytes: len(data), frames: frames[:]}
+	if err := s.publish(&b); err != nil {
+		owner.Release()
+		return err
+	}
+	if m := s.m; m.g != nil && m.g.mesh != nil {
+		m.g.mesh.relayForwarded.Add(uint64(len(data)))
+	}
+	return nil
+}
+
+// bufferOffset reports where data starts in owner.Data, if data is a view of
+// it.
+func bufferOffset(data []byte, owner *packetbuf.Buffer) (int, bool) {
+	if owner == nil || len(data) == 0 {
+		return 0, false
+	}
+	at := cap(owner.Data) - cap(data)
+	if at < 0 || at+len(data) > len(owner.Data) || &owner.Data[at] != &data[0] {
+		return 0, false
+	}
+	return at, true
 }
 
 // Close ends the stream. After both directions finished it waits for the FIN

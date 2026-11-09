@@ -987,9 +987,10 @@ func (r *onceReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// RelayHops copies a chain between two hops at a relay, which keeps no
+// RelayHops passes a chain on between two hops at a relay, which keeps no
 // session state: it passes on what the far ends delivered, and a reset of the
-// connection resets it on both hops.
+// connection resets it on both hops. Hops that forward what they receive
+// (RelayTo) pass the bytes on without copying them.
 func RelayHops(ctx context.Context, up, down Hop) error {
 	settled := make(chan struct{}, 1)
 	pass := func(to, from Hop) func() {
@@ -1016,7 +1017,12 @@ func RelayHops(ctx context.Context, up, down Hop) error {
 	}
 	errs := make(chan error, 2)
 	copyTo := func(dst, src Hop) {
-		_, err := io.CopyBuffer(dst, src, make([]byte, 64*1024))
+		var err error
+		if relay, ok := src.(interface{ RelayTo(Hop) (int64, error) }); ok {
+			_, err = relay.RelayTo(dst)
+		} else {
+			_, err = io.CopyBuffer(dst, src, make([]byte, 64*1024))
+		}
 		if err == nil {
 			err = dst.CloseWrite()
 		}
