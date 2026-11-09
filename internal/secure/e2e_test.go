@@ -117,37 +117,41 @@ func TestEndToEndPackets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ad, body := []byte("headers"), []byte("datagram")
+	ad, body, label := []byte("headers"), []byte("datagram"), []byte("abcd")
 	seal := func() []byte {
-		buf := make([]byte, len(body), len(body)+TagSize+PacketSequence)
+		buf := make([]byte, len(body), len(body)+PacketSequence+len(label)+TagSize)
 		copy(buf, body)
-		sealed, err := as.SealPacket(ad, buf)
+		sealed, err := as.SealPacket(ad, buf, label)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return sealed
 	}
 	first, second := seal(), seal()
-	if len(first) != len(body)+TagSize+PacketSequence {
+	if len(first) != len(body)+PacketSequence+len(label)+TagSize {
 		t.Fatalf("sealed %d bytes", len(first))
 	}
-	if opened, err := bs.OpenPacket(ad, bytes.Clone(second)); err != nil || !bytes.Equal(opened, body) {
+	// The sequence and the label follow the ciphertext, the tag ends it.
+	if !bytes.Equal(first[len(body):len(body)+PacketSequence], []byte{0, 0, 0, 1}) || !bytes.Equal(first[len(body)+PacketSequence:len(first)-TagSize], label) {
+		t.Fatal("trailer layout")
+	}
+	if opened, err := bs.OpenPacket(ad, bytes.Clone(second), len(label)); err != nil || !bytes.Equal(opened, body) {
 		t.Fatal("open", err)
 	}
-	if opened, err := bs.OpenPacket(ad, bytes.Clone(first)); err != nil || !bytes.Equal(opened, body) {
+	if opened, err := bs.OpenPacket(ad, bytes.Clone(first), len(label)); err != nil || !bytes.Equal(opened, body) {
 		t.Fatal("open out of order", err)
 	}
-	if _, err := bs.OpenPacket(ad, bytes.Clone(first)); err == nil {
+	if _, err := bs.OpenPacket(ad, bytes.Clone(first), len(label)); err == nil {
 		t.Fatal("opened a packet twice")
 	}
 	third := seal()
-	if _, err := bs.OpenPacket([]byte("Headers"), bytes.Clone(third)); err == nil {
+	if _, err := bs.OpenPacket([]byte("Headers"), bytes.Clone(third), len(label)); err == nil {
 		t.Fatal("opened with changed headers")
 	}
-	if _, err := bs.OpenChannel(0, 3, bytes.Clone(third[:len(third)-PacketSequence])); err == nil {
+	if _, err := bs.OpenChannel(0, 3, append(bytes.Clone(third[:len(body)]), third[len(third)-TagSize:]...)); err == nil {
 		t.Fatal("a packet opened as a channel message")
 	}
-	if opened, err := bs.OpenPacket(ad, third); err != nil || !bytes.Equal(opened, body) {
+	if opened, err := bs.OpenPacket(ad, third, len(label)); err != nil || !bytes.Equal(opened, body) {
 		t.Fatal("a failed open used the sequence", err)
 	}
 }

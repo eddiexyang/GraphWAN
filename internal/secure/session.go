@@ -155,14 +155,16 @@ func (s *Session) OpenChannel(channel, index uint32, sealed []byte) ([]byte, err
 	return s.receive.Decrypt(sealed[:0], channelNonce(channel, index), s.binding, sealed)
 }
 
-// PacketSequence is what SealPacket adds after the tag: the packet's
-// sequence, its nonce in channel 0.
+// PacketSequence is the packet's sequence that SealPacket writes after the
+// ciphertext: its nonce in channel 0.
 const PacketSequence = 4
 
 // SealPacket seals body in place, authenticating ad with it, and appends the
-// tag and the sequence; body needs TagSize+PacketSequence spare capacity.
-func (s *Session) SealPacket(ad, body []byte) ([]byte, error) {
-	if cap(body)-len(body) < TagSize+PacketSequence {
+// packet's sequence, then label, then the tag; body needs
+// PacketSequence+len(label)+TagSize spare capacity. label, such as the
+// session's identity, travels in the clear.
+func (s *Session) SealPacket(ad, body, label []byte) ([]byte, error) {
+	if cap(body)-len(body) < PacketSequence+len(label)+TagSize {
 		return nil, errors.New("invalid end-to-end packet")
 	}
 	s.sendMu.Lock()
@@ -173,8 +175,13 @@ func (s *Session) SealPacket(ad, body []byte) ([]byte, error) {
 	s.sequence++
 	nonce := s.sequence
 	s.sendMu.Unlock()
+	n := len(body)
 	sealed := s.send.Encrypt(body[:0], nonce, ad, body)
-	return binary.BigEndian.AppendUint32(sealed, uint32(nonce)), nil
+	var tag [TagSize]byte
+	copy(tag[:], sealed[n:])
+	sealed = binary.BigEndian.AppendUint32(sealed[:n], uint32(nonce))
+	sealed = append(sealed, label...)
+	return append(sealed, tag[:]...), nil
 }
 
 // Sequence reports how many channel 0 nonces the session used.
@@ -184,17 +191,18 @@ func (s *Session) Sequence() uint64 {
 	return s.sequence
 }
 
-// OpenPacket opens a SealPacket body in place. Like Open, it accepts bounded
-// out-of-order delivery and refuses a sequence it already opened.
-func (s *Session) OpenPacket(ad, sealed []byte) ([]byte, error) {
-	if len(sealed) < TagSize+PacketSequence {
+// OpenPacket opens a SealPacket body whose label has labelSize bytes in
+// place. Like Open, it accepts bounded out-of-order delivery and refuses a
+// sequence it already opened.
+func (s *Session) OpenPacket(ad, sealed []byte, labelSize int) ([]byte, error) {
+	n := len(sealed) - PacketSequence - labelSize - TagSize
+	if labelSize < 0 || n < 0 {
 		return nil, errors.New("invalid end-to-end packet")
 	}
 	if time.Since(s.created) >= MaxSessionAge {
 		return nil, ErrRekey
 	}
-	end := len(sealed) - PacketSequence
-	nonce := uint64(binary.BigEndian.Uint32(sealed[end:]))
+	nonce := uint64(binary.BigEndian.Uint32(sealed[n:]))
 	if nonce == 0 {
 		return nil, ErrReplay
 	}
@@ -203,7 +211,9 @@ func (s *Session) OpenPacket(ad, sealed []byte) ([]byte, error) {
 	if s.seen[nonce%ReplayWindow] == nonce || s.highest >= ReplayWindow && nonce <= s.highest-ReplayWindow {
 		return nil, ErrReplay
 	}
-	plaintext, err := s.receive.Decrypt(sealed[:0], nonce, ad, sealed[:end])
+	// The tag moves next to the ciphertext, over the sequence and label.
+	copy(sealed[n:], sealed[len(sealed)-TagSize:])
+	plaintext, err := s.receive.Decrypt(sealed[:0], nonce, ad, sealed[:n+TagSize])
 	if err != nil {
 		return nil, err
 	}

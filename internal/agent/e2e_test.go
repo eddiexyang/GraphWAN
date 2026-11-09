@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"encoding/binary"
 	"net/netip"
 	"testing"
 	"time"
@@ -115,7 +116,7 @@ func TestPacketsAreSealedEndToEnd(t *testing.T) {
 		return sealed
 	}
 	sealed := seal()
-	if bytes.Contains(sealed, message) || !bytes.Equal(sealed[:packet.Readable(raw)], raw[:packet.Readable(raw)]) {
+	if bytes.Contains(sealed, message) || !bytes.Equal(sealed[:packet.HeaderLen(raw)], raw[:packet.HeaderLen(raw)]) {
 		t.Fatal("sealed the wrong bytes")
 	}
 	if _, err := (e2ePackets{agents[1]}).Open(network, nodes[0].ID, bytes.Clone(sealed), true); err == nil {
@@ -131,6 +132,28 @@ func TestPacketsAreSealedEndToEnd(t *testing.T) {
 	}
 	if _, err := (e2ePackets{agents[2]}).Open(network, nodes[0].ID, bytes.Clone(raw), false); err == nil {
 		t.Fatal("the egress took an unsealed datagram")
+	}
+	// A hop's change to the checksums the seal leaves out does not reach the
+	// destination: it computes them again.
+	checksum := seal()
+	checksum[26] ^= 0xff // the UDP checksum
+	checksum[10] ^= 0xff // the IPv4 header checksum
+	if opened, err := (e2ePackets{agents[2]}).Open(network, nodes[0].ID, checksum, true); err != nil || !bytes.Equal(opened, raw) {
+		t.Fatal("the egress did not restore the checksums", err)
+	}
+	// A later fragment has only its IP header readable, and opens unchanged.
+	fragment := bytes.Clone(raw)
+	binary.BigEndian.PutUint16(fragment[6:8], 3) // offset 24 bytes
+	fragment[10], fragment[11] = 0, 0
+	binary.BigEndian.PutUint16(fragment[10:12], ^checksum16(fragment[:20]))
+	buf := make([]byte, len(fragment), len(fragment)+packet.Trailer)
+	copy(buf, fragment)
+	sealedFragment, ok, err := e2ePackets{agents[0]}.Seal(network, nodes[2].ID, buf)
+	if err != nil || !ok || packet.HeaderLen(fragment) != 20 || bytes.Contains(sealedFragment[20:], fragment[20:28]) {
+		t.Fatal("sealed a fragment", ok, err)
+	}
+	if opened, err := (e2ePackets{agents[2]}).Open(network, nodes[0].ID, sealedFragment, true); err != nil || !bytes.Equal(opened, fragment) {
+		t.Fatal("the egress did not open a fragment", err)
 	}
 	changed := seal()
 	changed[23]++ // the destination port
@@ -150,3 +173,15 @@ func TestPacketsAreSealedEndToEnd(t *testing.T) {
 
 // udpPayload is where an IPv4 UDP datagram's payload starts.
 const udpPayload = 28
+
+// checksum16 is the one's complement sum of raw's 16-bit words.
+func checksum16(raw []byte) uint16 {
+	var sum uint32
+	for i := 0; i+1 < len(raw); i += 2 {
+		sum += uint32(raw[i])<<8 | uint32(raw[i+1])
+	}
+	for sum>>16 != 0 {
+		sum = sum&0xffff + sum>>16
+	}
+	return uint16(sum)
+}

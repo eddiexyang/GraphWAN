@@ -512,7 +512,7 @@ func compactFrame(frame []byte, owners []*packetbuf.Buffer, i int) *packetbuf.Bu
 // for an owned buffer with the headroom; the channel seals the envelope, the
 // message's kind, the packet header or hop limit, and the readable headers.
 func sealedFrameOf(frame []byte, owners []*packetbuf.Buffer, i int, compact bool) *packetbuf.Buffer {
-	readable := packet.Readable(frame[packet.HeaderSize : len(frame)-packet.Trailer])
+	readable := packet.HeaderLen(frame[packet.HeaderSize : len(frame)-packet.Trailer])
 	var buffer *packetbuf.Buffer
 	if compact {
 		const prefix = 4 + 32

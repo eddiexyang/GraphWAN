@@ -535,12 +535,11 @@ func (p e2ePackets) Seal(network, destination model.ID, raw []byte) ([]byte, boo
 	}
 	var headers [packet.MaxReadable]byte
 	ad := packet.Authenticated(&headers, raw)
-	sealed, err := s.session.SealPacket(ad, raw[len(ad):])
+	sealed, err := s.session.SealPacket(ad, raw[len(ad):], s.id[:e2eTag])
 	if err != nil {
 		r.dropE2E(network, destination, s)
 		return nil, false, err
 	}
-	sealed = append(sealed, s.id[:e2eTag]...)
 	return raw[:len(ad)+len(sealed)], true, nil
 }
 
@@ -558,7 +557,8 @@ func (p e2ePackets) Open(network, source model.ID, payload []byte, sealed bool) 
 	if state == nil || state.keys[peer] == nil || e2eHandshake(raw) {
 		return nil, forwarding.ErrSealed
 	}
-	tag := [e2eTag]byte(payload[len(payload)-e2eTag:])
+	// The session's tag precedes the seal's own.
+	tag := [e2eTag]byte(payload[len(payload)-secure.TagSize-e2eTag:])
 	e := &r.e2e
 	e.mu.Lock()
 	var s *e2eSession
@@ -591,9 +591,11 @@ func (p e2ePackets) Open(network, source model.ID, payload []byte, sealed bool) 
 	}
 	var headers [packet.MaxReadable]byte
 	ad := packet.Authenticated(&headers, raw)
-	body, err := s.session.OpenPacket(ad, payload[len(ad):len(payload)-e2eTag])
+	body, err := s.session.OpenPacket(ad, payload[len(ad):], e2eTag)
 	if err != nil {
 		return nil, forwarding.ErrSealed
 	}
-	return payload[:len(ad)+len(body)], nil
+	opened := payload[:len(ad)+len(body)]
+	packet.RestoreChecksums(opened)
+	return opened, nil
 }
