@@ -156,12 +156,11 @@ func TestMuxChangedRecordResetsSession(t *testing.T) {
 	second[len(second)-1] ^= 1
 	s.Write(first)
 	s.Write(second)
-	buf := make([]byte, 64)
-	if n, err := egress.Read(buf); err != nil || string(buf[:n]) != "first" {
-		t.Fatal("first record", n, err)
-	}
-	if _, err := egress.Read(buf); err == nil {
-		t.Fatal("read a changed record")
+	// The reset may discard the record before the changed one, as a TCP
+	// reset discards what was not read.
+	got, err := io.ReadAll(egress)
+	if err == nil || string(got) != "first" && len(got) != 0 {
+		t.Fatalf("read %q, %v", got, err)
 	}
 	waitFor(t, "the reset at the ingress hop", s.Aborted)
 }

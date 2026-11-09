@@ -1103,6 +1103,13 @@ func (s *muxStream) CloseWrite() error {
 	return nil
 }
 
+// Buffered reports bytes that Read returns without waiting, or 0.
+func (s *muxStream) Buffered() int {
+	s.m.mu.Lock()
+	defer s.m.mu.Unlock()
+	return s.recvBytes
+}
+
 // ReadWindow reports bytes that Read can return without waiting.
 func (s *muxStream) ReadWindow() (int, error) {
 	m := s.m

@@ -813,7 +813,7 @@ func (e *End) ReadWindow() (int, error) {
 		if err := e.openRecord(); err != nil {
 			return 0, err
 		}
-		return len(e.records.plain), nil
+		return len(e.records.plain()), nil
 	}
 	for {
 		hop, skip, err := e.input()
@@ -845,8 +845,8 @@ func (e *End) Read(p []byte) (int, error) {
 		if err := e.openRecord(); err != nil {
 			return 0, err
 		}
-		n := copy(p, r.plain)
-		r.plain = r.plain[n:]
+		n := copy(p, r.plain())
+		r.consume(n)
 		return n, nil
 	}
 	for {
@@ -864,12 +864,13 @@ func (e *End) Read(p []byte) (int, error) {
 	}
 }
 
-// openRecord reads the chains until a record is open with bytes to read. A
-// record that fails to open, or that the direction ends within, resets the
-// connection.
+// openRecord reads the chains until a record is open with bytes to read,
+// then opens what the current chain has of the records after it without
+// waiting. A record that fails to open, or that the direction ends within,
+// resets the connection.
 func (e *End) openRecord() error {
 	r := e.records
-	for len(r.plain) == 0 {
+	for len(r.plain()) == 0 {
 		hop, skip, err := e.input()
 		if err == nil && skip > 0 && e.discard(hop, skip) != nil {
 			continue
@@ -878,21 +879,46 @@ func (e *End) openRecord() error {
 			_, err = r.fill(func(p []byte) (int, error) {
 				n, err := hop.Read(p)
 				return n, e.received(hop, n, err)
-			})
+			}, -1)
 		}
-		if err == io.EOF && r.partial() {
-			err = errRecord
-		}
-		if errors.Is(err, errRecord) {
-			e.mu.Lock()
-			e.finishLocked(errRecord)
-			e.mu.Unlock()
-		}
-		if err != nil {
+		if err = e.recordError(err); err != nil {
 			return err
 		}
 	}
+	e.mu.Lock()
+	hop := e.hop
+	current := hop != nil && !e.done && e.read <= e.in+e.inRead
+	e.mu.Unlock()
+	buffered, ok := hop.(interface{ Buffered() int })
+	if !current || !ok {
+		return nil
+	}
+	if budget := buffered.Buffered(); budget > 0 {
+		_, err := r.fill(func(p []byte) (int, error) {
+			n, err := hop.Read(p)
+			return n, e.received(hop, n, err)
+		}, budget)
+		if errors.Is(err, errRecord) {
+			// What opened before the record is not read: the connection is
+			// reset as it would be at that record.
+			return e.recordError(err)
+		}
+	}
 	return nil
+}
+
+// recordError resets the connection for a record that failed to open or
+// that the direction ended within.
+func (e *End) recordError(err error) error {
+	if err == io.EOF && e.records.partial() {
+		err = errRecord
+	}
+	if errors.Is(err, errRecord) {
+		e.mu.Lock()
+		e.finishLocked(errRecord)
+		e.mu.Unlock()
+	}
+	return err
 }
 
 // discard reads bytes of a newer chain that this end already delivered.

@@ -2,6 +2,7 @@ package streamproxy
 
 import (
 	"bytes"
+	"errors"
 	"crypto/ed25519"
 	"crypto/rand"
 	"testing"
@@ -79,13 +80,17 @@ func TestRecordsOpenInOrderOnly(t *testing.T) {
 			return n, nil
 		}
 		for len(stream) > 0 {
-			ok, err := r.fill(read)
+			before := r.opened
+			ok, err := r.fill(read, -1)
 			if err != nil {
 				return out, err
 			}
+			if ok && r.opened != before+1 {
+				return out, errors.New("a blocking fill opened more than one record")
+			}
 			if ok {
-				out = append(out, bytes.Clone(r.plain))
-				r.plain = nil
+				out = append(out, bytes.Clone(r.plain()))
+				r.consume(len(r.plain()))
 			}
 		}
 		if r.partial() {
@@ -116,7 +121,55 @@ func TestRecordsOpenInOrderOnly(t *testing.T) {
 	// Another channel of the session does not open them.
 	rest := bytes.Clone(records[0])
 	read := func(p []byte) (int, error) { n := copy(p, rest); rest = rest[n:]; return n, nil }
-	if _, err := NewRecords(bs, 6).fill(read); err != errRecord {
+	if _, err := NewRecords(bs, 6).fill(read, -1); err != errRecord {
 		t.Fatal("another channel opened a record", err)
+	}
+}
+
+// Records already received open after one another into one window, without
+// a read past what is there.
+func TestRecordsOpenIntoOneWindow(t *testing.T) {
+	as, bs := e2eSessions(t)
+	sender, receiver := NewRecords(as, 1), NewRecords(bs, 1)
+	var stream, want []byte
+	for i := range 2 * window / 5000 {
+		m := bytes.Repeat([]byte{byte(i)}, 5000)
+		want = append(want, m...)
+		stream = append(stream, sealRecord(t, sender, m)...)
+	}
+	read := func(p []byte) (int, error) {
+		if len(stream) == 0 {
+			t.Fatal("read past the records received")
+		}
+		n := copy(p, stream)
+		stream = stream[n:]
+		return n, nil
+	}
+	if _, err := receiver.fill(read, -1); err != nil || len(receiver.plain()) != 5000 {
+		t.Fatal("first record", err)
+	}
+	if _, err := receiver.fill(read, len(stream)); err != nil {
+		t.Fatal(err)
+	}
+	got := bytes.Clone(receiver.plain())
+	if len(got) < window || len(got) > window+5000 || !bytes.Equal(got, want[:len(got)]) {
+		t.Fatalf("window holds %d bytes", len(got))
+	}
+	// Reading part of the window leaves room for more records.
+	receiver.consume(len(got) / 2)
+	if _, err := receiver.fill(read, len(stream)); err != nil {
+		t.Fatal(err)
+	}
+	got = append(got[:len(got)/2], receiver.plain()...)
+	receiver.consume(len(receiver.plain()))
+	for len(stream) > 0 {
+		if _, err := receiver.fill(read, len(stream)); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, receiver.plain()...)
+		receiver.consume(len(receiver.plain()))
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("records changed")
 	}
 }
