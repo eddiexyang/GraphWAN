@@ -373,7 +373,7 @@ func TestMuxSparseBatchStorage(t *testing.T) {
 	p := newMuxPair(t)
 	s := p.a.newStreamLocked(2)
 	for _, size := range []int{1, 31, muxMaxData - 1, muxMaxData, muxMaxData + 7, 64 << 10, muxBurst * muxMaxData} {
-		b := newFrameBuilder(s.id, s.sendNext, muxBurst*muxMaxData)
+		b := newFrameBuilder(s.id, s.sendNext, muxBurst*muxMaxData, nil)
 		payload := bytes.Repeat([]byte("x"), size)
 		b.Write(payload)
 		if err := s.publish(b); err != nil {
@@ -467,7 +467,7 @@ func BenchmarkMuxBatchPublish(b *testing.B) {
 			b.ReportAllocs()
 			b.SetBytes(int64(size))
 			for b.Loop() {
-				batch := newFrameBuilder(s.id, s.sendNext, muxBurst*muxMaxData)
+				batch := newFrameBuilder(s.id, s.sendNext, muxBurst*muxMaxData, nil)
 				batch.Write(payload)
 				if err := s.publish(batch); err != nil {
 					b.Fatal(err)
@@ -577,7 +577,7 @@ func TestMuxFrameHeaderInReusedStorage(t *testing.T) {
 		}
 		b.Release()
 	}
-	builder := newFrameBuilder(7, 100, 3)
+	builder := newFrameBuilder(7, 100, 3, nil)
 	builder.Write([]byte("abc"))
 	frame := builder.finish()[0]
 	want := make([]byte, muxDataHeader)

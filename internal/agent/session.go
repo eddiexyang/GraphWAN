@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -156,6 +157,51 @@ func (r *DataPlane) startSession(ctx context.Context, request streamproxy.Reques
 	if err != nil || local || !state.mesh.ResumeAvailable(request.Network, next) {
 		return nil, nil
 	}
+	// An egress that lost its end-to-end sessions, as by a restart, refuses
+	// the first chain; the connection waits for a new session once.
+	var entry *ingressSession
+	var key sessionKey
+	var end *streamproxy.End
+	for attempt := 0; ; attempt++ {
+		entry, key, end, err = r.startIngress(ctx, request)
+		if !errors.Is(err, streamproxy.ErrNoKey) || attempt > 0 {
+			break
+		}
+	}
+	if errors.Is(err, streamproxy.ErrLegacy) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	entry.end = end
+	r.sessions.mu.Lock()
+	r.sessions.ingress[key] = entry
+	r.sessions.mu.Unlock()
+	go func() {
+		<-end.Done()
+		r.sessions.mu.Lock()
+		delete(r.sessions.ingress, key)
+		r.sessions.mu.Unlock()
+	}()
+	return end, nil
+}
+
+// startIngress opens a session's first chain, sealed end to end when the
+// egress has an Agent key.
+func (r *DataPlane) startIngress(ctx context.Context, request streamproxy.Request) (*ingressSession, sessionKey, *streamproxy.End, error) {
+	sealed, channel, ok, err := r.e2eChannel(ctx, request.Network, request.Destination)
+	if err != nil {
+		return nil, sessionKey{}, nil, fmt.Errorf("%w: end-to-end session: %w", streamproxy.ErrNoRoute, err)
+	}
+	var records *streamproxy.Records
+	if ok {
+		request.E2E, request.Channel = sealed.id, channel
+		if state := r.state.Load(); state != nil {
+			request.Sealer = state.selfID(request.Network)
+		}
+		records = streamproxy.NewRecords(sealed.session, channel)
+	}
 	request.Conn = streamproxy.NewSessionID()
 	key := sessionKey{request.Network, request.Source, request.Conn}
 	entry := &ingressSession{request: request}
@@ -178,24 +224,11 @@ func (r *DataPlane) startSession(ctx context.Context, request streamproxy.Reques
 			r.sessions.mu.Unlock()
 		}
 		return hop, at, err
-	}, &r.sessions.counters)
-	if errors.Is(err, streamproxy.ErrLegacy) {
-		return nil, nil
+	}, &r.sessions.counters, records)
+	if errors.Is(err, streamproxy.ErrNoKey) && ok {
+		r.dropE2E(request.Network, request.Destination, sealed)
 	}
-	if err != nil {
-		return nil, err
-	}
-	entry.end = end
-	r.sessions.mu.Lock()
-	r.sessions.ingress[key] = entry
-	r.sessions.mu.Unlock()
-	go func() {
-		<-end.Done()
-		r.sessions.mu.Lock()
-		delete(r.sessions.ingress, key)
-		r.sessions.mu.Unlock()
-	}()
-	return end, nil
+	return entry, key, end, err
 }
 
 // openChain opens the next hop of a chain along the current routes and waits
@@ -289,6 +322,8 @@ func chainStatus(err error) byte {
 		return streamproxy.StatusLegacy
 	case errors.Is(err, streamproxy.ErrUnknownSession):
 		return streamproxy.StatusUnknown
+	case errors.Is(err, streamproxy.ErrNoKey):
+		return streamproxy.StatusNoKey
 	default:
 		return streamproxy.StatusRefused
 	}
@@ -398,8 +433,15 @@ func (r *DataPlane) acceptEgress(parent, ctx context.Context, network, remote mo
 		return
 	}
 	defer r.endEgress(key, entry)
+	records, ok := r.egressRecords(network, request)
+	if !ok {
+		close(entry.ready)
+		refuse(ctx, hop, streamproxy.StatusNoKey)
+		return
+	}
 	plain := request
 	plain.Conn, plain.Gen, plain.Down, plain.Up = streamproxy.SessionID{}, 0, 0, 0
+	plain.Sealer, plain.E2E, plain.Channel = "", streamproxy.E2EID{}, 0
 	conn, err := r.openTCP(ctx, plain, remote)
 	if err != nil {
 		close(entry.ready)
@@ -411,10 +453,38 @@ func (r *DataPlane) acceptEgress(parent, ctx context.Context, network, remote mo
 		conn.Close()
 		return
 	}
-	entry.end = streamproxy.NewEgress(r.ctx, hop, func(gen uint32) { r.askReplay(key, gen) }, &r.sessions.counters)
+	entry.end = streamproxy.NewEgress(r.ctx, hop, func(gen uint32) { r.askReplay(key, gen) }, &r.sessions.counters, records)
 	close(entry.ready)
 	streamproxy.Relay(parent, entry.end, conn)
 	<-entry.end.Done()
+}
+
+// egressRecords returns what opens a new session's records: the ingress's
+// end-to-end session it names. A session to this Node must name one, so no
+// relay can have the egress send its bytes unsealed; one to a WireGuard leaf
+// this Agent attaches, which has no Agent key, is sealed per hop only. The
+// sealer is the Source, or for a WireGuard leaf the Agent it attaches, which
+// the session authenticates but this Agent cannot tell from another: the
+// leaf's address is as much the hops' word as it is without sealing.
+func (r *DataPlane) egressRecords(network model.ID, request streamproxy.Request) (*streamproxy.Records, bool) {
+	state := r.state.Load()
+	if state == nil {
+		return nil, false
+	}
+	if request.Destination != state.selfID(network) {
+		return nil, request.E2E == (e2eID{})
+	}
+	if request.E2E == (e2eID{}) {
+		return nil, false
+	}
+	if _, keyed := e2eKeys(state)[e2ePeer{network, request.Source}]; keyed && request.Sealer != request.Source {
+		return nil, false
+	}
+	s := r.e2eAccepted(network, request.Sealer, request.E2E)
+	if s == nil {
+		return nil, false
+	}
+	return streamproxy.NewRecords(s.session, request.Channel), true
 }
 
 func (r *DataPlane) endEgress(key sessionKey, entry *egressSession) {
@@ -424,6 +494,16 @@ func (r *DataPlane) endEgress(key sessionKey, entry *egressSession) {
 		delete(r.sessions.egress, key)
 	}
 	r.sessions.ended[key] = time.Now()
+}
+
+// selfID returns this Agent's Node in a network.
+func (s *runtimeState) selfID(network model.ID) model.ID {
+	for _, n := range s.snapshot.Networks {
+		if n.ID == network {
+			return n.Self.ID
+		}
+	}
+	return ""
 }
 
 // overlayAddress returns a node's address in a network.

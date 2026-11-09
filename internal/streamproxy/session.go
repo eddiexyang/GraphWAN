@@ -52,10 +52,13 @@ const (
 	// StatusNoRoute: a hop has no route or no Link toward the destination
 	// for now, as while routes converge. An older hop answers StatusRefused.
 	StatusNoRoute = 5
+	// StatusNoKey: the egress has no such end-to-end session, or requires one.
+	StatusNoKey = 6
 )
 
 var ErrLegacy = errors.New("a hop does not support resumable TCP")
 var ErrUnknownSession = errors.New("egress has no such TCP session")
+var ErrNoKey = errors.New("egress has no such end-to-end session")
 
 // ErrNoRoute is a connection that has no path for now. As for a packet with
 // no route, its SYN is dropped rather than answered, so the client retries.
@@ -94,6 +97,8 @@ func ResponseError(status byte) error {
 		return ErrUnknownSession
 	case StatusNoRoute:
 		return ErrNoRoute
+	case StatusNoKey:
+		return ErrNoKey
 	default:
 		return errors.New("TCP stream target refused")
 	}
@@ -344,6 +349,7 @@ type End struct {
 	askReplay func(gen uint32) // egress
 	counters  *Counters
 	keep      *Keep
+	records   *Records // nil when the session's bytes are not sealed
 
 	mu       sync.Mutex
 	cond     *sync.Cond
@@ -367,9 +373,9 @@ type End struct {
 	err      error
 }
 
-func newEnd(parent context.Context, counters *Counters) *End {
+func newEnd(parent context.Context, counters *Counters, records *Records) *End {
 	ctx, cancel := context.WithCancel(parent)
-	e := &End{ctx: ctx, cancel: cancel, keep: NewKeep(), counters: counters}
+	e := &End{ctx: ctx, cancel: cancel, keep: NewKeep(), counters: counters, records: records}
 	if counters != nil {
 		e.keep.budget = &counters.retained
 	}
@@ -379,13 +385,14 @@ func newEnd(parent context.Context, counters *Counters) *End {
 }
 
 // StartIngress opens the first chain before the access connection is
-// accepted, as a connected stream would be.
-func StartIngress(ctx context.Context, open OpenChain, counters *Counters) (*End, error) {
+// accepted, as a connected stream would be. records, if not nil, seals the
+// session end to end.
+func StartIngress(ctx context.Context, open OpenChain, counters *Counters, records *Records) (*End, error) {
 	hop, _, err := open(ctx, 0, 0, 0)
 	if err != nil {
 		return nil, err
 	}
-	e := newEnd(context.Background(), counters)
+	e := newEnd(context.Background(), counters, records)
 	e.open = open
 	hop.Begin(0)
 	e.mu.Lock()
@@ -395,8 +402,8 @@ func StartIngress(ctx context.Context, open OpenChain, counters *Counters) (*End
 }
 
 // NewEgress serves a session's first chain, answered already.
-func NewEgress(parent context.Context, hop Hop, askReplay func(gen uint32), counters *Counters) *End {
-	e := newEnd(parent, counters)
+func NewEgress(parent context.Context, hop Hop, askReplay func(gen uint32), counters *Counters, records *Records) *End {
+	e := newEnd(parent, counters, records)
 	e.askReplay = askReplay
 	hop.Begin(0)
 	e.mu.Lock()
@@ -703,7 +710,7 @@ func (e *End) finishLocked(err error) {
 // ReadFrom sends the local connection's bytes on the current chain. A chain
 // that fails leaves what it read but did not send for the next one.
 func (e *End) ReadFrom(src io.Reader) (int64, error) {
-	local := &localSource{conn: src}
+	local := &localSource{conn: src, records: e.records}
 	var total int64
 	for {
 		hop := e.current()
@@ -784,6 +791,12 @@ func (e *End) input() (Hop, uint64, error) {
 
 // ReadWindow reports bytes Read can return without waiting.
 func (e *End) ReadWindow() (int, error) {
+	if e.records != nil {
+		if err := e.openRecord(); err != nil {
+			return 0, err
+		}
+		return len(e.records.plain), nil
+	}
 	for {
 		hop, skip, err := e.input()
 		if err != nil {
@@ -810,6 +823,14 @@ func (e *End) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	if r := e.records; r != nil {
+		if err := e.openRecord(); err != nil {
+			return 0, err
+		}
+		n := copy(p, r.plain)
+		r.plain = r.plain[n:]
+		return n, nil
+	}
 	for {
 		hop, skip, err := e.input()
 		if err != nil {
@@ -823,6 +844,37 @@ func (e *End) Read(p []byte) (int, error) {
 			return n, err
 		}
 	}
+}
+
+// openRecord reads the chains until a record is open with bytes to read. A
+// record that fails to open, or that the direction ends within, resets the
+// connection.
+func (e *End) openRecord() error {
+	r := e.records
+	for len(r.plain) == 0 {
+		hop, skip, err := e.input()
+		if err == nil && skip > 0 && e.discard(hop, skip) != nil {
+			continue
+		}
+		if err == nil {
+			_, err = r.fill(func(p []byte) (int, error) {
+				n, err := hop.Read(p)
+				return n, e.received(hop, n, err)
+			})
+		}
+		if err == io.EOF && r.partial() {
+			err = errRecord
+		}
+		if errors.Is(err, errRecord) {
+			e.mu.Lock()
+			e.finishLocked(errRecord)
+			e.mu.Unlock()
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // discard reads bytes of a newer chain that this end already delivered.
@@ -907,9 +959,13 @@ var errAborted = errors.New("TCP connection reset by peer")
 // localSource reads the local connection for a hop's ReadFrom, keeping its
 // error apart from the hop's.
 type localSource struct {
-	conn io.Reader
-	err  error
+	conn    io.Reader
+	err     error
+	records *Records
 }
+
+// Records returns what seals the bytes read, or nil.
+func (l *localSource) Records() *Records { return l.records }
 
 func (l *localSource) Read(p []byte) (int, error) {
 	n, err := l.conn.Read(p)
@@ -923,7 +979,7 @@ func (l *localSource) Read(p []byte) (int, error) {
 func (l *localSource) ReadInto(dst io.Writer) (int, error) {
 	reader, ok := l.conn.(interface{ ReadInto(io.Writer) (int, error) })
 	if !ok {
-		buf := make([]byte, 64<<10)
+		buf := make([]byte, RoomOf(dst, 64<<10))
 		n, err := l.Read(buf)
 		if n > 0 {
 			dst.Write(buf[:n])
@@ -935,6 +991,15 @@ func (l *localSource) ReadInto(dst io.Writer) (int, error) {
 		l.err = err
 	}
 	return n, err
+}
+
+// RoomOf bounds a read for a ReadInto destination, which may take fewer bytes
+// than offered: a stream's frames take only what their credit allows.
+func RoomOf(dst io.Writer, limit int) int {
+	if room, ok := dst.(interface{ Room() int }); ok {
+		return max(1, min(limit, room.Room()))
+	}
+	return limit
 }
 
 type onceReader struct{ p []byte }

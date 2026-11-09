@@ -409,7 +409,7 @@ func (c *flowConn) ReadInto(dst io.Writer) (int, error) {
 	if conn, ok := c.Conn.(interface{ ReadInto(io.Writer) (int, error) }); ok {
 		return conn.ReadInto(dst)
 	}
-	buf := make([]byte, 64<<10)
+	buf := make([]byte, streamproxy.RoomOf(dst, 64<<10))
 	n, err := c.Conn.Read(buf)
 	if n > 0 {
 		dst.Write(buf[:n])

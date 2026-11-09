@@ -66,6 +66,7 @@ type DataPlane struct {
 	linkState     *linkstate.Engine
 	damper        *edgeDamper
 	sessions      sessions
+	e2e           e2eSessions
 }
 
 func NewDataPlane(parent context.Context, identity ed25519.PrivateKey, options DataPlaneOptions) (*DataPlane, error) {
@@ -85,7 +86,9 @@ func NewDataPlane(parent context.Context, identity ed25519.PrivateKey, options D
 	runtime := &DataPlane{identity: append(ed25519.PrivateKey{}, identity...), options: options, ctx: ctx, cancel: cancel, discoveryWake: make(chan struct{}, 1), repairWake: make(chan struct{}, 1)}
 	runtime.linkState = runtime.newLinkState()
 	runtime.sessions.init()
-	runtime.wg.Add(3)
+	runtime.e2e.init()
+	runtime.wg.Add(4)
+	go runtime.e2eLoop()
 	go runtime.rerouteLoop()
 	go runtime.repairLoop()
 	go func() { defer runtime.wg.Done(); runtime.linkState.Run(ctx) }()
@@ -251,6 +254,7 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 		return err
 	}
 	r.state.Store(next)
+	r.wakeE2E()
 	if linkstate.Active(snapshot) {
 		// Install link-state routes with the configuration, so forwarding never
 		// uses the controller's routes for a revision, even briefly.
@@ -421,7 +425,7 @@ func (r *DataPlane) deliver(ctx context.Context, network model.ID, raw []byte) e
 	if state == nil {
 		return errors.New("agent runtime is not configured")
 	}
-	if r.replayRequest(state, network, raw) {
+	if r.replayRequest(state, network, raw) || r.e2eRequest(state, network, raw) {
 		return nil
 	}
 	device := state.devices[network]
@@ -545,10 +549,11 @@ func (r *DataPlane) deliverBatch(ctx context.Context, network model.ID, packets 
 	if state == nil {
 		return errors.New("agent runtime is not configured")
 	}
-	// Replay requests of this Agent's TCP sessions never reach the TUN.
+	// Replay requests and end-to-end handshakes of this Agent's TCP sessions
+	// never reach the TUN.
 	var kept [][]byte
 	for i, raw := range packets {
-		if r.replayRequest(state, network, raw) {
+		if r.replayRequest(state, network, raw) || r.e2eRequest(state, network, raw) {
 			if kept == nil {
 				kept = append(make([][]byte, 0, len(packets)), packets[:i]...)
 			}

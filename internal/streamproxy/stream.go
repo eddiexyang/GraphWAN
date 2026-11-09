@@ -3,6 +3,7 @@ package streamproxy
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -37,6 +38,28 @@ type Request struct {
 	// ingress resends only past it. A relay that predates it drops it, and the
 	// egress then answers StatusOK.
 	At bool `json:"at,omitempty"`
+	// A session sealed end to end names the ingress's Node, Source unless
+	// that is a WireGuard leaf, its end-to-end session toward the egress, and
+	// the channel of it that its records use.
+	Sealer  model.ID `json:"sealer,omitempty"`
+	E2E     E2EID    `json:"e2e,omitzero"`
+	Channel uint32   `json:"channel,omitempty"`
+}
+
+// E2EID names an end-to-end session between two Nodes.
+type E2EID [8]byte
+
+func (id E2EID) MarshalText() ([]byte, error) {
+	return []byte(base64.RawURLEncoding.EncodeToString(id[:])), nil
+}
+
+func (id *E2EID) UnmarshalText(text []byte) error {
+	raw, err := base64.RawURLEncoding.DecodeString(string(text))
+	if err != nil || len(raw) != len(id) {
+		return errors.New("invalid end-to-end session ID")
+	}
+	copy(id[:], raw)
+	return nil
 }
 
 // Resumable reports whether the request opens a chain of a session.
@@ -53,6 +76,9 @@ func (r Request) Validate() error {
 		r.From.Addr().Is4In6() || r.To.Addr().Is4In6() || r.From.Addr().Zone() != "" || r.To.Addr().Zone() != "" ||
 		r.From.Addr().BitLen() != r.To.Addr().BitLen() {
 		return errors.New("invalid TCP stream destination or hop limit")
+	}
+	if r.E2E != (E2EID{}) && (r.Channel == 0 || !r.Resumable() || r.Sealer.Validate() != nil) || r.E2E == (E2EID{}) && (r.Channel != 0 || r.Sealer != "") {
+		return errors.New("invalid end-to-end TCP session")
 	}
 	return nil
 }
