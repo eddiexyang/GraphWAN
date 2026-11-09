@@ -1169,6 +1169,27 @@ func (s *muxStream) consume(n int) {
 	}
 }
 
+// TakeChunk returns the next bytes received in one frame, without copying
+// them, and the Link buffer holding them, which passes to the caller, or nil.
+func (s *muxStream) TakeChunk() ([]byte, *packetbuf.Buffer, error) {
+	if _, err := s.ReadWindow(); err != nil {
+		return nil, nil, err
+	}
+	m := s.m
+	m.mu.Lock()
+	if len(s.recv) == 0 {
+		m.mu.Unlock()
+		return nil, nil, nil
+	}
+	c := s.recv[0]
+	s.recv[0] = recvChunk{}
+	s.recv = s.recv[1:]
+	s.recvBytes -= len(c.data)
+	m.mu.Unlock()
+	s.consume(len(c.data))
+	return c.data, c.owner, nil
+}
+
 // RelayTo sends what s receives on to, as a TCP session's relay does. A
 // received frame leaves in the Link buffer it arrived in: to's header is
 // written over the bytes before its payload, which held its own header. Bytes

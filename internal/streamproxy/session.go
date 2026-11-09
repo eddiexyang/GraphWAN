@@ -743,7 +743,7 @@ func (e *End) ReadWindow() (int, error) {
 		if err := e.openRecord(); err != nil {
 			return 0, err
 		}
-		return len(e.records.plain()), nil
+		return e.records.available(), nil
 	}
 	for {
 		hop, skip, err := e.input()
@@ -775,9 +775,7 @@ func (e *End) Read(p []byte) (int, error) {
 		if err := e.openRecord(); err != nil {
 			return 0, err
 		}
-		n := copy(p, r.plain())
-		r.consume(n)
-		return n, nil
+		return r.read(p), nil
 	}
 	for {
 		hop, skip, err := e.input()
@@ -800,16 +798,13 @@ func (e *End) Read(p []byte) (int, error) {
 // resets the connection.
 func (e *End) openRecord() error {
 	r := e.records
-	for len(r.plain()) == 0 {
+	for r.available() == 0 {
 		hop, skip, err := e.input()
 		if err == nil && skip > 0 && e.discard(hop, skip) != nil {
 			continue
 		}
 		if err == nil {
-			_, err = r.fill(func(p []byte) (int, error) {
-				n, err := hop.Read(p)
-				return n, e.received(hop, n, err)
-			}, -1)
+			err = e.openFrom(hop, true)
 		}
 		if err = e.recordError(err); err != nil {
 			return err
@@ -819,22 +814,72 @@ func (e *End) openRecord() error {
 	hop := e.hop
 	current := hop != nil && !e.done && e.read <= e.in+e.inRead
 	e.mu.Unlock()
-	buffered, ok := hop.(interface{ Buffered() int })
-	if !current || !ok {
+	if !current {
 		return nil
 	}
-	if budget := buffered.Buffered(); budget > 0 {
-		_, err := r.fill(func(p []byte) (int, error) {
-			n, err := hop.Read(p)
-			return n, e.received(hop, n, err)
-		}, budget)
-		if errors.Is(err, errRecord) {
-			// What opened before the record is not read: the connection is
-			// reset as it would be at that record.
-			return e.recordError(err)
-		}
+	if err := e.openFrom(hop, false); errors.Is(err, errRecord) {
+		// What opened before the record is not read: the connection is
+		// reset as it would be at that record.
+		return e.recordError(err)
 	}
 	return nil
+}
+
+// openFrom opens records hop received: until one opened when wait, and what
+// hop has without waiting otherwise. A record that arrived whole in one of
+// hop's buffers opens there; other bytes are read into the window. A failed
+// chain returns nil, so the caller reads the next one.
+func (e *End) openFrom(hop Hop, wait bool) error {
+	r := e.records
+	taker, takes := hop.(interface {
+		TakeChunk() ([]byte, *packetbuf.Buffer, error)
+	})
+	buffered, hasBuffered := hop.(interface{ Buffered() int })
+	read := func(p []byte) (int, error) {
+		if r.pending != nil {
+			return r.readPending(p), nil
+		}
+		n, err := hop.Read(p)
+		return n, e.received(hop, n, err)
+	}
+	for {
+		budget := -1
+		if !wait {
+			// What is opened is bounded as the window bounds it: the rest
+			// stays with the hop, whose window holds the sender back.
+			if !hasBuffered || r.available() >= window {
+				return nil
+			}
+			if budget = buffered.Buffered(); budget == 0 && r.pending == nil {
+				return nil
+			}
+		}
+		if takes && r.pending == nil && !r.partial() && len(r.plain()) == 0 {
+			data, owner, err := taker.TakeChunk()
+			if failed := e.received(hop, len(data), err); failed != nil || err != nil {
+				owner.Release()
+				return failed
+			}
+			opened, err := r.whole(data, owner)
+			if err != nil {
+				return err
+			}
+			if opened {
+				wait = false
+			}
+			continue
+		}
+		if budget >= 0 {
+			budget += len(r.pending)
+		}
+		opened, err := r.fill(read, budget)
+		if err != nil || !wait {
+			return err
+		}
+		if opened {
+			wait = false
+		}
+	}
 }
 
 // recordError resets the connection for a record that failed to open or
