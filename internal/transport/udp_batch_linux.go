@@ -20,6 +20,14 @@ const maxUDPSuperPacket = 65507 // Also safe for an IPv4 path.
 // Bound work per kernel aggregate separately from the larger userspace batch.
 const maxUDPGSOSegments = 32
 
+// udpSendBuffer bounds what the socket holds in the host's queues, which the
+// kernel doubles: about 77 full-size datagrams, fewer than the 100 packets of
+// one flow that fq, the common default qdisc, keeps before it drops them. A
+// host that sends slower than the Agent then makes the Agent wait, so its own
+// queue drops data and its heartbeats go first, rather than the qdisc
+// dropping both alike.
+const udpSendBuffer = 96 << 10
+
 type udpBatchWriter interface {
 	WriteBatch([]ipv6.Message, int) (int, error)
 }
@@ -30,6 +38,7 @@ type udpBatchSocket struct {
 
 func newUDPBatchSocket(socket *net.UDPConn) *udpBatchSocket {
 	_ = setUDPReadBuffer(socket, 4<<20)
+	_ = socket.SetWriteBuffer(udpSendBuffer)
 	b := &udpBatchSocket{conn: ipv6.NewPacketConn(socket)}
 	if raw, err := socket.SyscallConn(); err == nil {
 		_ = raw.Control(func(fd uintptr) {
