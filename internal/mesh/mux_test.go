@@ -770,3 +770,66 @@ func TestMuxLaterStreamIsNotQueuedBehindABacklog(t *testing.T) {
 		t.Errorf("the first stream queued %d bytes, want about %d", first.queued, muxQueue)
 	}
 }
+
+// An Edge carries as many streams at once as there are connections; nothing
+// bounds their number.
+func TestMuxCarriesManyStreams(t *testing.T) {
+	p := newMuxPair(t)
+	p.connect(t, true)
+	waitFor(t, "streams", p.a.Available)
+	const count = 5000
+	streams := make([]*muxStream, count)
+	for i := range streams {
+		s, err := p.a.Open(p.ctx)
+		if err != nil {
+			t.Fatalf("stream %d: %v", i, err)
+		}
+		streams[i] = s
+	}
+	go func() {
+		for range count {
+			var s *muxStream
+			select {
+			case s = <-p.accepted:
+			case <-p.ctx.Done():
+				return
+			}
+			go func() {
+				defer s.Close()
+				raw, err := io.ReadAll(s)
+				if err == nil {
+					s.Write(raw)
+					s.CloseWrite()
+				}
+			}()
+		}
+	}()
+	errs := make(chan error, count)
+	for i, s := range streams {
+		go func() {
+			defer s.Close()
+			payload := []byte(fmt.Sprintf("stream %d", i))
+			if _, err := s.Write(payload); err != nil {
+				errs <- err
+				return
+			}
+			s.CloseWrite()
+			echo, err := io.ReadAll(s)
+			if err == nil && !bytes.Equal(echo, payload) {
+				err = errors.New("echo changed")
+			}
+			errs <- err
+		}()
+	}
+	for range count {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitFor(t, "graceful stream cleanup", func() bool {
+		p.a.mu.Lock()
+		defer p.a.mu.Unlock()
+		return len(p.a.streams) == 0
+	})
+}
+

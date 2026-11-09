@@ -46,7 +46,6 @@ const (
 	// The receive window covers one stream at 3 Gbit/s over 80 ms.
 	muxWindow       = 32 << 20
 	muxAckThreshold = 256 << 10
-	muxMaxStreams   = 4096
 	// Frames handed to one Link writer per stream before others get a turn.
 	muxBurst = 16
 	// Streams wait this long for an Edge to regain a stream-capable Link.
@@ -179,9 +178,6 @@ func (m *mux) Open(ctx context.Context) (*muxStream, error) {
 	defer m.mu.Unlock()
 	if m.closed || m.current == nil {
 		return nil, link.ErrUnavailable
-	}
-	if len(m.streams) >= muxMaxStreams {
-		return nil, errors.New("edge stream limit reached")
 	}
 	if m.next == 0 {
 		return nil, errors.New("edge stream IDs exhausted")
@@ -507,7 +503,7 @@ func (m *mux) receiveData(id, offset uint64, flags byte, data []byte, owner *pac
 			return true
 		}
 		_, ended := m.ended[id]
-		if !m.peerStream(id) || ended || offset != 0 || len(m.streams) >= muxMaxStreams {
+		if !m.peerStream(id) || ended || offset != 0 {
 			// A stream that already ended, or one this Edge cannot take.
 			m.resetLocked(id)
 			m.endedLocked(id)
