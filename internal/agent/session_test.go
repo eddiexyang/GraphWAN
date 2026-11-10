@@ -352,6 +352,9 @@ func TestTCPSessionResetsOnPacketPath(t *testing.T) {
 		}
 		s.Networks[0].Edges[2].Transports = []model.Transport{model.UDP} // A-D
 	})
+	// Link-state routes settle after the Links come up; until then A may
+	// reach C through D.
+	waitFor(t, 10*time.Second, "A to reach C through B", func() bool { return nextHopToC(agents[0], state) == state.Networks[0].Nodes[1].ID })
 	address := state.Networks[0].Nodes[2].Address
 	listener, err := gonet.ListenTCP(devices[2].stack, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(address.As4()), Port: 8092}, ipv4.ProtocolNumber)
 	if err != nil {
