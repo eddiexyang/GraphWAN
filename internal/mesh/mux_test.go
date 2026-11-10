@@ -371,7 +371,7 @@ func (r *sparseMuxReader) ReadInto(w io.Writer) (int, error) {
 // window allowed.
 func TestMuxSparseBatchStorage(t *testing.T) {
 	p := newMuxPair(t)
-	s := p.a.newStreamLocked(2)
+	s := p.a.newStreamLocked(2, false)
 	for _, size := range []int{1, 31, muxMaxData - 1, muxMaxData, muxMaxData + 7, 64 << 10, muxBurst * muxMaxData} {
 		b := newFrameBuilder(s.id, s.sendNext, muxBurst*muxMaxData, nil)
 		payload := bytes.Repeat([]byte("x"), size)
@@ -398,7 +398,7 @@ func TestMuxSparseBatchStorage(t *testing.T) {
 
 func TestMuxSparseACKAndCredit(t *testing.T) {
 	p := newMuxPair(t)
-	s := p.a.newStreamLocked(2)
+	s := p.a.newStreamLocked(2, false)
 	const reads = 72
 	payload := bytes.Repeat([]byte("x"), 31)
 	transfer := func(from, to *mux) int {
@@ -462,7 +462,7 @@ func BenchmarkMuxBatchPublish(b *testing.B) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			m := newMux(&group{ctx: ctx}, true, nil)
-			s := m.newStreamLocked(2)
+			s := m.newStreamLocked(2, false)
 			payload := bytes.Repeat([]byte("x"), size)
 			b.ReportAllocs()
 			b.SetBytes(int64(size))
@@ -537,7 +537,7 @@ func TestMuxStreamIDExhaustion(t *testing.T) {
 // keep and the sending Link have all let it go, in any order.
 func TestMuxFrameBufferOwners(t *testing.T) {
 	p := newMuxPair(t)
-	s := p.a.newStreamLocked(2)
+	s := p.a.newStreamLocked(2, false)
 	s.Begin(0)
 	keep := streamproxy.NewKeep()
 	s.SetRetention(keep)
@@ -592,7 +592,7 @@ func TestMuxFrameHeaderInReusedStorage(t *testing.T) {
 // Received bytes stay in the Link's buffer, which returns once they are read.
 func TestMuxReceiveKeepsLinkBuffer(t *testing.T) {
 	p := newMuxPair(t)
-	s := p.a.newStreamLocked(2)
+	s := p.a.newStreamLocked(2, false)
 	if _, err := s.Write([]byte("hello")); err != nil {
 		t.Fatal(err)
 	}
@@ -623,7 +623,7 @@ func TestMuxReceiveKeepsLinkBuffer(t *testing.T) {
 // once no Link still sends their earlier frame, and arrive unchanged.
 func TestMuxResendsKeptBuffers(t *testing.T) {
 	p := newMuxPair(t)
-	old := p.a.newStreamLocked(2)
+	old := p.a.newStreamLocked(2, false)
 	old.Begin(0)
 	keep := streamproxy.NewKeep()
 	old.SetRetention(keep)
@@ -640,7 +640,7 @@ func TestMuxResendsKeptBuffers(t *testing.T) {
 	old.failLocked(errStreamReset)
 	p.a.mu.Unlock()
 
-	next := p.a.newStreamLocked(4)
+	next := p.a.newStreamLocked(4, false)
 	next.Begin(0)
 	chunks, ok := keep.From(0)
 	if !ok || len(chunks) != 1 {
@@ -689,7 +689,7 @@ func TestMuxResendsKeptBuffers(t *testing.T) {
 // while the Link writer has that much waiting, and continues once it pulls.
 func TestMuxWritersWaitForTheLink(t *testing.T) {
 	p := newMuxPair(t)
-	s := p.a.newStreamLocked(2)
+	s := p.a.newStreamLocked(2, false)
 	wrote := make(chan int, 1)
 	go func() {
 		n, _ := s.Write(make([]byte, 3*muxQueue))
@@ -743,14 +743,14 @@ func TestMuxWritersWaitForTheLink(t *testing.T) {
 // sending again on a new chain does, is queued at once with its share.
 func TestMuxLaterStreamIsNotQueuedBehindABacklog(t *testing.T) {
 	p := newMuxPair(t)
-	first := p.a.newStreamLocked(2)
+	first := p.a.newStreamLocked(2, false)
 	go first.Write(make([]byte, 3*muxQueue))
 	waitFor(t, "the queue to fill", func() bool {
 		p.a.mu.Lock()
 		defer p.a.mu.Unlock()
 		return p.a.queued >= muxQueue
 	})
-	later := p.a.newStreamLocked(4)
+	later := p.a.newStreamLocked(4, false)
 	wrote := make(chan error, 1)
 	go func() {
 		_, err := later.Write(make([]byte, muxQueue/4))
@@ -841,7 +841,7 @@ func TestMuxCarriesManyStreams(t *testing.T) {
 // allocates nothing.
 func TestMuxRelayForwardsReceivedBuffers(t *testing.T) {
 	p, q := newMuxPair(t), newMuxPair(t)
-	s := p.a.newStreamLocked(2)
+	s := p.a.newStreamLocked(2, false)
 	payload := bytes.Repeat([]byte("relay"), 1000)
 	if _, err := s.Write(payload); err != nil {
 		t.Fatal(err)
@@ -858,7 +858,7 @@ func TestMuxRelayForwardsReceivedBuffers(t *testing.T) {
 	}
 	received.Release() // the Link is done with it
 	up := <-p.accepted
-	down := q.a.newStreamLocked(2)
+	down := q.a.newStreamLocked(2, false)
 	go up.RelayTo(down)
 	t.Cleanup(up.Abort)
 	waitFor(t, "the relay to queue the frame", func() bool {
@@ -894,7 +894,7 @@ func TestMuxRelayForwardsReceivedBuffers(t *testing.T) {
 		t.Fatal("forwarded bytes changed", err)
 	}
 
-	next := q.a.newStreamLocked(4)
+	next := q.a.newStreamLocked(4, false)
 	next.writeMu.Lock()
 	defer next.writeMu.Unlock()
 	allocs := testing.AllocsPerRun(100, func() {

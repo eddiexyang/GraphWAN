@@ -24,14 +24,19 @@ import (
 // acknowledges contiguous bytes, and unacknowledged frames are sent again when
 // the Edge moves streams to another Link (failure, renewal or rekey).
 const (
-	muxData  = 1
-	muxAck   = 2
-	muxReset = 3
+	muxData      = 1
+	muxAck       = 2
+	muxReset     = 3
+	muxWindowAck = 4
 
 	muxFin = 1
 	// With muxFin on a TCP session hop: the session's direction ended. Session
 	// hops are torn down by resets, so their FINs always carry it.
 	muxEnd = 2
+	// On every data frame of a stream whose windows follow the kernel's
+	// receive buffer: its receiver starts it so, and both ends acknowledge
+	// with muxWindowAck.
+	muxWindowed = 4
 
 	// link kind + frame type + stream ID
 	muxHeader     = 1 + 1 + 8
@@ -41,10 +46,22 @@ const (
 	// A TCP session relay's acknowledgements add the far end's delivered
 	// offset; a session reset adds whether it resets the connection.
 	muxSessionAckSize = muxAckSize + 8
-	muxAbortSize      = muxHeader + 1
+	// A windowed stream's acknowledgement also states what the receiver
+	// consumed, since its window varies: [received][limit][consumed], and a
+	// session relay's adds [delivered].
+	muxWindowAckSize        = muxAckSize + 8
+	muxWindowSessionAckSize = muxWindowAckSize + 8
+	muxAbortSize            = muxHeader + 1
 
-	// The receive window covers one stream at 3 Gbit/s over 80 ms.
-	muxWindow       = 32 << 20
+	// The receive window of a stream without windowed acknowledgements, or on
+	// a Link whose kernel receive buffer is unknown: one stream at 3 Gbit/s
+	// over 80 ms.
+	muxWindow = 32 << 20
+	// A windowed stream's credit before its first acknowledgement.
+	muxInitialWindow = 256 << 10
+	// A windowed stream that consumed nothing this long stopped: it keeps its
+	// credit but no longer shares the Link's buffer.
+	muxIdle         = time.Second
 	muxAckThreshold = 256 << 10
 	// Frames handed to one Link writer per stream before others get a turn.
 	muxBurst = 16
@@ -115,6 +132,11 @@ type mux struct {
 	queued  int
 	waiting int
 	drained chan struct{}
+	// share is each windowed stream's part of the current Link's kernel
+	// receive buffer, split between the streams consuming; maintain sets it.
+	// receiveWindow replaces the Link's buffer in tests.
+	share         uint64
+	receiveWindow func() (int, bool)
 }
 
 // muxQueue bounds the frames an Edge holds for its Link writer: a few of its
@@ -182,7 +204,7 @@ func (m *mux) Open(ctx context.Context) (*muxStream, error) {
 	if m.next == 0 {
 		return nil, errors.New("edge stream IDs exhausted")
 	}
-	s := m.newStreamLocked(m.next)
+	s := m.newStreamLocked(m.next, m.current.Windows())
 	if m.next > ^uint64(0)-2 {
 		m.next = 0
 	} else {
@@ -191,10 +213,18 @@ func (m *mux) Open(ctx context.Context) (*muxStream, error) {
 	return s, nil
 }
 
-func (m *mux) newStreamLocked(id uint64) *muxStream {
+func (m *mux) newStreamLocked(id uint64, windowed bool) *muxStream {
 	ctx, cancel := context.WithCancel(m.g.ctx)
-	s := &muxStream{m: m, id: id, ctx: ctx, cancel: cancel, peerLimit: muxWindow, advertised: muxWindow, sendWake: make(chan struct{}, 1), readWake: make(chan struct{}, 1)}
+	initial := uint64(muxWindow)
+	if windowed {
+		initial = muxInitialWindow
+	}
+	s := &muxStream{m: m, id: id, ctx: ctx, cancel: cancel, peerLimit: initial, advertised: initial, windowed: windowed, window: initial, fresh: true, sendWake: make(chan struct{}, 1), readWake: make(chan struct{}, 1)}
 	m.streams[id] = s
+	if windowed {
+		// It shares the Link's buffer from its first acknowledgement.
+		m.shareLocked()
+	}
 	return s
 }
 
@@ -317,11 +347,12 @@ func (m *mux) maintain() {
 			}
 		}
 	}
+	m.shareLocked()
 	// ACK receipt independently of application consumption. Small messages
 	// release retransmission storage even when the reader has stopped; only
 	// consumed bytes increase the receive window.
 	for _, s := range m.streams {
-		if s.received != s.ackReceived || s.consumed+muxWindow > s.advertised || s.session && !s.local && s.delivered != s.ackDelivered {
+		if s.received != s.ackReceived || s.consumed+s.windowLocked() > s.advertised || s.session && !s.local && s.delivered != s.ackDelivered {
 			s.ackDue = true
 			m.enqueueLocked(s)
 			wake = m.current
@@ -330,6 +361,47 @@ func (m *mux) maintain() {
 	m.mu.Unlock()
 	if wake != nil {
 		wake.WakeStreams()
+	}
+}
+
+// shareLocked splits the current Link's kernel receive buffer, which bounds
+// what is in flight on the Link, between the windowed streams consuming. A
+// stream that stopped consuming keeps the credit it was given, as a connection
+// whose reader stopped keeps its own buffer, and gets no more; it holds none
+// of the Link's buffer, whose bytes it already took. On a Link whose buffer is
+// unknown, each stream has muxWindow.
+func (m *mux) shareLocked() {
+	budget, known := 0, false
+	if m.receiveWindow != nil {
+		budget, known = m.receiveWindow()
+	} else if m.current != nil {
+		budget, known = m.current.ReceiveWindow()
+	}
+	var consuming []*muxStream
+	now := time.Now()
+	for _, s := range m.streams {
+		if !s.windowed || s.err != nil {
+			continue
+		}
+		if s.fresh || s.consumed != s.lastConsumed {
+			s.fresh, s.lastConsumed, s.consuming = false, s.consumed, now
+		}
+		if now.Sub(s.consuming) < muxIdle {
+			consuming = append(consuming, s)
+		}
+	}
+	share := uint64(muxWindow)
+	if known {
+		share = max(muxMaxData, uint64(budget)/uint64(max(1, len(consuming))))
+	}
+	m.share = share
+	for _, s := range m.streams {
+		if s.windowed {
+			s.window = min(s.window, share)
+		}
+	}
+	for _, s := range consuming {
+		s.window = share
 	}
 }
 
@@ -472,6 +544,16 @@ func (m *mux) ReceiveStream(l *link.Link, raw []byte, owner *packetbuf.Buffer) b
 			return false
 		}
 		return true
+	case muxWindowAck:
+		switch len(raw) {
+		case muxWindowAckSize - 1:
+			m.receiveWindowAck(id, binary.BigEndian.Uint64(raw[9:17]), binary.BigEndian.Uint64(raw[17:25]), binary.BigEndian.Uint64(raw[25:33]), 0, false)
+		case muxWindowSessionAckSize - 1:
+			m.receiveWindowAck(id, binary.BigEndian.Uint64(raw[9:17]), binary.BigEndian.Uint64(raw[17:25]), binary.BigEndian.Uint64(raw[25:33]), binary.BigEndian.Uint64(raw[33:41]), true)
+		default:
+			return false
+		}
+		return true
 	case muxReset:
 		if len(raw) != muxHeader-1 && (len(raw) != muxAbortSize-1 || raw[9] != 1) {
 			return false
@@ -491,7 +573,7 @@ func (m *mux) ReceiveStream(l *link.Link, raw []byte, owner *packetbuf.Buffer) b
 // receiveData keeps received bytes in the Link's buffer when owner is not nil,
 // as an owner until they are read, and copies them otherwise.
 func (m *mux) receiveData(id, offset uint64, flags byte, data []byte, owner *packetbuf.Buffer) bool {
-	if flags&^(muxFin|muxEnd) != 0 || flags&muxEnd != 0 && flags&muxFin == 0 || flags&muxFin != 0 && len(data) != 0 {
+	if flags&^(muxFin|muxEnd|muxWindowed) != 0 || flags&muxEnd != 0 && flags&muxFin == 0 || flags&muxFin != 0 && len(data) != 0 {
 		return false
 	}
 	m.mu.Lock()
@@ -514,7 +596,7 @@ func (m *mux) receiveData(id, offset uint64, flags byte, data []byte, owner *pac
 			}
 			return true
 		}
-		s = m.newStreamLocked(id)
+		s = m.newStreamLocked(id, flags&muxWindowed != 0)
 		accepted = true
 	}
 	if s.err != nil {
@@ -522,7 +604,7 @@ func (m *mux) receiveData(id, offset uint64, flags byte, data []byte, owner *pac
 		return true
 	}
 	end := offset + uint64(len(data))
-	if end > max(s.advertised, s.consumed+muxWindow) || s.finRecv && end > s.finAt {
+	if end > max(s.advertised, s.consumed+s.windowLocked()) || s.finRecv && end > s.finAt {
 		s.failLocked(errStreamReset)
 		m.resetLocked(id)
 		m.mu.Unlock()
@@ -565,6 +647,16 @@ func (m *mux) receiveData(id, offset uint64, flags byte, data []byte, owner *pac
 }
 
 func (m *mux) receiveAck(id, received, limit, delivered uint64, explicit bool) {
+	m.receiveAckConsumed(id, received, limit, 0, false, delivered, explicit)
+}
+
+// receiveWindowAck takes a windowed stream's acknowledgement, which states
+// what the receiver consumed.
+func (m *mux) receiveWindowAck(id, received, limit, consumed, delivered uint64, explicit bool) {
+	m.receiveAckConsumed(id, received, limit, consumed, true, delivered, explicit)
+}
+
+func (m *mux) receiveAckConsumed(id, received, limit, consumed uint64, stated bool, delivered uint64, explicit bool) {
 	m.mu.Lock()
 	s := m.streams[id]
 	if s == nil || s.err != nil {
@@ -572,6 +664,9 @@ func (m *mux) receiveAck(id, received, limit, delivered uint64, explicit bool) {
 		return
 	}
 	before := s.peerDeliveredLocked()
+	if stated {
+		s.peerConsumed = max(s.peerConsumed, consumed)
+	}
 	if explicit {
 		s.explicitPeer = true
 		s.peerDelivered = max(s.peerDelivered, delivered)
@@ -643,8 +738,16 @@ type muxStream struct {
 	consumed    uint64
 	advertised  uint64
 	ackDue      bool
-	finRecv     bool
-	finAt       uint64
+	// A windowed stream's receive window; see mux.shareLocked. Its
+	// acknowledgements state consumed, and the peer's state peerConsumed.
+	windowed     bool
+	window       uint64
+	fresh        bool      // not yet counted by shareLocked
+	lastConsumed uint64    // consumed when shareLocked last saw it change
+	consuming    time.Time // then
+	peerConsumed uint64
+	finRecv      bool
+	finAt        uint64
 
 	closed   bool
 	err      error
@@ -675,22 +778,48 @@ type muxStream struct {
 // the Link seals only the frames' headers.
 func (s *muxStream) CarrySealed() { s.sealed.Store(true) }
 
+// windowLocked is the bytes past what the stream consumed that it lets the
+// sender send.
+func (s *muxStream) windowLocked() uint64 {
+	if s.windowed {
+		return s.window
+	}
+	return muxWindow
+}
+
+// dataFlags marks a windowed stream's data frames.
+func (s *muxStream) dataFlags() byte {
+	if s.windowed {
+		return muxWindowed
+	}
+	return 0
+}
+
 func (s *muxStream) ackFrameLocked() []byte {
-	size := muxAckSize
-	if s.session && !s.local {
-		size = muxSessionAckSize
+	kind, size := byte(muxAck), muxAckSize
+	if s.windowed {
+		kind, size = muxWindowAck, muxWindowAckSize
+	}
+	relay := s.session && !s.local
+	if relay {
+		size += 8
 	}
 	raw := make([]byte, size)
-	frameHeader(raw, muxAck, s.id)
+	frameHeader(raw, kind, s.id)
 	received := s.received
 	if s.finRecv {
 		received++
 	}
-	limit := s.consumed + muxWindow
+	limit := max(s.advertised, s.consumed+s.windowLocked())
 	binary.BigEndian.PutUint64(raw[10:18], received)
 	binary.BigEndian.PutUint64(raw[18:26], limit)
-	if size == muxSessionAckSize {
-		binary.BigEndian.PutUint64(raw[26:34], s.delivered)
+	at := 26
+	if s.windowed {
+		binary.BigEndian.PutUint64(raw[at:at+8], s.consumed)
+		at += 8
+	}
+	if relay {
+		binary.BigEndian.PutUint64(raw[at:at+8], s.delivered)
 		s.ackDelivered = s.delivered
 	}
 	s.advertised = max(s.advertised, limit)
@@ -710,6 +839,7 @@ func (s *muxStream) ackFrameLocked() []byte {
 // turns them into the record in place.
 type frameBuilder struct {
 	kind    byte // the Link message kind of its frames
+	flags   byte // its data frames' flags
 	id      uint64
 	offset  uint64
 	limit   int
@@ -725,6 +855,7 @@ func newFrameBuilder(id, offset uint64, limit int, records *streamproxy.Records)
 // newBuilder returns a builder for s's data frames.
 func (s *muxStream) newBuilder(offset uint64, limit int, records *streamproxy.Records) *frameBuilder {
 	b := newFrameBuilder(s.id, offset, limit, records)
+	b.flags = s.dataFlags()
 	if s.sealed.Load() {
 		b.kind = sealedStreamKind
 	}
@@ -755,7 +886,7 @@ func (b *frameBuilder) space() *muxFrame {
 		frameHeader(raw, muxData, b.id)
 		raw[0] = b.kind
 		binary.BigEndian.PutUint64(raw[10:18], b.offset+uint64(b.bytes))
-		raw[18] = 0 // flags
+		raw[18] = b.flags
 		raw = raw[:muxDataHeader+prefix]
 		b.bytes += overhead
 		b.frames = append(b.frames, muxFrame{raw: raw, buf: buf})
@@ -977,7 +1108,7 @@ func (s *muxStream) WriteKept(kept streamproxy.Kept) (bool, error) {
 		raw[0] = sealedStreamKind
 	}
 	binary.BigEndian.PutUint64(raw[10:18], start)
-	raw[18] = 0 // flags
+	raw[18] = s.dataFlags()
 	kept.Owner.Retain()
 	b := &frameBuilder{id: s.id, offset: start, limit: len(kept.Data), bytes: len(kept.Data), frames: []muxFrame{{raw: raw, buf: kept.Owner, at: at}}}
 	if err := s.publish(b); err != nil {
@@ -1106,7 +1237,7 @@ func (s *muxStream) CloseWrite() error {
 	raw := make([]byte, muxDataHeader)
 	frameHeader(raw, muxData, s.id)
 	binary.BigEndian.PutUint64(raw[10:18], s.sendNext)
-	raw[18] = muxFin
+	raw[18] = muxFin | s.dataFlags()
 	if s.session {
 		raw[18] |= muxEnd
 	}
@@ -1194,7 +1325,8 @@ func (s *muxStream) consume(n int) {
 	var l *link.Link
 	// A session hop that read up to its FIN acknowledges at once: the far end
 	// finishes the session only when it learns that everything was delivered.
-	if (s.consumed+muxWindow-s.advertised >= muxAckThreshold || s.session && s.finRecv && s.consumed == s.finAt && s.consumed+muxWindow > s.advertised) && s.err == nil {
+	window := s.windowLocked()
+	if (s.consumed+window > s.advertised && s.consumed+window-s.advertised >= min(muxAckThreshold, window/4) || s.session && s.finRecv && s.consumed == s.finAt && s.consumed+window > s.advertised) && s.err == nil {
 		s.ackDue = true
 		m.enqueueLocked(s)
 		l = m.current
@@ -1305,7 +1437,7 @@ func (s *muxStream) forward(data []byte, owner *packetbuf.Buffer) error {
 		raw[0] = sealedStreamKind
 	}
 	binary.BigEndian.PutUint64(raw[10:18], start)
-	raw[18] = 0 // flags
+	raw[18] = s.dataFlags()
 	frames := [1]muxFrame{{raw: raw, buf: owner, at: at - muxDataHeader}}
 	b := frameBuilder{id: s.id, offset: start, limit: len(data), bytes: len(data), frames: frames[:]}
 	if err := s.publish(&b); err != nil {
@@ -1342,7 +1474,7 @@ func (s *muxStream) Close() error {
 			s.failLocked(net.ErrClosed)
 			m.resetLocked(s.id)
 		} else {
-			if s.session && (s.consumed+muxWindow > s.advertised || s.received != s.ackReceived || !s.local && s.delivered != s.ackDelivered) {
+			if s.session && (s.consumed+s.windowLocked() > s.advertised || s.received != s.ackReceived || !s.local && s.delivered != s.ackDelivered) {
 				// The far end learns what this end delivered from this ACK.
 				s.ackDue = true
 				m.enqueueLocked(s)
@@ -1464,7 +1596,10 @@ func (s *muxStream) peerDeliveredLocked() uint64 {
 	if s.explicitPeer {
 		return s.peerDelivered
 	}
-	consumed := s.peerLimit - muxWindow
+	consumed := s.peerConsumed
+	if !s.windowed {
+		consumed = s.peerLimit - muxWindow
+	}
 	if consumed < s.sendMark {
 		return s.sendStart
 	}

@@ -137,6 +137,15 @@ func (c *Channel) UseKernelWriteBacklog() error {
 	}
 	return nil
 }
+
+// ReceiveWindow reports the kernel's receive buffer of the connection, when
+// the transport is a kernel TCP socket.
+func (c *Channel) ReceiveWindow() (int, bool) {
+	if native, ok := c.conn.(interface{ ReceiveWindow() (int, bool) }); ok {
+		return native.ReceiveWindow()
+	}
+	return 0, false
+}
 func (c *Channel) LocalAddr() net.Addr  { return c.conn.LocalAddr() }
 func (c *Channel) RemoteAddr() net.Addr { return c.conn.RemoteAddr() }
 

@@ -450,10 +450,11 @@ func (m *Mesh) accept(conn transport.Conn, kind model.Transport) {
 		// The acceptor confirms each offered capability in band.
 		streams := introduction.TCPStreams && m.streamsEnabled() && streamTransport(kind)
 		resume := introduction.TCPResume && m.resumeEnabled()
+		windows := introduction.Windows && streams && m.resumeEnabled()
 		linkState := introduction.LinkState && m.linkStateEnabled()
 		compact := introduction.CompactData && m.compactHeader() != nil
 		sizeProbe := introduction.SizeProbe && streamTransport(kind)
-		selected.register(channel, *candidate, introduction.PathExchange, linkCaps{streams: streams, resume: resume, streamHello: true, linkState: linkState, linkStateHello: true, compact: compact, compactHello: true, sizeProbe: sizeProbe, sizeProbeHello: true, accepted: true, peerHeartbeat: time.Duration(introduction.Heartbeat) * time.Millisecond})
+		selected.register(channel, *candidate, introduction.PathExchange, linkCaps{streams: streams, resume: resume, windows: windows, streamHello: true, linkState: linkState, linkStateHello: true, compact: compact, compactHello: true, sizeProbe: sizeProbe, sizeProbeHello: true, accepted: true, peerHeartbeat: time.Duration(introduction.Heartbeat) * time.Millisecond})
 	}()
 }
 func addressFamily(address net.Addr) int {
@@ -533,7 +534,7 @@ func (g *group) close() {
 // offer (acceptor, which announces each with a hello message).
 type linkCaps struct {
 	streams, streamHello, linkState, linkStateHello bool
-	resume                                          bool
+	resume, windows                                 bool
 	compact, compactHello                           bool
 	sizeProbe, sizeProbeHello                       bool
 	accepted                                        bool
@@ -592,6 +593,7 @@ func (g *group) register(channel *peer.Channel, candidate link.Candidate, pathEx
 	}
 	options.SizeProbe, options.SizeProbeHello = caps.sizeProbe, caps.sizeProbeHello
 	options.Resume = caps.resume
+	options.Windows = caps.windows
 	if h := g.mesh.linkStateHandler(); h != nil {
 		options.Failed = h.LinkFailed
 	}

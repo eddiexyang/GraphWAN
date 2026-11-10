@@ -8,3 +8,6 @@ import "net"
 func ConfigureTCP(net.Conn) error { return nil }
 
 func UseKernelTCPBacklog(net.Conn) error { return nil }
+
+// TCPReceiveWindow is Linux's.
+func TCPReceiveWindow(net.Conn) (int, bool) { return 0, false }

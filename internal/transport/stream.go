@@ -55,6 +55,14 @@ func (s *Stream) UseKernelWriteBacklog() error {
 	return UseKernelTCPBacklog(s.conn)
 }
 
+// ReceiveWindow reports the kernel's receive buffer of the connection.
+func (s *Stream) ReceiveWindow() (int, bool) {
+	if wrapper, ok := s.conn.(interface{ ReceiveWindow() (int, bool) }); ok {
+		return wrapper.ReceiveWindow()
+	}
+	return TCPReceiveWindow(s.conn)
+}
+
 func (s *Stream) Send(ctx context.Context, data []byte) error {
 	return s.SendBatch(ctx, [][]byte{data})
 }

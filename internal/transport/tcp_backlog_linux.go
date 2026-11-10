@@ -40,3 +40,23 @@ func setTCPWriteBacklog(conn net.Conn, lowWater int) error {
 	}
 	return nil
 }
+
+// TCPReceiveWindow reports a TCP connection's receive buffer, which the
+// kernel tunes as the connection's transfer needs it: SO_RCVBUF.
+func TCPReceiveWindow(conn net.Conn) (int, bool) {
+	tcp, ok := conn.(*net.TCPConn)
+	if !ok {
+		return 0, false
+	}
+	raw, err := tcp.SyscallConn()
+	if err != nil {
+		return 0, false
+	}
+	size := 0
+	if raw.Control(func(fd uintptr) {
+		size, err = unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUF)
+	}) != nil || err != nil {
+		return 0, false
+	}
+	return size, true
+}

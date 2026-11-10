@@ -43,6 +43,9 @@ const (
 	// The acceptor confirms resumable TCP sessions offered in the
 	// introduction; see Options.Resume.
 	resumeHelloMessage = 20
+	// The acceptor confirms stream windows taken from the kernel's receive
+	// buffer, offered in the introduction; see Options.Windows.
+	windowHelloMessage = 24
 	// A stream message whose data is sealed end to end, which the channel
 	// does not encrypt again; see peer.SealedPayload.
 	sealedStreamMessage = peer.SealedPayload
@@ -107,6 +110,10 @@ type Options struct {
 	// Resume offers (dialer) or confirms (acceptor) resumable TCP sessions on
 	// the streams. The acceptor confirms with a hello message.
 	Resume bool
+	// Windows offers (dialer) or confirms (acceptor) stream windows that
+	// follow the kernel's receive buffer, whose acknowledgements state what
+	// the receiver consumed. The acceptor confirms with a hello message.
+	Windows bool
 	// LinkState carries link-state advertisements; LinkStateHello is set by
 	// the accepting side, as for streams. Any transport may carry them.
 	LinkState      LinkStateHandler
@@ -217,6 +224,7 @@ type Link struct {
 	rx, tx, dropped atomic.Uint64
 	streamsReady    atomic.Bool
 	resume          atomic.Bool
+	windows         atomic.Bool
 	streamWake      chan struct{}
 	linkStateReady  atomic.Bool
 	linkStateOut    chan []byte
@@ -262,6 +270,12 @@ func New(parent context.Context, channel Channel, info Info, options Options) (*
 	l.dataGeneration.Store(1)
 	// The size-probe hello must precede every other message; see sizeprobe.go.
 	l.initSizeProbe()
+	if options.Windows && options.Accepted {
+		// Before the streams' announcement: the dialer knows the windows'
+		// format before it sends a stream frame.
+		l.control <- []byte{windowHelloMessage, 1}
+		l.windows.Store(true)
+	}
 	if options.Streams != nil && options.StreamHello && l.tcpBacked() {
 		// The queue is empty here, so the announcement precedes every stream frame.
 		l.control <- []byte{streamHelloMessage, 1}
@@ -346,6 +360,19 @@ func (l *Link) StreamsReady() bool { return l.streamsReady.Load() }
 
 // Resume reports whether both ends carry resumable TCP sessions.
 func (l *Link) Resume() bool { return l.resume.Load() }
+
+// Windows reports whether both sides take stream windows from the kernel's
+// receive buffer.
+func (l *Link) Windows() bool { return l.windows.Load() }
+
+// ReceiveWindow reports the kernel's receive buffer of this Link's
+// connection, when its transport is a kernel TCP socket.
+func (l *Link) ReceiveWindow() (int, bool) {
+	if c, ok := l.channel.(interface{ ReceiveWindow() (int, bool) }); ok {
+		return c.ReceiveWindow()
+	}
+	return 0, false
+}
 
 func (l *Link) LinkStateReady() bool { return l.linkStateReady.Load() }
 
@@ -786,6 +813,12 @@ func (l *Link) readLoop() {
 			}
 			l.sizeProbeUnsupported()
 			l.resume.Store(true)
+		case windowHelloMessage:
+			if len(raw) != 2 || !l.options.Windows || l.options.Accepted {
+				return
+			}
+			l.sizeProbeUnsupported()
+			l.windows.Store(true)
 		case linkStateHelloMessage:
 			if len(raw) != 2 || l.options.LinkState == nil || l.options.LinkStateHello {
 				return

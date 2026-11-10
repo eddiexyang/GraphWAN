@@ -34,6 +34,8 @@ type introduction struct {
 	SizeProbe bool `json:"size_probe,omitempty"`
 	// TCPResume offers resumable TCP sessions, on streams or a carrier TCP.
 	TCPResume bool `json:"resume,omitempty"`
+	// Windows offers stream windows that follow the kernel's receive buffer.
+	Windows bool `json:"windows,omitempty"`
 	// Heartbeat is the dialer's heartbeat in milliseconds; the acceptor's
 	// timeout covers three of them.
 	Heartbeat uint32 `json:"heartbeat_ms,omitempty"`
@@ -274,13 +276,19 @@ func (g *group) connect(ctx context.Context, candidate link.Candidate) (*peer.Ch
 		return nil, linkCaps{}, err
 	}
 	streams := g.mesh.streamsEnabled() && streamTransport(candidate.Endpoint.Transport)
-	offered := linkCaps{streams: streams, resume: g.mesh.resumeEnabled(), linkState: g.mesh.linkStateEnabled(), compact: g.mesh.compactHeader() != nil, sizeProbe: streamTransport(candidate.Endpoint.Transport)}
+	offered := linkCaps{streams: streams, resume: g.mesh.resumeEnabled(), windows: streams && g.mesh.resumeEnabled(), linkState: g.mesh.linkStateEnabled(), compact: g.mesh.compactHeader() != nil, sizeProbe: streamTransport(candidate.Endpoint.Transport)}
 	heartbeat, _ := linkTiming(g.policy.Load().detection, offered)
-	intro := introduction{Candidate: candidate.ID, Endpoint: endpointFingerprint(candidate.Endpoint), Scope: link.ScopeIdentity(candidate.Scope), PathExchange: true, TCPStreams: offered.streams, LinkState: offered.linkState, CompactData: offered.compact, SizeProbe: offered.sizeProbe, TCPResume: offered.resume, Heartbeat: uint32(heartbeat.Milliseconds())}
+	intro := introduction{Candidate: candidate.ID, Endpoint: endpointFingerprint(candidate.Endpoint), Scope: link.ScopeIdentity(candidate.Scope), PathExchange: true, TCPStreams: offered.streams, LinkState: offered.linkState, CompactData: offered.compact, SizeProbe: offered.sizeProbe, TCPResume: offered.resume, Windows: offered.windows, Heartbeat: uint32(heartbeat.Milliseconds())}
 	if candidate.Target.IsValid() {
 		intro.Target = candidate.Target.String()
 	}
 	encoded, _ := json.Marshal(intro)
+	if offered.windows && len(encoded)+1 > maxIntroduction {
+		// The newest capability gives way first: its streams then keep fixed
+		// windows.
+		offered.windows, intro.Windows = false, false
+		encoded, _ = json.Marshal(intro)
+	}
 	if offered.sizeProbe && len(encoded)+1 > maxIntroduction {
 		// Older acceptors reject a longer introduction; this Link goes unprobed.
 		offered.sizeProbe, intro.SizeProbe = false, false
