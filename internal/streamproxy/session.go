@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -24,10 +25,12 @@ import (
 // resending from E; the egress takes the newest generation and discards what
 // it already has.
 //
-// An end keeps only what it sent and the far end has not yet delivered: what
-// is in flight along the chain, which the hops' stream windows bound. It has
-// no budget of its own, so one connection never waits on another's bytes.
+// An end keeps what it sent and the far end has not yet delivered, at most a
+// TCP send buffer (Keep); one connection never waits on another's bytes.
 const (
+	// defaultSendBuffer is an end's send buffer where the kernel's largest is
+	// unknown.
+	defaultSendBuffer = 64 << 20
 	// An end without a working chain this long resets the connection.
 	orphanLifetime = 2 * time.Minute
 	rebuildMin     = 200 * time.Millisecond
@@ -140,6 +143,11 @@ type Hop interface {
 // Keep holds the bytes an end sent from the other end's delivered offset. It
 // owns each chunk's buffer, if any, until it drops the chunk; at is where the
 // chunk starts in its buffer's Data.
+//
+// It is the connection's send buffer: once the end acknowledged bytes to its
+// socket, delivering them is the network's, and only this end holds them. As a
+// TCP send buffer, it holds at most the kernel's largest one; the end reads
+// its socket no further until the other end delivered more.
 type Keep struct {
 	mu     sync.Mutex
 	chunks [][]byte
@@ -148,10 +156,41 @@ type Keep struct {
 	base   uint64
 	end    uint64
 	closed bool
-	budget *retained // the Agent's total, or nil
+	limit  uint64
+	wake   chan struct{} // closed when bytes are released
+	budget *retained     // the Agent's total, or nil
 }
 
-func NewKeep() *Keep { return &Keep{} }
+func NewKeep() *Keep { return &Keep{limit: SendBuffer(), wake: make(chan struct{})} }
+
+// Wait returns the room left in the end's send buffer once it is at least
+// need bytes.
+func (k *Keep) Wait(ctx context.Context, need int) (int, error) {
+	for {
+		k.mu.Lock()
+		if k.closed {
+			k.mu.Unlock()
+			return math.MaxInt, nil
+		}
+		if held := k.end - k.base; held+uint64(need) <= k.limit {
+			k.mu.Unlock()
+			return int(min(k.limit-held, math.MaxInt)), nil
+		}
+		wake := k.wake
+		k.mu.Unlock()
+		select {
+		case <-wake:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	}
+}
+
+// wakeLocked lets writers waiting for room check again.
+func (k *Keep) wakeLocked() {
+	close(k.wake)
+	k.wake = make(chan struct{})
+}
 
 // Add appends data, which must not change afterwards, and becomes an owner of
 // its buffer (nil when data is not pooled), where data starts at owner.Data[at].
@@ -209,6 +248,7 @@ func (k *Keep) Release(delivered uint64) {
 		k.base = limit
 	}
 	k.budget.release(released)
+	k.wakeLocked()
 }
 
 // Kept is a chunk of kept bytes, which start at Owner.Data[At], or Owner is
@@ -254,6 +294,7 @@ func (k *Keep) close() {
 		packetbuf.ReleaseAll(k.owners)
 		k.chunks, k.owners, k.at = nil, nil, nil
 		k.base = k.end
+		k.wakeLocked()
 	}
 	k.mu.Unlock()
 }
@@ -297,7 +338,10 @@ type End struct {
 	eof      bool   // the local connection ended its writes
 	ended    bool   // the received direction ended
 	leftover []byte
-	busy     bool
+	// queued is what chains this end left received and it has not read: the
+	// other end counts received bytes delivered, so this end keeps them.
+	queued []Kept
+	busy   bool
 	// attempt cancels the chain being opened, so a route change does not
 	// wait for an attempt along the old route; rerouted asks the next
 	// attempt to start at once.
@@ -330,6 +374,8 @@ func StartIngress(ctx context.Context, open OpenChain, counters *Counters, recor
 	}
 	e := newEnd(context.Background(), counters, records)
 	e.open = open
+	// An end, not a relay, from its first acknowledgement on.
+	hop.DeliverLocal()
 	hop.Begin(0)
 	e.mu.Lock()
 	e.useLocked(hop, 0, 0)
@@ -341,6 +387,8 @@ func StartIngress(ctx context.Context, open OpenChain, counters *Counters, recor
 func NewEgress(parent context.Context, hop Hop, askReplay func(gen uint32), counters *Counters, records *Records) *End {
 	e := newEnd(parent, counters, records)
 	e.askReplay = askReplay
+	// An end, not a relay, from its first acknowledgement on.
+	hop.DeliverLocal()
 	hop.Begin(0)
 	e.mu.Lock()
 	e.useLocked(hop, 0, 0)
@@ -360,6 +408,9 @@ func (e *End) useLocked(hop Hop, out, in uint64) {
 		e.cond.Broadcast()
 		e.mu.Unlock()
 	})
+	// What the chain delivered before, as the bytes sent again on it, frees
+	// room for a writer waiting on a full send buffer.
+	e.keep.Release(hop.PeerDelivered())
 	e.hop, e.in, e.inRead = hop, in, 0
 	e.orphan = time.Time{}
 	e.cond.Broadcast()
@@ -369,6 +420,8 @@ func (e *End) useLocked(hop Hop, out, in uint64) {
 // runs without the lock: the writes wait for the hop's acknowledgements.
 func (e *End) resend(hop Hop, out uint64) error {
 	e.sealHop(hop)
+	// An end, not a relay, from its first acknowledgement on.
+	hop.DeliverLocal()
 	hop.Begin(out)
 	chunks, ok := e.keep.From(out)
 	if !ok {
@@ -425,14 +478,14 @@ func (e *End) Accept(hop Hop, gen uint32, down, up uint64, at bool, answer func(
 		return ErrUnknownSession
 	}
 	if old := e.hop; old != nil {
-		old.Abort()
+		e.leaveLocked(old)
 	}
 	e.hop, e.gen = nil, gen
 	if e.orphan.IsZero() {
 		e.orphan = time.Now()
 	}
 	if at {
-		down = max(down, e.read)
+		down = max(down, e.receivedLocked())
 	}
 	e.mu.Unlock()
 	if err := answer(down); err != nil {
@@ -509,7 +562,7 @@ func (e *End) failLocked(hop Hop) {
 		return
 	}
 	e.counters.HopFailures.Add(1)
-	hop.Abort()
+	e.leaveLocked(hop)
 	e.hop = nil
 	if e.orphan.IsZero() {
 		e.orphan = time.Now()
@@ -537,7 +590,7 @@ func (e *End) rebuild() {
 		}
 		gen := e.gen + 1
 		down, _ := e.keep.bounds()
-		up := e.read
+		up := e.receivedLocked()
 		e.mu.Unlock()
 		ctx, cancel := context.WithTimeout(e.ctx, ConnectTimeout)
 		e.mu.Lock()
@@ -556,7 +609,7 @@ func (e *End) rebuild() {
 			e.mu.Lock()
 			if old := e.hop; old != nil {
 				e.hop = nil
-				old.Abort()
+				e.leaveLocked(old)
 			}
 			e.mu.Unlock()
 			e.keep.Release(from)
@@ -676,8 +729,33 @@ func (e *End) finishLocked(err error) {
 		e.hop.AbortSession()
 	}
 	e.keep.close()
+	for _, chunk := range e.queued {
+		chunk.Owner.Release()
+	}
+	e.queued = nil
 	e.cond.Broadcast()
 	e.cancel()
+}
+
+// leaveLocked ends hop and keeps what it received that this end has not read.
+func (e *End) leaveLocked(hop Hop) {
+	hop.Abort()
+	if detach, ok := hop.(interface{ Detach() []Kept }); ok {
+		e.queued = append(e.queued, detach.Detach()...)
+	}
+}
+
+// receivedLocked is the session offset up to which this end received bytes,
+// read or not.
+func (e *End) receivedLocked() uint64 {
+	end := e.read
+	for _, chunk := range e.queued {
+		end += uint64(len(chunk.Data))
+	}
+	if r, ok := e.hop.(interface{ Received() uint64 }); ok && e.hop != nil {
+		end = max(end, e.in+r.Received())
+	}
+	return end
 }
 
 // ReadFrom sends the local connection's bytes on the current chain. A chain
@@ -746,8 +824,11 @@ func (e *End) CloseWrite() error {
 func (e *End) input() (Hop, uint64, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	for !e.done && !e.ended && e.hop == nil {
+	for len(e.queued) == 0 && !e.done && !e.ended && e.hop == nil {
 		e.cond.Wait()
+	}
+	if len(e.queued) > 0 && !e.done {
+		return queuedHop{e: e}, 0, nil
 	}
 	if e.ended {
 		return nil, 0, io.EOF
@@ -837,7 +918,8 @@ func (e *End) openRecord() error {
 	}
 	e.mu.Lock()
 	hop := e.hop
-	current := hop != nil && !e.done && e.read <= e.in+e.inRead
+	// Bytes queued from left chains come before the current one's.
+	current := hop != nil && !e.done && len(e.queued) == 0 && e.read <= e.in+e.inRead
 	e.mu.Unlock()
 	if !current {
 		return nil
@@ -1124,3 +1206,52 @@ wait:
 	down.Close()
 	return err
 }
+
+// queuedHop reads what chains this end left received, before the current one.
+type queuedHop struct {
+	Hop
+	e *End
+}
+
+func (q queuedHop) Read(p []byte) (int, error) {
+	q.e.mu.Lock()
+	defer q.e.mu.Unlock()
+	n := 0
+	for n < len(p) && len(q.e.queued) > 0 {
+		chunk := &q.e.queued[0]
+		c := copy(p[n:], chunk.Data)
+		n += c
+		if chunk.Data = chunk.Data[c:]; len(chunk.Data) == 0 {
+			chunk.Owner.Release()
+			q.e.queued = q.e.queued[1:]
+		} else {
+			chunk.At += c
+		}
+	}
+	return n, nil
+}
+
+func (q queuedHop) TakeChunk() ([]byte, *packetbuf.Buffer, error) {
+	q.e.mu.Lock()
+	defer q.e.mu.Unlock()
+	if len(q.e.queued) == 0 {
+		return nil, nil, nil
+	}
+	chunk := q.e.queued[0]
+	q.e.queued = q.e.queued[1:]
+	return chunk.Data, chunk.Owner, nil
+}
+
+func (q queuedHop) Buffered() int {
+	q.e.mu.Lock()
+	defer q.e.mu.Unlock()
+	n := 0
+	for _, chunk := range q.e.queued {
+		n += len(chunk.Data)
+	}
+	return n
+}
+
+func (q queuedHop) ReadWindow() (int, error) { return q.Buffered(), nil }
+func (q queuedHop) Ended() bool              { return false }
+func (q queuedHop) Aborted() bool            { return false }

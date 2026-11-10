@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -625,6 +626,11 @@ func (m *mux) receiveData(id, offset uint64, flags byte, data []byte, owner *pac
 		s.received = end
 		s.rx.Add(uint64(len(chunk)))
 		signal(s.readWake)
+		if s.windowed && s.session && s.local && s.received-s.ackReceived >= muxAckThreshold {
+			// The far end releases what this end received.
+			s.ackDue = true
+			m.enqueueLocked(s)
+		}
 	}
 	if flags&muxFin != 0 && offset == s.received && !s.finRecv {
 		s.finRecv, s.finAt, s.peerEnd = true, offset, flags&muxEnd != 0
@@ -759,7 +765,8 @@ type muxStream struct {
 	session       bool
 	sendStart     uint64
 	sendMark      uint64
-	local         bool   // the far end infers delivery from what this end consumed
+	local         bool   // the far end infers delivery from what this end received
+	recvMark      uint64 // where the session's received bytes start
 	delivered     uint64 // reported in acknowledgements unless local
 	ackDelivered  uint64
 	explicitPeer  bool
@@ -1121,10 +1128,15 @@ func (s *muxStream) Write(p []byte) (int, error) {
 	defer s.writeMu.Unlock()
 	written := 0
 	for len(p) > 0 {
+		room, err := s.waitKeep(1)
+		if err != nil {
+			return written, s.errOr(err)
+		}
 		start, limit, err := s.reserve()
 		if err != nil {
 			return written, err
 		}
+		limit = min(limit, room)
 		b := s.newBuilder(start, min(len(p), limit), nil)
 		b.Write(p[:b.limit])
 		if err := s.publish(b); err != nil {
@@ -1154,12 +1166,21 @@ func (s *muxStream) ReadFrom(src io.Reader) (int64, error) {
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	need := 1
+	if records != nil {
+		need = streamproxy.RecordOverhead + 1
+	}
 	var total int64
 	for {
+		room, err := s.waitKeep(need)
+		if err != nil {
+			return total, s.errOr(err)
+		}
 		start, limit, err := s.reserve()
 		if err != nil {
 			return total, err
 		}
+		limit = min(limit, room)
 		if records != nil && limit <= streamproxy.RecordOverhead {
 			// Too little credit for a record's plaintext.
 			if _, err := s.reserveAll(streamproxy.RecordOverhead + 1); err != nil {
@@ -1426,6 +1447,18 @@ func (s *muxStream) forward(data []byte, owner *packetbuf.Buffer) error {
 	return nil
 }
 
+// waitKeep holds a session end's writes while its send buffer is full, and
+// returns how many bytes it may write.
+func (s *muxStream) waitKeep(need int) (int, error) {
+	s.m.mu.Lock()
+	keep := s.keep
+	s.m.mu.Unlock()
+	if keep == nil {
+		return math.MaxInt, nil
+	}
+	return keep.Wait(s.ctx, need)
+}
+
 // bufferOffset reports where data starts in owner.Data, if data is a view of
 // it.
 func bufferOffset(data []byte, owner *packetbuf.Buffer) (int, bool) {
@@ -1498,10 +1531,15 @@ func (s *muxStream) failLocked(err error) {
 	for _, frame := range s.frames {
 		frame.buf.Release()
 	}
-	for _, chunk := range s.recv {
-		chunk.owner.Release()
+	if !(s.session && s.local && s.windowed) {
+		for _, chunk := range s.recv {
+			chunk.owner.Release()
+		}
+		s.recv, s.recvBytes = nil, 0
 	}
-	s.frames, s.recv, s.recvBytes = nil, nil, 0
+	// A session end's peer released what this hop received: the end takes it
+	// with Detach.
+	s.frames = nil
 	s.ackDue = false
 	delete(s.m.streams, s.id)
 	s.m.endedLocked(s.id)
@@ -1534,6 +1572,8 @@ func (s *muxStream) Begin(send uint64) {
 func (s *muxStream) DeliverLocal() {
 	s.m.mu.Lock()
 	s.local = true
+	// What was read before is the chain's request or answer.
+	s.recvMark = s.consumed
 	s.m.mu.Unlock()
 }
 
@@ -1572,10 +1612,16 @@ func (s *muxStream) peerDeliveredLocked() uint64 {
 	if s.explicitPeer {
 		return s.peerDelivered
 	}
-	consumed := s.peerConsumed
-	if !s.windowed {
-		consumed = s.peerLimit - muxWindow
+	if s.windowed {
+		// The far end of a windowed hop keeps what it received, through a
+		// failure of the hop too: received bytes are delivered, and its FIN
+		// counts as the end.
+		if s.acked < s.sendMark {
+			return s.sendStart
+		}
+		return s.sendStart + s.acked - s.sendMark
 	}
+	consumed := s.peerLimit - muxWindow
 	if consumed < s.sendMark {
 		return s.sendStart
 	}
@@ -1584,6 +1630,32 @@ func (s *muxStream) peerDeliveredLocked() uint64 {
 		e++
 	}
 	return e
+}
+
+// Received is the session's bytes this stream received, read or not.
+func (s *muxStream) Received() uint64 {
+	s.m.mu.Lock()
+	defer s.m.mu.Unlock()
+	return s.received - min(s.recvMark, s.received)
+}
+
+// Detach hands the bytes received and not yet read to the caller, which owns
+// their buffers. A session end's peer counts them delivered once received, so
+// the end takes them from a hop it leaves, even a failed one.
+func (s *muxStream) Detach() []streamproxy.Kept {
+	m := s.m
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]streamproxy.Kept, 0, len(s.recv))
+	for _, chunk := range s.recv {
+		at, ok := bufferOffset(chunk.data, chunk.owner)
+		if !ok {
+			at = 0
+		}
+		out = append(out, streamproxy.Kept{Data: chunk.data, Owner: chunk.owner, At: at})
+	}
+	s.recv, s.recvBytes = nil, 0
+	return out
 }
 
 func (s *muxStream) PeerEnded() bool {
