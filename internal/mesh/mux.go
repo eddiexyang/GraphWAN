@@ -915,30 +915,6 @@ func (b *frameBuilder) Write(data []byte) (int, error) {
 	return written, nil
 }
 
-// Fill reads plaintext straight into the frames' room with one call of read,
-// as a socket read takes what has arrived, so the bytes are not copied on
-// their way into the frames.
-func (b *frameBuilder) Fill(read func([]byte) (int, error)) (int, error) {
-	room, prefix, overhead := b.layout()
-	started := len(b.frames)
-	frame := b.space()
-	if frame == nil {
-		return 0, io.ErrShortWrite
-	}
-	used := len(frame.raw)
-	n := min(b.limit-b.bytes, room-(used-muxDataHeader-prefix))
-	got, err := read(frame.raw[used : used+n])
-	frame.raw = frame.raw[:used+got]
-	b.bytes += got
-	if got == 0 && len(b.frames) > started {
-		// The frame started for this read holds nothing.
-		frame.buf.Release()
-		b.frames = b.frames[:started]
-		b.bytes -= overhead
-	}
-	return got, err
-}
-
 // Room is how many bytes Write takes now, for a source that must not read
 // more than it can write.
 func (b *frameBuilder) Room() int {

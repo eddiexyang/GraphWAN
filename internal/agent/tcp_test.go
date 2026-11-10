@@ -283,8 +283,6 @@ type streamOptions struct {
 	withoutLinkState bool
 	// legacy Agents carry streams without TCP sessions, as older versions do.
 	legacy map[int]bool
-	// kernelEgress has the Agents use the host's kernel egress.
-	kernelEgress bool
 }
 
 func streamAgentsWith(t *testing.T, carrier model.Transport, options streamOptions, configure ...func(*model.State)) ([3]*DataPlane, [3]*kernelTUN, model.State) {
@@ -322,7 +320,6 @@ func graphAgents(t *testing.T, carrier model.Transport, options streamOptions, c
 		configured := DataPlaneOptions{}
 		configured.BindHost = "127.0.0.1"
 		configured.legacyStreams = options.legacy[i]
-		configured.kernelEgress = options.kernelEgress
 		configured.TunnelFactory = func(cfg tunnel.Config) (tunnel.Device, error) {
 			device, err := newKernelTUN(cfg, true)
 			devices[i] = device

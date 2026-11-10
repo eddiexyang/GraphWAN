@@ -71,10 +71,6 @@ func linuxRules(name string, entries []Entry) string {
 			action = "masquerade"
 		}
 		fmt.Fprintf(&b, "add rule inet %s nat iifname %q oifname != %q %s daddr %s %s daddr != %s %s\n", name, e.Interface, e.Interface, family, e.Subnet, family, e.Overlay, action)
-		if e.Mode == model.GatewaySNAT {
-			// A session's egress socket sends from the client's address too.
-			fmt.Fprintf(&b, "add rule inet %s nat meta mark %#x oifname != %q %s daddr %s %s daddr != %s masquerade\n", name, EgressMark, e.Interface, family, e.Subnet, family, e.Overlay)
-		}
 	}
 	return b.String()
 }

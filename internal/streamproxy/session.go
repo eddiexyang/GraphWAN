@@ -817,35 +817,6 @@ func (e *End) Read(p []byte) (int, error) {
 	}
 }
 
-// DrainTo writes what the session receives to w until its end, the opened
-// records straight from the buffers they opened in: w, a kernel socket,
-// gathers them in one write, so the bytes are not copied on their way out.
-// Without records it copies as io.Copy does.
-func (e *End) DrainTo(w io.Writer) (int64, error) {
-	r := e.records
-	if r == nil {
-		return io.CopyBuffer(w, struct{ io.Reader }{e}, make([]byte, 64<<10))
-	}
-	var total int64
-	var views [64][]byte
-	for {
-		if err := e.openRecord(); err != nil {
-			if err == io.EOF {
-				return total, nil
-			}
-			return total, err
-		}
-		buffers := net.Buffers(r.views(views[:0]))
-		n, err := buffers.WriteTo(w)
-		clear(views[:])
-		r.drop(int(n))
-		total += n
-		if err != nil {
-			return total, err
-		}
-	}
-}
-
 // openRecord reads the chains until a record is open with bytes to read,
 // then opens what the current chain has of the records after it without
 // waiting. A record that fails to open, or that the direction ends within,

@@ -38,9 +38,6 @@ type DataPlaneOptions struct {
 	// legacyStreams makes this Agent carry streams without TCP sessions, as
 	// older versions do. Tests use it for mixed versions.
 	legacyStreams bool
-	// kernelEgress has an Agent with test devices use the host's kernel
-	// egress, as one with real TUN devices does.
-	kernelEgress bool
 }
 type runtimeState struct {
 	snapshot model.Snapshot
@@ -72,16 +69,12 @@ type DataPlane struct {
 	damper        *edgeDamper
 	sessions      sessions
 	e2e           e2eSessions
-	// kernelEgress: a session's egress connects to a destination on this host,
-	// or in a gateway subnet, with a kernel socket rather than through the TUN.
-	kernelEgress bool
 }
 
 func NewDataPlane(parent context.Context, identity ed25519.PrivateKey, options DataPlaneOptions) (*DataPlane, error) {
 	if len(identity) != ed25519.PrivateKeySize {
 		return nil, errors.New("invalid agent identity")
 	}
-	kernel := !options.Embedded && (options.TunnelFactory == nil || options.kernelEgress)
 	if options.TunnelFactory == nil {
 		if err := tunnel.Recover(); err != nil {
 			return nil, fmt.Errorf("recover owned TUN devices: %w", err)
@@ -94,9 +87,6 @@ func NewDataPlane(parent context.Context, identity ed25519.PrivateKey, options D
 	ctx, cancel := context.WithCancel(parent)
 	runtime := &DataPlane{identity: append(ed25519.PrivateKey{}, identity...), options: options, ctx: ctx, cancel: cancel, discoveryWake: make(chan struct{}, 1), repairWake: make(chan struct{}, 1)}
 	runtime.linkState = runtime.newLinkState()
-	if kernel {
-		runtime.kernelEgress = enableKernelEgress(ctx)
-	}
 	runtime.sessions.init()
 	runtime.e2e.init()
 	runtime.wg.Add(4)
@@ -377,9 +367,6 @@ func (r *DataPlane) Close() error {
 	var gatewayErr error
 	if !r.options.Embedded {
 		gatewayErr = r.gateway.Close()
-	}
-	if r.kernelEgress {
-		disableKernelEgress(context.Background())
 	}
 	if gatewayErr != nil {
 		r.options.Logger.Error("gateway cleanup failed", "error", gatewayErr)
