@@ -296,10 +296,25 @@ The existing Edge maintenance loop, nominally every 250 ms, flushes pending
 cumulative receive acknowledgements and small receive-credit updates. Receipt
 and consumption are separate: even a stopped reader acknowledges received
 bytes so the sender can release its retransmission buffers, while only
-application reads advance the 32 MiB receive window. The immediate 256 KiB
-credit threshold, FIN acknowledgements and Link-change acknowledgements remain
-in use. Unchanged idle streams emit no periodic ACK. The wire format is
-unchanged; the receiving Agent needs the update for timely small-message ACKs.
+application reads advance the receive window. The immediate 256 KiB credit
+threshold, FIN acknowledgements and Link-change acknowledgements remain in
+use. Unchanged idle streams emit no periodic ACK.
+
+A stream's receive window is 32 MiB, unless both ends of the Link take stream
+windows from the kernel. The dialer offers `windows` in its Link introduction,
+dropping it first when the introduction would exceed 256 bytes, and the
+acceptor confirms it with a window hello message (24). The opener of a stream
+on such a Link sets flag 4 on every data frame of the stream, and its receiver
+takes the stream as windowed from the first frame. A windowed stream starts
+with 256 KiB of credit. Its receiver then lets the sender send its share of
+the Link socket's receive buffer (`SO_RCVBUF`, which the kernel tunes) past
+what was consumed: the buffer is split equally between the streams that
+consumed bytes in the last second, and a stream whose reader stopped keeps
+the credit it had and gets no more. Credit given is never taken back. On a
+Link without a kernel TCP socket, such as QUIC, the window stays 32 MiB.
+Windowed streams acknowledge with frame type 4, whose body is `received`,
+`limit`, `consumed`, and for a session relay `delivered`: the window varies,
+so the sender no longer infers what was consumed from the limit.
 
 ### Resumable TCP sessions
 
@@ -325,14 +340,22 @@ Three additions to the stream frames apply to session streams only:
   without it is a failed hop.
 - A relay's acknowledgements carry 8 more bytes: the offset the far end
   delivered of the direction the stream carries, copied from the next hop.
-  The ends' acknowledgements are unchanged; the receive limit they carry
-  implies what they delivered, so a session over one hop sends the frames a
-  plain stream sends.
+  The ends' acknowledgements are unchanged; what they report consumed is
+  what they delivered, so a session over one hop sends the frames a plain
+  stream sends.
 
-Each end keeps the bytes it sent until the other end delivered them, at most
-32 MiB; reading its socket waits while the retention is full. A session
-stream whose sent frames see no acknowledgement for 1 s is reset, and it is
-not reset after an Edge has been without Links for 30 s.
+Once an end acknowledged bytes to its socket, delivering them is the
+network's: the end keeps them until the other end took them to write to its
+own connection, and nothing else along the chain keeps bytes. An end keeps at
+most the kernel's largest TCP send buffer (`tcp_wmem`'s maximum on Linux,
+64 MiB elsewhere) and reads its socket no further while that is full. All of
+an Agent's ends together keep at most one such buffer, by the rule the kernel
+applies to its sockets under memory pressure: while the total is below the
+limit an end keeps what its own buffer allows, and above it only an end below
+its equal share keeps more, so ends whose receivers stopped cannot grow and
+hold no other end back for more than its share. A session stream whose sent
+frames see no acknowledgement for 1 s is reset, and it is not reset after an
+Edge has been without Links for 30 s.
 
 A relay whose next hop or its streams changed resets its part of the chain.
 The ingress then, and whenever its own first hop changes, opens a chain of the
@@ -464,7 +487,16 @@ assumes a 2 s heartbeat.
 
 A ping carries the nonce of the last pong its sender received, and an acceptor
 counts its own direction as working only while that keeps growing within its
-timeout, so a Link that fails one way fails at both ends. Agents of one
+timeout, so a Link that fails one way fails at both ends.
+
+On a Link that carries stream bytes, probes and their answers travel in order
+with those bytes, behind what either side has queued and not yet read, so an
+answer can take longer than the timeout though nothing is wrong. Arriving
+stream bytes show that the peer is alive and its direction works, and they
+keep arriving only while the peer receives this side's acknowledgements. The
+probe, liveness and size probe deadlines of such a Link therefore count from
+its last stream bytes: a busy Link fails one timeout after its stream bytes
+stop, and an idle Link is judged by probes alone. Agents of one
 Network with different settings, such as during a configuration change, thus
 keep their Links. Changing the setting re-establishes the Network's Links. Edge
 damping counts an outage as a failure once it lasts the Network's timeout.
