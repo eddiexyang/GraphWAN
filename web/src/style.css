@@ -225,7 +225,8 @@ fieldset:disabled select {
   flex-shrink: 0;
   margin-top: 2px;
 }
-.error span {
+.error span,
+.notice span {
   flex: 1;
 }
 .notice {

@@ -415,7 +415,10 @@ export default function App() {
           {notice && (
             <div role="status" className="notice">
               <Check size={17} />
-              {notice}
+              <span>{notice}</span>
+              <button className="icon" aria-label="Dismiss notice" onClick={() => setNotice('')}>
+                <X size={15} />
+              </button>
             </div>
           )}
           {!state ? (

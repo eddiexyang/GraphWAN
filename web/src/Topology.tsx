@@ -65,24 +65,27 @@ import {
 export type Selection =
   { type: 'node' | 'edge'; id: string } | { type: 'path'; id: string; target: string } | null
 
-// Fit new graph membership once. Toolbar and label changes preserve the view;
-// the fit-view control remains available after a resize or manual pan/zoom.
-function FitLayout({ count }: { count: number }) {
+// Fit new graph membership, and keep a fitted view fitted when the canvas
+// resizes, as when a notice appears above it. A view the user panned or zoomed
+// stays where it is until the fit-view control fits it again.
+function FitLayout({ count, follow }: { count: number; follow: { current: boolean } }) {
   const { fitView } = useReactFlow()
   const initialized = useNodesInitialized()
   const width = useStore((s) => s.width)
   const height = useStore((s) => s.height)
-  const fitted = useRef('')
+  const fitted = useRef({ count: 0, size: '' })
   useEffect(() => {
     if (!initialized || !count || !width || !height) return
-    const key = `${count}`
-    if (fitted.current === key) return
+    const size = `${width}x${height}`
+    const last = fitted.current
+    if (last.count === count && (last.size === size || !follow.current)) return
     const task = requestAnimationFrame(() => {
-      fitted.current = key
+      fitted.current = { count, size }
+      follow.current = true
       void fitView()
     })
     return () => cancelAnimationFrame(task)
-  }, [fitView, initialized, width, height, count])
+  }, [fitView, follow, initialized, width, height, count])
   return null
 }
 
@@ -382,6 +385,7 @@ export default function Topology({
     [network, selection, state, statuses, status, live, connecting, path, scope],
   )
   const [nodes, setNodes, applyNodeChanges] = useNodesState<GraphNode>([])
+  const followFit = useRef(true)
   useEffect(() => {
     setNodes((previous) => {
       const byID = new Map(previous.map((node) => [node.id, node]))
@@ -795,13 +799,21 @@ export default function Topology({
                   ?.getAttribute('data-id')
                 if (target) connect(connection.fromNode.id, target)
               }}
+              onMoveStart={(event) => {
+                if (event) followFit.current = false
+              }}
               minZoom={0.15}
               maxZoom={2}
               connectionRadius={48}
             >
-              <FitLayout key={scope?.id ?? 'network'} count={flowNodes.length} />
+              <FitLayout key={scope?.id ?? 'network'} count={flowNodes.length} follow={followFit} />
               <Background color="#c9d9d4" gap={22} size={1} />
-              <Controls showInteractive={false} />
+              <Controls
+                showInteractive={false}
+                onZoomIn={() => (followFit.current = false)}
+                onZoomOut={() => (followFit.current = false)}
+                onFitView={() => (followFit.current = true)}
+              />
               <MiniMap style={{ width: 115, height: 75 }} pannable zoomable />
             </ReactFlow>
           )}
