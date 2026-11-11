@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -24,10 +25,13 @@ import (
 // resending from E; the egress takes the newest generation and discards what
 // it already has.
 //
-// An end keeps only what it sent and the far end has not yet delivered: what
-// is in flight along the chain, which the hops' stream windows bound. It has
-// no budget of its own, so one connection never waits on another's bytes.
+// An end keeps what it sent until the far end delivered it, at most a TCP
+// send buffer (Keep). Nothing else along the chain keeps bytes, and one
+// connection never waits on another's.
 const (
+	// defaultSendBuffer is an end's send buffer where the kernel's largest is
+	// unknown.
+	defaultSendBuffer = 64 << 20
 	// An end without a working chain this long resets the connection.
 	orphanLifetime = 2 * time.Minute
 	rebuildMin     = 200 * time.Millisecond
@@ -140,6 +144,11 @@ type Hop interface {
 // Keep holds the bytes an end sent from the other end's delivered offset. It
 // owns each chunk's buffer, if any, until it drops the chunk; at is where the
 // chunk starts in its buffer's Data.
+//
+// It is the connection's send buffer: once the end acknowledged bytes to its
+// socket, delivering them is the network's, and this end alone holds them
+// until the far end delivered them. As a TCP send buffer, it holds at most
+// the kernel's largest; the end reads its socket no further while it is full.
 type Keep struct {
 	mu     sync.Mutex
 	chunks [][]byte
@@ -148,10 +157,41 @@ type Keep struct {
 	base   uint64
 	end    uint64
 	closed bool
-	budget *retained // the Agent's total, or nil
+	limit  uint64
+	wake   chan struct{} // closed when bytes are released
+	budget *retained     // the Agent's total, or nil
 }
 
-func NewKeep() *Keep { return &Keep{} }
+func NewKeep() *Keep { return &Keep{limit: SendBuffer(), wake: make(chan struct{})} }
+
+// Wait returns the room left in the end's send buffer once it is at least
+// need bytes.
+func (k *Keep) Wait(ctx context.Context, need int) (int, error) {
+	for {
+		k.mu.Lock()
+		if k.closed {
+			k.mu.Unlock()
+			return math.MaxInt, nil
+		}
+		if held := k.end - k.base; held+uint64(need) <= k.limit {
+			k.mu.Unlock()
+			return int(min(k.limit-held, math.MaxInt)), nil
+		}
+		wake := k.wake
+		k.mu.Unlock()
+		select {
+		case <-wake:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	}
+}
+
+// wakeLocked lets writers waiting for room check again.
+func (k *Keep) wakeLocked() {
+	close(k.wake)
+	k.wake = make(chan struct{})
+}
 
 // Add appends data, which must not change afterwards, and becomes an owner of
 // its buffer (nil when data is not pooled), where data starts at owner.Data[at].
@@ -209,6 +249,7 @@ func (k *Keep) Release(delivered uint64) {
 		k.base = limit
 	}
 	k.budget.release(released)
+	k.wakeLocked()
 }
 
 // Kept is a chunk of kept bytes, which start at Owner.Data[At], or Owner is
@@ -254,6 +295,7 @@ func (k *Keep) close() {
 		packetbuf.ReleaseAll(k.owners)
 		k.chunks, k.owners, k.at = nil, nil, nil
 		k.base = k.end
+		k.wakeLocked()
 	}
 	k.mu.Unlock()
 }
@@ -330,6 +372,8 @@ func StartIngress(ctx context.Context, open OpenChain, counters *Counters, recor
 	}
 	e := newEnd(context.Background(), counters, records)
 	e.open = open
+	// An end, not a relay, from its first acknowledgement on.
+	hop.DeliverLocal()
 	hop.Begin(0)
 	e.mu.Lock()
 	e.useLocked(hop, 0, 0)
@@ -341,6 +385,8 @@ func StartIngress(ctx context.Context, open OpenChain, counters *Counters, recor
 func NewEgress(parent context.Context, hop Hop, askReplay func(gen uint32), counters *Counters, records *Records) *End {
 	e := newEnd(parent, counters, records)
 	e.askReplay = askReplay
+	// An end, not a relay, from its first acknowledgement on.
+	hop.DeliverLocal()
 	hop.Begin(0)
 	e.mu.Lock()
 	e.useLocked(hop, 0, 0)
@@ -360,6 +406,9 @@ func (e *End) useLocked(hop Hop, out, in uint64) {
 		e.cond.Broadcast()
 		e.mu.Unlock()
 	})
+	// What the chain delivered before it was in use, as of the bytes sent
+	// again on it, frees room for a writer waiting on a full send buffer.
+	e.keep.Release(hop.PeerDelivered())
 	e.hop, e.in, e.inRead = hop, in, 0
 	e.orphan = time.Time{}
 	e.cond.Broadcast()
@@ -369,6 +418,8 @@ func (e *End) useLocked(hop Hop, out, in uint64) {
 // runs without the lock: the writes wait for the hop's acknowledgements.
 func (e *End) resend(hop Hop, out uint64) error {
 	e.sealHop(hop)
+	// An end, not a relay, from its first acknowledgement on.
+	hop.DeliverLocal()
 	hop.Begin(out)
 	chunks, ok := e.keep.From(out)
 	if !ok {
