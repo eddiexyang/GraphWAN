@@ -2,8 +2,11 @@ import { effectiveEdges } from './groups'
 import { linkRTT, edgeView, type AgentStatus, type Network, type State } from './model'
 
 export type PathView = {
+  // Every node and edge of the paths, which ECMP may split into several.
   nodes: string[]
   edges: string[]
+  // Each path's nodes, when the path is the routes the Agents installed.
+  paths?: string[][]
   weight: number
   rtt_ms?: number
   state: 'Active' | 'Unavailable' | 'Unknown'
@@ -98,6 +101,8 @@ export function activePath(
     excluded.has(destination)
   )
     return { ...result, state: 'Unavailable', reason: 'Endpoint is unavailable.' }
+  if (useLive && !network.nodes.find((n) => n.id === source)?.wireguard)
+    return installedPath(network, source, destination, statuses, live)
   let current = source
   while (current !== destination) {
     const best = new Map<string, { cost: number; first: string }>([
@@ -176,4 +181,104 @@ export function activePath(
     state: 'Active',
     rtt_ms: measured ? rtt : undefined,
   }
+}
+
+// The most equal-cost paths shown between two nodes.
+const maxPaths = 64
+
+// installedPath follows the routes the Agents installed, hop by hop as
+// forwarding does: every equal-cost next hop under ECMP, the lowest otherwise.
+// It shows what the network uses, not a path computed here; where a node has
+// not reported its routes, it says so instead.
+function installedPath(
+  network: Network,
+  source: string,
+  destination: string,
+  statuses: AgentStatus[],
+  live: boolean,
+): PathView {
+  const name = (id: string) => network.nodes.find((n) => n.id === id)?.name ?? id
+  const status = (id: string) =>
+    statuses.find((s) => s.agent_id === network.nodes.find((n) => n.id === id)?.agent_id)
+  const all = effectiveEdges(network)
+  const edgeBetween = (a: string, b: string) =>
+    all.find((e) => (e.a === a && e.b === b) || (e.a === b && e.b === a))
+  const ecmp = network.equal_cost_paths === 'ecmp'
+  const paths: string[][] = []
+  let problem: Pick<PathView, 'state' | 'reason'> | undefined
+  let partial: string[] = [source]
+  const walk = (path: string[]) => {
+    const node = path[path.length - 1]
+    if (problem || paths.length >= maxPaths) return
+    if (node === destination) {
+      paths.push(path)
+      return
+    }
+    partial = path
+    const s = status(node)
+    if (network.nodes.find((n) => n.id === node)?.wireguard) {
+      problem = {
+        state: 'Unknown',
+        reason: `${name(node)} is a WireGuard node and routes nothing.`,
+      }
+      return
+    }
+    if (!s?.connected) {
+      problem = { state: 'Unavailable', reason: `${name(node)} is offline.` }
+      return
+    }
+    const routes = s.link_state?.routes?.[network.id]
+    if (!routes) {
+      problem = { state: 'Unknown', reason: `${name(node)} has not reported its routes.` }
+      return
+    }
+    const route = routes.find((r) => r.destination === destination)
+    if (!route) {
+      problem = { state: 'Unavailable', reason: `${name(node)} has no route.` }
+      return
+    }
+    for (const next of ecmp ? [route.next_hop, ...(route.alternates ?? [])] : [route.next_hop]) {
+      if (path.includes(next)) {
+        problem = { state: 'Unavailable', reason: `The routes loop at ${name(next)}.` }
+        return
+      }
+      if (!edgeBetween(node, next)) {
+        problem = {
+          state: 'Unavailable',
+          reason: `${name(node)} routes to ${name(next)} without an edge.`,
+        }
+        return
+      }
+      walk([...path, next])
+    }
+  }
+  walk([source])
+  const shown = problem ? [partial] : paths
+  const nodes = [...new Set(shown.flat())]
+  const edges = [
+    ...new Set(shown.flatMap((p) => p.slice(1).map((id, i) => edgeBetween(p[i], id)!.id))),
+  ]
+  const weight = shown[0]
+    .slice(1)
+    .reduce((sum, id, i) => sum + edgeBetween(shown[0][i], id)!.weight, 0)
+  const result: PathView = { nodes, edges, paths: shown, weight, state: 'Active' }
+  if (problem) return { ...result, ...problem }
+  if (paths.length >= maxPaths)
+    return { ...result, reason: `Showing the first ${maxPaths} equal-cost paths.` }
+  if (paths.length > 1) return { ...result, reason: `${paths.length} equal-cost paths (ECMP).` }
+  let rtt = 0
+  for (const id of edges) {
+    const sample = linkRTT(
+      edgeView(
+        network,
+        all.find((e) => e.id === id)!,
+        statuses,
+        {},
+        live,
+      ).active,
+    )
+    if (sample === undefined) return result
+    rtt += sample
+  }
+  return { ...result, rtt_ms: rtt }
 }

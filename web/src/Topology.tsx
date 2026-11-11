@@ -822,7 +822,9 @@ export default function Topology({
         <div className="canvas-footer">
           {path ? (
             <span className="active-path-summary" role="status">
-              {path.nodes.map((id) => network.nodes.find((n) => n.id === id)?.name).join(' → ')}
+              {(path.paths ?? [path.nodes])
+                .map((p) => p.map((id) => network.nodes.find((n) => n.id === id)?.name).join(' → '))
+                .join(' | ')}
               {' · '}
               {path.rtt_ms !== undefined && `${path.rtt_ms.toFixed(1)} ms · `}
               {path.state === 'Active'
@@ -963,27 +965,38 @@ export default function Topology({
               <small>Hop RTT sum</small>
             </div>
             {path.reason && <p className="muted">{path.reason}</p>}
-            <p className="muted">
-              {path.edges.length} hops · Weight {path.weight}
-            </p>
-            <ol className="active-path-hops">
-              {path.nodes.map((id, index) => {
-                const hop = allEdges.find((e) => e.id === path.edges[index])
-                const view = hop ? edgeView(network, hop, statuses, rates, live) : undefined
-                return (
-                  <li key={id}>
-                    <strong>{network.nodes.find((n) => n.id === id)?.name}</strong>
-                    {view && (
-                      <small>
-                        {view.state === 'Connected'
-                          ? `${view.active!.transport.toUpperCase()} · ${latencyLabel(view.active)}`
-                          : view.state}
-                      </small>
-                    )}
-                  </li>
-                )
-              })}
-            </ol>
+            {(path.paths ?? [path.nodes]).map((hops, k) => {
+              const between = (a: string, b: string) =>
+                allEdges.find((e) => (e.a === a && e.b === b) || (e.a === b && e.b === a))
+              return (
+                <div key={k}>
+                  <p className="muted">
+                    {hops.length - 1} hops · Weight{' '}
+                    {hops
+                      .slice(1)
+                      .reduce((sum, id, i) => sum + (between(hops[i], id)?.weight ?? 0), 0)}
+                  </p>
+                  <ol className="active-path-hops">
+                    {hops.map((id, index) => {
+                      const hop = index + 1 < hops.length ? between(id, hops[index + 1]) : undefined
+                      const view = hop ? edgeView(network, hop, statuses, rates, live) : undefined
+                      return (
+                        <li key={id}>
+                          <strong>{network.nodes.find((n) => n.id === id)?.name}</strong>
+                          {view && (
+                            <small>
+                              {view.state === 'Connected'
+                                ? `${view.active!.transport.toUpperCase()} · ${latencyLabel(view.active)}`
+                                : view.state}
+                            </small>
+                          )}
+                        </li>
+                      )
+                    })}
+                  </ol>
+                </div>
+              )
+            })}
             <button
               className="wide subtle"
               onClick={() =>

@@ -163,6 +163,15 @@ export type LinkStateReport = {
   origins: Record<string, Record<string, number>> // network -> origin node -> sequence
   route_hash: string
   counters: Record<string, number>
+  // The routes the Agent installed, by network; the controller keeps the last
+  // ones an Agent sent, as it sends them only when they change.
+  routes?: Record<string, InstalledRoute[]>
+}
+export type InstalledRoute = {
+  destination: string
+  next_hop: string
+  cost: number
+  alternates?: string[]
 }
 export type Snapshot = { at: string; revision: number; state?: State; agents: AgentStatus[] }
 export type Rates = Record<string, { rx: number; tx: number }>
