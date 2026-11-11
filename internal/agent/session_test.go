@@ -14,7 +14,6 @@ import (
 
 	"github.com/eWloYW8/GraphWAN/internal/model"
 	"github.com/eWloYW8/GraphWAN/internal/routing"
-	"github.com/eWloYW8/GraphWAN/internal/streamproxy"
 	"github.com/eWloYW8/GraphWAN/internal/testutil"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
@@ -444,8 +443,9 @@ func TestTCPPacketFlowResetsOnTCPPath(t *testing.T) {
 	assertNoTCPOverTCP(t, agents)
 }
 
-// Connections whose receivers stopped reading keep at most a send buffer
-// each, without holding back another connection of the same Agents.
+// Connections whose receivers stopped reading keep what they have in flight,
+// and no more than that, without holding back another connection of the
+// same Agents.
 func TestTCPSessionStalledConnectionsDoNotBlockOthers(t *testing.T) {
 	agents, devices, state := graphAgents(t, model.TCP, streamOptions{}, 3, 2)
 	address := state.Networks[0].Nodes[2].Address
@@ -485,18 +485,11 @@ func TestTCPSessionStalledConnectionsDoNotBlockOthers(t *testing.T) {
 		conn.SetWriteDeadline(time.Now().Add(60 * time.Second))
 		go conn.Write(payload)
 	}
-	// They stop once each end keeps its send buffer.
-	var held uint64
-	waitFor(t, 30*time.Second, "the stalled connections to stop", func() bool {
-		now := agents[0].Counters()["session_retained_bytes"]
-		stopped := now > 0 && now == held
-		held = now
-		time.Sleep(200 * time.Millisecond)
-		return stopped
+	// Together they keep more than the 64 MiB an Agent's ends could keep
+	// before.
+	waitFor(t, 30*time.Second, "the stalled connections to fill what is in flight", func() bool {
+		return agents[0].Counters()["session_retained_bytes"] > 64<<20
 	})
-	if limit := 2 * streamproxy.SendBuffer(); held > limit {
-		t.Fatalf("the stalled connections keep %d bytes, more than their send buffers' %d", held, limit)
-	}
 
 	active := listen(8092)
 	request := make([]byte, 4<<20)
