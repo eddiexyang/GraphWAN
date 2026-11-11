@@ -123,7 +123,7 @@ func (l *Link) sizeProbeLocked(now time.Time) bool {
 		return true
 	}
 	if !l.sizeSent.IsZero() {
-		if now.Sub(l.sizeSent) >= l.options.Timeout {
+		if now.Sub(l.movedLocked(l.sizeSent)) >= l.options.Timeout {
 			l.sizeFailed = true
 			return false
 		}

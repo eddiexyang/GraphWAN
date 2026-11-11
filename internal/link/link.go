@@ -213,8 +213,11 @@ type Link struct {
 	// that grows, the peer has received a newer message from this side:
 	// confirmed is the largest such nonce, peerHeard when it last grew, and
 	// lastPongNonce what this side's own pings confirm.
-	confirmed       uint64
-	peerHeard       time.Time
+	confirmed uint64
+	peerHeard time.Time
+	// streamSeen is when stream bytes last arrived, in Unix nanoseconds; see
+	// movedLocked.
+	streamSeen      atomic.Int64
 	lastPongNonce   uint64
 	lastTraffic     time.Time
 	sampledRX       uint64
@@ -621,14 +624,34 @@ func (l *Link) heardLocked() time.Time {
 	return l.started
 }
 
+// movedLocked is the later of t and when stream bytes last arrived. Probes
+// and their answers travel in order with the stream bytes, behind what either
+// side has queued and not yet read, so on a busy Link an answer can take
+// longer than the timeout though nothing is wrong. Arriving stream bytes show
+// that the peer is alive and that its direction works; they keep arriving only
+// while the peer receives this side's acknowledgements, which shows the other
+// direction within one stream window. So the Link's deadlines count from the
+// last stream bytes, and probes alone decide while it is idle.
+func (l *Link) movedLocked(t time.Time) time.Time {
+	if seen := l.streamSeen.Load(); seen != 0 {
+		if at := time.Unix(0, seen); at.After(t) {
+			return at
+		}
+	}
+	return t
+}
+
+// sawStream records stream bytes arriving at now.
+func (l *Link) sawStream(now time.Time) { l.streamSeen.Store(now.UnixNano()) }
+
 func (l *Link) healthyLocked(now time.Time) bool {
 	if l.ctx.Err() != nil || l.unverified {
 		return false
 	}
 	if l.options.Accepted {
-		return !l.peerPing.IsZero() && now.Sub(l.peerPing) < l.options.Timeout && now.Sub(l.heardLocked()) < l.options.Timeout
+		return !l.peerPing.IsZero() && now.Sub(l.movedLocked(l.peerPing)) < l.options.Timeout && now.Sub(l.movedLocked(l.heardLocked())) < l.options.Timeout
 	}
-	return !l.lastPong.IsZero() && (l.probeSince.IsZero() || now.Sub(l.probeSince) < l.options.Timeout)
+	return !l.lastPong.IsZero() && (l.probeSince.IsZero() || now.Sub(l.movedLocked(l.probeSince)) < l.options.Timeout)
 }
 func (l *Link) Stats() model.LinkStatus {
 	l.mu.Lock()
@@ -840,6 +863,7 @@ func (l *Link) readLoop() {
 			if !l.options.Streams.ReceiveStream(l, raw[1:], current) {
 				return
 			}
+			l.sawStream(time.Now())
 		case pingMessage:
 			if len(raw) != pingSize {
 				return
@@ -1067,17 +1091,17 @@ func (l *Link) deadlineLocked() time.Time {
 		}
 	}
 	if !l.probeSince.IsZero() {
-		earliest(l.probeSince.Add(l.options.Timeout))
+		earliest(l.movedLocked(l.probeSince).Add(l.options.Timeout))
 	}
 	if l.options.Accepted {
 		heard := l.started
 		if l.peerPing.After(heard) {
 			heard = l.peerPing
 		}
-		earliest(heard.Add(l.options.Timeout))
+		earliest(l.movedLocked(heard).Add(l.options.Timeout))
 	}
 	if l.sizeMode == sizeProbeOn && !l.sizeSent.IsZero() {
-		earliest(l.sizeSent.Add(l.options.Timeout))
+		earliest(l.movedLocked(l.sizeSent).Add(l.options.Timeout))
 	}
 	return deadline
 }
@@ -1190,7 +1214,7 @@ func (l *Link) heartbeat(now time.Time) bool {
 			l.lost++
 		}
 	}
-	if !l.probeSince.IsZero() && now.Sub(l.probeSince) >= l.options.Timeout {
+	if !l.probeSince.IsZero() && now.Sub(l.movedLocked(l.probeSince)) >= l.options.Timeout {
 		return false
 	}
 	if !l.sizeProbeLocked(now) {
@@ -1204,7 +1228,7 @@ func (l *Link) heartbeat(now time.Time) bool {
 		}
 		// Both directions must work: the dialer's pings arrive, and they
 		// confirm that this side's pongs arrive too.
-		if now.Sub(heard) >= l.options.Timeout || now.Sub(l.heardLocked()) >= l.options.Timeout {
+		if now.Sub(l.movedLocked(heard)) >= l.options.Timeout || now.Sub(l.movedLocked(l.heardLocked())) >= l.options.Timeout {
 			return false
 		}
 		interval = acceptedProbe

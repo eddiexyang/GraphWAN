@@ -249,3 +249,39 @@ func TestAcceptedLinkConfirmedByDialer(t *testing.T) {
 		}
 	}
 }
+
+// A busy Link's probes wait behind its stream bytes: while those keep
+// arriving it stays up without an answer, and once they stop it fails one
+// timeout later, on either side.
+func TestStreamBytesKeepABusyLinkUp(t *testing.T) {
+	o := (Options{}).defaults()
+	h := o.Heartbeat
+	start := time.Unix(1000, 0)
+	for _, accepted := range []bool{false, true} {
+		options := o
+		options.Accepted = accepted
+		l := &Link{ctx: context.Background(), options: options, started: start, control: make(chan []byte, 64), pending: map[uint64]time.Time{}}
+		if accepted {
+			l.receivePing(1, 0, start)
+		} else {
+			l.heartbeat(start)
+			raw := <-l.control
+			l.recordPong(binary.BigEndian.Uint64(raw[1:]), start.Add(time.Millisecond))
+		}
+		ticks := 4 * int(o.Timeout/h)
+		now := start
+		for tick := 1; tick <= ticks; tick++ {
+			now = start.Add(time.Duration(tick) * h)
+			l.sawStream(now)
+			if !l.heartbeat(now) || !l.healthyLocked(now) {
+				t.Fatalf("accepted=%v: a Link receiving stream bytes failed after %v without a probe answer", accepted, now.Sub(start))
+			}
+		}
+		if at := now.Add(o.Timeout - time.Millisecond); !l.healthyLocked(at) {
+			t.Fatalf("accepted=%v: failed before a timeout after its last stream bytes", accepted)
+		}
+		if at := now.Add(o.Timeout); l.heartbeat(at) || l.healthyLocked(at) {
+			t.Fatalf("accepted=%v: still up a timeout after its last stream bytes", accepted)
+		}
+	}
+}
