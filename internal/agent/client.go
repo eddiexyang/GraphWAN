@@ -353,6 +353,8 @@ func (c *Client) connect(parent context.Context, id model.ID, updates chan model
 	var previous model.AgentReport
 	var lastReport time.Time
 	settling := false
+	// The installed routes go to the controller once per route change.
+	sentRoutes := ""
 	// Publish discovery once per connection, including an intentionally empty set.
 	if err := c.sendEndpoints(ctx, conn); err != nil {
 		conn.CloseNow()
@@ -399,6 +401,7 @@ func (c *Client) connect(parent context.Context, id model.ID, updates chan model
 			}
 		}
 		report := c.Report()
+		routes := withoutRoutes(&report)
 		comparison := previous
 		if conn.Subprotocol() == model.DeltaSubprotocol {
 			comparison.AppliedRevision = report.AppliedRevision
@@ -423,14 +426,16 @@ func (c *Client) connect(parent context.Context, id model.ID, updates chan model
 		if !force && !settling && time.Since(lastReport) < idleReportInterval && !changed {
 			continue
 		}
+		out, sent := routedReport(report, routes, sentRoutes)
 		writeCtx, stop := context.WithTimeout(ctx, 10*time.Second)
-		err := wsjson.Write(writeCtx, conn, model.ControlMessage{Type: "ack", Report: &report})
+		err := wsjson.Write(writeCtx, conn, model.ControlMessage{Type: "ack", Report: &out})
 		stop()
 		if err != nil {
 			conn.CloseNow()
 			<-readerDone
 			return err
 		}
+		sentRoutes = sent
 		previous, lastReport = report, time.Now()
 		settling = changed
 	}

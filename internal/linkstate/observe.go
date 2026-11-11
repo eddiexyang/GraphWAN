@@ -159,6 +159,7 @@ func (e *Engine) Report() model.LinkStateReport {
 	raw, _ := json.Marshal(routes)
 	sum := sha256.Sum256(raw)
 	r.RouteHash = hex.EncodeToString(sum[:8])
+	r.Routes = routes
 	return r
 }
 

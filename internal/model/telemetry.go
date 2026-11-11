@@ -56,6 +56,10 @@ type LinkStateReport struct {
 	Origins   map[ID]map[ID]uint64 `json:"origins"` // network -> origin -> sequence
 	RouteHash string               `json:"route_hash"`
 	Counters  map[string]uint64    `json:"counters"`
+	// Routes are the routes the Agent installed, by Network, which RouteHash
+	// summarises. An Agent sends them only when RouteHash differs from its
+	// last report on the connection; the controller keeps them until then.
+	Routes map[ID][]Route `json:"routes,omitempty"`
 }
 type AgentStatus struct {
 	AgentID   ID        `json:"agent_id"`

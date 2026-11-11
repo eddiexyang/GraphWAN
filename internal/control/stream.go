@@ -287,6 +287,7 @@ func (s *Server) readAgent(ctx context.Context, conn *websocket.Conn, id model.I
 				if fullReport {
 					status.ReportedAt = status.LastSeen
 				}
+				message.Report.LinkState = keepRoutes(status.LinkState, message.Report.LinkState)
 				status.AgentReport = *message.Report
 				s.statuses[id] = status
 			}
@@ -325,6 +326,9 @@ func validateReport(snapshot model.Snapshot, report model.AgentReport) error {
 		if err := report.Resources.Validate(); err != nil {
 			return err
 		}
+	}
+	if err := validateRoutes(snapshot, report.LinkState); err != nil {
+		return err
 	}
 	edges := map[[2]model.ID]model.Edge{}
 	for _, n := range snapshot.Networks {
@@ -506,4 +510,49 @@ func (s *Server) Close() {
 	}
 	s.streamWG.Wait()
 	s.geoip.Close()
+}
+
+// keepRoutes gives a report without routes those of the previous report,
+// when they describe the same routes: an Agent sends them only when they
+// change.
+func keepRoutes(old, next *model.LinkStateReport) *model.LinkStateReport {
+	if next == nil || next.Routes != nil || old == nil || old.RouteHash != next.RouteHash {
+		return next
+	}
+	kept := *next
+	kept.Routes = old.Routes
+	return &kept
+}
+
+// validateRoutes admits reported routes whose Networks are the Agent's and
+// whose Nodes are members of them, at most one route per member.
+func validateRoutes(snapshot model.Snapshot, ls *model.LinkStateReport) error {
+	if ls == nil || ls.Routes == nil {
+		return nil
+	}
+	members := map[model.ID]map[model.ID]bool{}
+	for _, n := range snapshot.Networks {
+		nodes := map[model.ID]bool{n.Self.ID: true}
+		for _, d := range n.Directory {
+			nodes[d.NodeID] = true
+		}
+		members[n.ID] = nodes
+	}
+	for network, routes := range ls.Routes {
+		nodes, ok := members[network]
+		if !ok || len(routes) > len(nodes) {
+			return errors.New("invalid reported routes")
+		}
+		for _, r := range routes {
+			if !nodes[r.Destination] || !nodes[r.NextHop] || len(r.Alternates) >= len(nodes) {
+				return errors.New("invalid reported route")
+			}
+			for _, a := range r.Alternates {
+				if !nodes[a] {
+					return errors.New("invalid reported route")
+				}
+			}
+		}
+	}
+	return nil
 }

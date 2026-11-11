@@ -30,6 +30,33 @@ func reportChanged(previous, next model.AgentReport) bool {
 	return false
 }
 
+// withoutRoutes takes the installed routes out of a report, which carries
+// them only when they changed, and returns them.
+func withoutRoutes(r *model.AgentReport) map[model.ID][]model.Route {
+	if r.LinkState == nil {
+		return nil
+	}
+	ls := *r.LinkState
+	routes := ls.Routes
+	ls.Routes = nil
+	r.LinkState = &ls
+	return routes
+}
+
+// routedReport attaches the installed routes to a full report when they
+// differ from those last sent on the connection, and returns the route hash
+// the controller holds routes for once it is sent.
+func routedReport(report model.AgentReport, routes map[model.ID][]model.Route, sent string) (model.AgentReport, string) {
+	ls := report.LinkState
+	if ls == nil || ls.RouteHash == sent {
+		return report, sent
+	}
+	with := *ls
+	with.Routes = routes
+	report.LinkState = &with
+	return report, ls.RouteHash
+}
+
 func idleLinkMetrics(link *model.LinkStatus) {
 	link.RTTMillis, link.Loss, link.RTTMeasuredAt, link.LastHandshake = 0, 0, time.Time{}, time.Time{}
 	link.RXBytes, link.TXBytes = 0, 0
