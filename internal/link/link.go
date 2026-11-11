@@ -1076,7 +1076,11 @@ func (l *Link) healthLoop() {
 		case <-l.ctx.Done():
 			l.logDown("closed")
 			return
-		case now = <-timer.C:
+		case <-timer.C:
+			// A timer reports when it was due, not when this goroutine woke:
+			// a probe stamped with that time would add the wake-up delay to
+			// its RTT.
+			now = time.Now()
 		}
 	}
 }
