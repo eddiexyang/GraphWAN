@@ -173,14 +173,20 @@ func (k *Keep) Wait(ctx context.Context, need int) (int, error) {
 			k.mu.Unlock()
 			return math.MaxInt, nil
 		}
-		if held := k.end - k.base; held+uint64(need) <= k.limit {
-			k.mu.Unlock()
-			return int(min(k.limit-held, math.MaxInt)), nil
-		}
+		held := k.end - k.base
 		wake := k.wake
 		k.mu.Unlock()
+		var shared <-chan struct{}
+		if held+uint64(need) <= k.limit {
+			room, changed := k.budget.room(held, need)
+			if changed == nil {
+				return int(min(room, k.limit-held, math.MaxInt)), nil
+			}
+			shared = changed
+		}
 		select {
 		case <-wake:
+		case <-shared:
 		case <-ctx.Done():
 			return 0, ctx.Err()
 		}
@@ -211,8 +217,19 @@ func (k *Keep) Add(data []byte, owner *packetbuf.Buffer, at int) {
 	k.mu.Unlock()
 }
 
-// retained totals the bytes an Agent's ends keep, for its report.
-type retained struct{ bytes atomic.Uint64 }
+// retained totals the bytes an Agent's ends keep and bounds them together by
+// one send buffer, as the kernel bounds what all its TCP sockets hold: while
+// the total is below the limit an end keeps what its own buffer allows, and
+// above it only an end that holds less than its equal share keeps more. Ends
+// whose receivers stopped thus cannot grow, and no end waits on them for more
+// than its share.
+type retained struct {
+	bytes atomic.Uint64
+	mu    sync.Mutex
+	ends  int
+	limit uint64        // zero until first used: SendBuffer
+	wake  chan struct{} // closed when bytes are released or an end leaves
+}
 
 func (r *retained) add(n int) {
 	if r != nil {
@@ -221,12 +238,71 @@ func (r *retained) add(n int) {
 }
 
 func (r *retained) release(n uint64) {
-	if r != nil {
+	if r != nil && n > 0 {
 		r.bytes.Add(-n)
+		r.mu.Lock()
+		r.wakeLocked()
+		r.mu.Unlock()
 	}
 }
 
 func (r *retained) total() uint64 { return r.bytes.Load() }
+
+func (r *retained) wakeLocked() {
+	if r.wake != nil {
+		close(r.wake)
+		r.wake = nil
+	}
+}
+
+// join and leave count the ends that share the bound.
+func (r *retained) join() {
+	if r != nil {
+		r.mu.Lock()
+		r.ends++
+		r.mu.Unlock()
+	}
+}
+
+func (r *retained) leave() {
+	if r != nil {
+		r.mu.Lock()
+		r.ends--
+		r.wakeLocked()
+		r.mu.Unlock()
+	}
+}
+
+// room reports how many more bytes an end that keeps held may keep, when that
+// is at least need, and otherwise a channel closed when it may have changed.
+func (r *retained) room(held uint64, need int) (uint64, <-chan struct{}) {
+	if r == nil {
+		return math.MaxUint64, nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.limit == 0 {
+		r.limit = SendBuffer()
+	}
+	room := uint64(0)
+	if total := r.bytes.Load(); total < r.limit {
+		room = r.limit - total
+	}
+	if share := r.limit / uint64(max(r.ends, 1)); share > held {
+		room = max(room, share-held)
+	}
+	if held == 0 {
+		// An end that holds nothing always keeps its first bytes.
+		room = max(room, uint64(need))
+	}
+	if room >= uint64(need) {
+		return room, nil
+	}
+	if r.wake == nil {
+		r.wake = make(chan struct{})
+	}
+	return 0, r.wake
+}
 
 // Release drops what the other end delivered.
 func (k *Keep) Release(delivered uint64) {
@@ -296,6 +372,7 @@ func (k *Keep) close() {
 		k.chunks, k.owners, k.at = nil, nil, nil
 		k.base = k.end
 		k.wakeLocked()
+		k.budget.leave()
 	}
 	k.mu.Unlock()
 }
@@ -356,6 +433,7 @@ func newEnd(parent context.Context, counters *Counters, records *Records) *End {
 	e := &End{ctx: ctx, cancel: cancel, keep: NewKeep(), counters: counters, records: records}
 	if counters != nil {
 		e.keep.budget = &counters.retained
+		e.keep.budget.join()
 	}
 	e.cond = sync.NewCond(&e.mu)
 	go e.watchOrphan()
