@@ -48,3 +48,20 @@ func ParseAgentKey(text string) (ed25519.PublicKey, bool) {
 	}
 	return nil, false
 }
+
+// EncodeAgentPrivateKey is the configuration text form of an Agent private
+// key: its Ed25519 seed, encoded as EncodeAgentKey encodes the public key.
+func EncodeAgentPrivateKey(key ed25519.PrivateKey) string {
+	return base64.RawURLEncoding.EncodeToString(key.Seed())
+}
+
+// ParseAgentPrivateKey accepts EncodeAgentPrivateKey's form and standard
+// base64 of the seed.
+func ParseAgentPrivateKey(text string) (ed25519.PrivateKey, bool) {
+	for _, encoding := range []*base64.Encoding{base64.RawURLEncoding, base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding} {
+		if raw, err := encoding.DecodeString(text); err == nil && len(raw) == ed25519.SeedSize {
+			return ed25519.NewKeyFromSeed(raw), true
+		}
+	}
+	return nil, false
+}

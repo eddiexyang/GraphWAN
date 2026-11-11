@@ -45,8 +45,9 @@ type Cache struct {
 func OpenCache(path string) (*Cache, error) { return openCache(path, nil) }
 
 // OpenCacheWithKey opens a cache for an identity kept by the caller, for
-// example in an embedding application's configuration. A cache created for a
-// different identity is refused.
+// example in configuration. The key is the Agent's identity and the cache only
+// its state: a cache created for a different identity is cleared, and the
+// Agent registers again with the key.
 func OpenCacheWithKey(path string, identity ed25519.PrivateKey) (*Cache, error) {
 	if len(identity) != ed25519.PrivateKeySize || !bytes.Equal(ed25519.NewKeyFromSeed(identity.Seed()), identity) {
 		return nil, errors.New("invalid private identity")
@@ -69,6 +70,15 @@ func openCache(path string, identity ed25519.PrivateKey) (*Cache, error) {
 			return err
 		}
 		key := b.Get([]byte("identity"))
+		if identity != nil && key != nil && !bytes.Equal(key, identity) {
+			if err := tx.DeleteBucket(agentBucket); err != nil {
+				return err
+			}
+			if b, err = tx.CreateBucket(agentBucket); err != nil {
+				return err
+			}
+			key = nil
+		}
 		if key != nil {
 			if len(key) != ed25519.PrivateKeySize {
 				return errors.New("invalid stored private identity")
@@ -76,9 +86,6 @@ func openCache(path string, identity ed25519.PrivateKey) (*Cache, error) {
 			derived := ed25519.NewKeyFromSeed(key[:ed25519.SeedSize])
 			if !bytes.Equal(derived, key) {
 				return errors.New("corrupted private identity")
-			}
-			if identity != nil && !bytes.Equal(key, identity) {
-				return errors.New("cache belongs to a different identity")
 			}
 			cache.key = bytes.Clone(key)
 			return nil

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/x509"
 	"errors"
 	"flag"
@@ -43,6 +45,8 @@ func runAgentContext(parent context.Context, args []string) error {
 			return runAgentStatus(args[1:])
 		case "key":
 			return runAgentKey(args[1:])
+		case "genkey":
+			return runAgentGenkey(args[1:])
 		case "run":
 			args = args[1:]
 		}
@@ -70,7 +74,7 @@ func runAgentContext(parent context.Context, args []string) error {
 		}
 		*name = hostname
 	}
-	cache, err := agent.OpenCache(filepath.Join(*data, "agent.db"))
+	cache, explicit, err := openAgentCache(*data)
 	if err != nil {
 		return err
 	}
@@ -127,7 +131,12 @@ func runAgentContext(parent context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	client, err = agent.NewClient(cache, runtime, agent.Options{Updater: updater, Server: *server, ServerTransport: *serverTransport, Name: *name, EnrollmentToken: os.Getenv("GRAPHWAN_ENROLLMENT_TOKEN"), Roots: roots, Version: version})
+	token := os.Getenv("GRAPHWAN_ENROLLMENT_TOKEN")
+	if explicit {
+		// An Agent given its key registers by public key alone.
+		token = ""
+	}
+	client, err = agent.NewClient(cache, runtime, agent.Options{Updater: updater, Server: *server, ServerTransport: *serverTransport, Name: *name, EnrollmentToken: token, Roots: roots, Version: version})
 	if err != nil {
 		return err
 	}
@@ -181,7 +190,7 @@ func runAgentEnroll(args []string) error {
 			return err
 		}
 	}
-	cache, err := agent.OpenCache(filepath.Join(*data, "agent.db"))
+	cache, _, err := openAgentCache(*data)
 	if err != nil {
 		return err
 	}
@@ -196,22 +205,63 @@ func runAgentEnroll(args []string) error {
 	return nil
 }
 
+// agentPrivateKeyEnv holds an Agent's private key. It is the Agent's identity;
+// the data directory then only caches state for it.
+const agentPrivateKeyEnv = "GRAPHWAN_PRIVATE_KEY"
+
+// openAgentCache opens the data directory's cache for the key in
+// agentPrivateKeyEnv, or for the identity the cache keeps when it is unset.
+func openAgentCache(data string) (cache *agent.Cache, explicit bool, err error) {
+	path := filepath.Join(data, "agent.db")
+	text := strings.TrimSpace(os.Getenv(agentPrivateKeyEnv))
+	if text == "" {
+		cache, err = agent.OpenCache(path)
+		return cache, false, err
+	}
+	key, ok := model.ParseAgentPrivateKey(text)
+	if !ok {
+		return nil, false, errors.New(agentPrivateKeyEnv + " is not a base64 Ed25519 private key")
+	}
+	cache, err = agent.OpenCacheWithKey(path, key)
+	return cache, true, err
+}
+
 // runAgentKey prints the Agent's public key, creating its identity on first
 // use. An operator registers this key on the controller instead of enrolling.
+// With --export-private it prints the private key instead, to move an identity
+// the data directory created into agentPrivateKeyEnv.
 func runAgentKey(args []string) error {
 	fs := flag.NewFlagSet("agent key", flag.ContinueOnError)
 	data := fs.String("data-dir", "./graphwan-agent-data", "private persistent agent directory")
+	private := fs.Bool("export-private", false, "print the private key instead of the public key")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if len(fs.Args()) != 0 {
 		return errors.New("unexpected positional arguments")
 	}
-	cache, err := agent.OpenCache(filepath.Join(*data, "agent.db"))
+	cache, _, err := openAgentCache(*data)
 	if err != nil {
 		return err
 	}
 	defer cache.Close()
+	if *private {
+		fmt.Println(model.EncodeAgentPrivateKey(cache.PrivateKey()))
+		return nil
+	}
 	fmt.Println(model.EncodeAgentKey(cache.PublicKey()))
+	return nil
+}
+
+// runAgentGenkey prints a new private key for agentPrivateKeyEnv.
+func runAgentGenkey(args []string) error {
+	if len(args) != 0 {
+		return errors.New("unexpected arguments")
+	}
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return err
+	}
+	fmt.Println(model.EncodeAgentPrivateKey(key))
 	return nil
 }

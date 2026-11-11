@@ -137,6 +137,14 @@ its ID, as behind a TLS-terminating gateway. The controller accepts a signed
 challenge on direct TLS connections that present no client certificate.
 Revocation applies as for enrolled Agents.
 
+The private key can instead be kept in configuration, as the Agent's identity:
+`graphwan agent genkey` prints a new one, and `GRAPHWAN_PRIVATE_KEY` gives it to
+`graphwan agent` and `graphwan agent key`. The data directory then only caches
+state for that key; when the key changes, the Agent clears it and registers again
+by the new key, and an enrollment token is ignored. Moving an Agent to another
+machine means moving its key. `graphwan agent key --export-private` prints the
+key of an identity the data directory created, to move it into configuration.
+
 ## Agent connection
 
 ### Control transport carriers
