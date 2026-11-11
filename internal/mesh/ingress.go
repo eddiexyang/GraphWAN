@@ -59,6 +59,11 @@ func (c *bufferedConn) UseKernelWriteBacklog() error {
 	return transport.UseKernelTCPBacklog(c.Conn)
 }
 
+// ReceiveWindow reports the kernel's receive buffer of the connection.
+func (c *bufferedConn) ReceiveWindow() (int, bool) {
+	return transport.TCPReceiveWindow(c.Conn)
+}
+
 // Only the read side has buffered admission bytes. Gather writes can use the
 // underlying connection without flattening ciphertext or bypassing its writer.
 func (c *bufferedConn) WriteBuffers(parts net.Buffers) (int64, error) {
