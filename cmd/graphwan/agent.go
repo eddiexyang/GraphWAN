@@ -10,12 +10,16 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 
 	"github.com/eWloYW8/GraphWAN/internal/agent"
 	"github.com/eWloYW8/GraphWAN/internal/model"
 )
+
+// agentGCPercent is the Agent's heap growth target unless GOGC sets one.
+const agentGCPercent = 25
 
 func runAgent(args []string) error {
 	if len(args) > 0 && args[0] == "service" {
@@ -98,6 +102,12 @@ func runAgentContext(parent context.Context, args []string) error {
 	}
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+	if os.Getenv("GOGC") == "" {
+		// The heap is mostly packet buffers, which hold no pointers and cost
+		// the collector little: a smaller growth target keeps the memory the
+		// Agent takes from the host near what it holds.
+		debug.SetGCPercent(agentGCPercent)
+	}
 	if err := prepareAgentPlatform(ctx); err != nil {
 		return err
 	}
