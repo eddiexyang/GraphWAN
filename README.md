@@ -88,6 +88,10 @@ Platform setup and limitations: [Linux](docs/linux-operation.md),
 [Windows](docs/windows-operation.md), [OpenBSD](docs/openbsd-operation.md),
 [NetBSD](docs/netbsd-operation.md) and [DragonFly](docs/dragonfly-operation.md).
 
+## Known issues
+
+- **Mixed UDP and TCP transport paths:** When a multi-hop path mixes packet-only transports (`udp`, `quic`) with stream-backed transports (`tcp`, `ws`, `wss`, `grpc`), an intermediate relay converting transit TCP packets from a UDP link into a resumable TCP session seals the session with its own Agent identity (`Sealer != Source`), causing end-to-end session authentication to fail at the egress node. Keep Edges along a path on a uniform transport class (all packet-based or all stream-based).
+
 ## Development
 
 Requires Go 1.26 or newer. CI pins Go 1.26.8 and Node.js 24.21.0 in

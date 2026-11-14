@@ -38,6 +38,8 @@ type DataPlaneOptions struct {
 	// legacyStreams makes this Agent carry streams without TCP sessions, as
 	// older versions do. Tests use it for mixed versions.
 	legacyStreams bool
+	// snatDial overrides the host TCP dialer for SNAT gateway egress in tests.
+	snatDial func(ctx context.Context, network, address string) (net.Conn, error)
 }
 type runtimeState struct {
 	snapshot model.Snapshot
@@ -305,7 +307,7 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 // applyGateway leaves host rules alone when embedded; client nodes have no
 // gateway subnets.
 func (r *DataPlane) applyGateway(ctx context.Context, id model.ID, entries []gateway.Entry) error {
-	if r.options.Embedded {
+	if r.options.Embedded || r.options.snatDial != nil {
 		return nil
 	}
 	return r.gateway.Apply(ctx, id, entries)
@@ -365,7 +367,7 @@ func (r *DataPlane) Close() error {
 	r.cancel()
 	state := r.state.Swap(nil)
 	var gatewayErr error
-	if !r.options.Embedded {
+	if !r.options.Embedded && r.options.snatDial == nil {
 		gatewayErr = r.gateway.Close()
 	}
 	if gatewayErr != nil {

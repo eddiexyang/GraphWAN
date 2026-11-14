@@ -330,6 +330,9 @@ func (r *DataPlane) openTCP(ctx context.Context, request streamproxy.Request, in
 	if !local {
 		waitStreams(ctx, state, request.Network, next)
 	}
+	if local && snatDestination(state, request.Network, request.To.Addr()) {
+		return r.dialSNAT(ctx, request.To)
+	}
 	if local || !state.mesh.StreamsAvailable(request.Network, next) {
 		// The connection leaves the stream here: either it is delivered on this
 		// node, or its next Edge forwards packets. The local stack keeps the tuple.
@@ -368,6 +371,48 @@ func (r *DataPlane) openTCP(ctx context.Context, request streamproxy.Request, in
 		return nil, err
 	}
 	return s, nil
+}
+
+// dialSNAT connects to an external SNAT destination with the host kernel's TCP
+// stack instead of the userspace access stack.
+func (r *DataPlane) dialSNAT(ctx context.Context, to netip.AddrPort) (streamproxy.Conn, error) {
+	network := "tcp4"
+	if to.Addr().Is6() {
+		network = "tcp6"
+	}
+	dial := r.options.snatDial
+	if dial == nil {
+		var d net.Dialer
+		dial = d.DialContext
+	}
+	conn, err := dial(ctx, network, to.String())
+	if err != nil {
+		return nil, err
+	}
+	return &snatConn{Conn: conn.(streamproxy.Conn)}, nil
+}
+
+type snatConn struct {
+	streamproxy.Conn
+	buf []byte
+}
+
+func (c *snatConn) Abort() {
+	if tcp, ok := c.Conn.(interface{ SetLinger(int) error }); ok {
+		_ = tcp.SetLinger(0)
+	}
+	_ = c.Conn.Close()
+}
+
+func (c *snatConn) ReadInto(dst io.Writer) (int, error) {
+	if c.buf == nil {
+		c.buf = make([]byte, 64<<10)
+	}
+	n, err := c.Conn.Read(c.buf[:streamproxy.RoomOf(dst, len(c.buf))])
+	if n > 0 {
+		_, _ = dst.Write(c.buf[:n])
+	}
+	return n, err
 }
 
 // flowConn releases its flow entry when the relay closes the connection.

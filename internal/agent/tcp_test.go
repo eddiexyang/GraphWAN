@@ -283,6 +283,8 @@ type streamOptions struct {
 	withoutLinkState bool
 	// legacy Agents carry streams without TCP sessions, as older versions do.
 	legacy map[int]bool
+	// snatDial overrides the host TCP dialer for SNAT gateway egress.
+	snatDial func(ctx context.Context, network, address string) (net.Conn, error)
 }
 
 func streamAgentsWith(t *testing.T, carrier model.Transport, options streamOptions, configure ...func(*model.State)) ([3]*DataPlane, [3]*kernelTUN, model.State) {
@@ -320,6 +322,7 @@ func graphAgents(t *testing.T, carrier model.Transport, options streamOptions, c
 		configured := DataPlaneOptions{}
 		configured.BindHost = "127.0.0.1"
 		configured.legacyStreams = options.legacy[i]
+		configured.snatDial = options.snatDial
 		configured.TunnelFactory = func(cfg tunnel.Config) (tunnel.Device, error) {
 			device, err := newKernelTUN(cfg, true)
 			devices[i] = device
@@ -809,4 +812,83 @@ func TestTCPSlowReaderReceivesLastBytes(t *testing.T) {
 	if !bytes.Equal(got.Bytes(), payload) {
 		t.Fatalf("received %d of %d bytes", got.Len(), len(payload))
 	}
+}
+
+func TestTCPSNATEgressUsesHostSocket(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	var dialed atomic.Value
+	_, devices, state := streamAgentsWith(t, model.TCP, streamOptions{
+		snatDial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			dialed.Store(address)
+			var d net.Dialer
+			return d.DialContext(ctx, network, listener.Addr().String())
+		},
+	}, func(s *model.State) {
+		s.Networks[0].Nodes[2].AdvertisedSubnets = []model.AdvertisedSubnet{
+			{Prefix: netip.MustParsePrefix("0.0.0.0/0"), GatewayMode: model.GatewaySNAT},
+			{Prefix: netip.MustParsePrefix("198.51.100.128/25"), GatewayMode: model.GatewayRoute},
+		}
+	})
+	payload := bytes.Repeat([]byte("SNAT egress kernel TCP stream\n"), 8*1024)
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+		conn.SetDeadline(time.Now().Add(10 * time.Second))
+		raw, err := io.ReadAll(conn)
+		if err == nil && !bytes.Equal(raw, payload) {
+			err = errors.New("SNAT stream payload changed")
+		}
+		if err == nil {
+			_, err = conn.Write([]byte("snat ok"))
+		}
+		if err == nil {
+			err = conn.(*net.TCPConn).CloseWrite()
+		}
+		serverErr <- err
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	external := netip.MustParseAddr("198.51.100.7")
+	conn, err := gonet.DialContextTCP(ctx, devices[0].stack, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4(external.As4()), Port: 443}, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := io.ReadAll(conn)
+	if err != nil || string(reply) != "snat ok" {
+		t.Fatalf("SNAT reply %q, %v", reply, err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := dialed.Load().(string); got != "198.51.100.7:443" {
+		t.Fatalf("dialed %q, want 198.51.100.7:443", got)
+	}
+	if devices[2].writes.Load() != 0 {
+		t.Fatalf("SNAT egress wrote %d packets to egress TUN", devices[2].writes.Load())
+	}
+	// A more-specific non-SNAT prefix and overlay addresses still use the
+	// egress node's TUN/stack rather than host SNAT dialing.
+	routed := netip.MustParseAddr("198.51.100.200")
+	if err := devices[2].stack.AddProtocolAddress(1, tcpip.ProtocolAddress{Protocol: ipv4.ProtocolNumber, AddressWithPrefix: tcpip.AddressWithPrefix{Address: tcpip.AddrFrom4(routed.As4()), PrefixLen: 32}}, stack.AddressProperties{}); err != nil {
+		t.Fatal(err)
+	}
+	transferApplication(t, devices[0], devices[2], routed)
+	transferApplication(t, devices[0], devices[2], state.Networks[0].Nodes[2].Address)
 }
