@@ -98,7 +98,7 @@ func Initialize(db *store.Store, ca *pki.Authority, identity *Identity, endpoint
 		_, err = db.Update(state.Revision, func(state *model.State) error {
 			state.ClusterID = model.NewID()
 			state.ClusterCA = ca.PEM
-			state.Servers = []model.Server{{ID: identity.ID, Name: identity.Name, PublicKey: identity.Public(), Endpoints: endpoints, STUNServers: []string{"tcp://stun.nextcloud.com:443"}}}
+			state.Servers = []model.Server{{ID: identity.ID, Name: identity.Name, PublicKey: identity.Public(), Endpoints: endpoints}}
 			return nil
 		})
 		if err != nil {
