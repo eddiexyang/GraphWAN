@@ -39,7 +39,12 @@ func (r *DataPlane) discover() {
 			owner, servers = state.mesh, slices.Clone(state.snapshot.STUNServers)
 			observed, lastProbe = nil, time.Time{}
 		}
-		if len(servers) != 0 && time.Since(lastProbe) >= 20*time.Second {
+		probeInterval := 20 * time.Second
+		if len(observed) == 0 {
+			// Retry promptly at startup if the first STUN round missed or timed out.
+			probeInterval = 5 * time.Second
+		}
+		if len(servers) != 0 && time.Since(lastProbe) >= probeInterval {
 			lastProbe = time.Now()
 			ctx, cancel := context.WithTimeout(r.ctx, 3500*time.Millisecond)
 			fresh, probeErr := discovery.Observe(ctx, r.identity.Public().(ed25519.PublicKey), servers, state.mesh.STUNBinding)

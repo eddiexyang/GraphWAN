@@ -125,8 +125,18 @@ func (g *group) schedule() {
 				continue
 			}
 			extended := candidate.Port != 0
+			primaryPunch := !extended && candidate.Method == link.Punch
 			slots := g.mesh.slots
 			timeout := 12 * time.Second
+			if primaryPunch {
+				if g.mesh.punchSlots != nil {
+					slots = g.mesh.punchSlots
+				}
+				if candidate.Endpoint.Transport == model.TCP {
+					// Keep room for TLS + Noise handshakes after TCP SYN connect.
+					timeout = 16 * time.Second
+				}
+			}
 			if extended {
 				if g.extensionStart.IsZero() {
 					g.extensionStart = time.Now().Add(5 * time.Second)
@@ -186,13 +196,19 @@ func (g *group) schedule() {
 					state.next = time.Now().Add(state.delay + time.Duration(rand.Int64N(int64(30*time.Second))))
 					return
 				}
-				state.delay = min(max(time.Second, state.delay*2), 30*time.Second)
+				maxDelay := 30 * time.Second
+				if primaryPunch && !g.hasHealthyLinkLocked() {
+					// Keep NAT pinholes warm and overlap dial windows while disconnected.
+					maxDelay = 2 * time.Second
+				}
+				state.delay = min(max(time.Second, state.delay*2), maxDelay)
 				state.next = time.Now().Add(state.delay/2 + time.Duration(rand.Int64N(int64(state.delay/2)+1)))
 			}()
 		}
 		select {
 		case <-g.ctx.Done():
 			return
+		case <-g.wake:
 		case <-ticker.C:
 		}
 	}

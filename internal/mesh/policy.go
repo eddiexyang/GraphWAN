@@ -89,6 +89,25 @@ func (g *group) allowsCandidateLocked(cfg *policy, candidate link.Candidate) boo
 	return candidateConfigured(cfg, candidate, healthy)
 }
 
+func (g *group) hasHealthyLinkLocked() bool {
+	for _, l := range g.links {
+		if l.Stats().Healthy {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *group) wakeSchedule() {
+	if g.wake == nil {
+		return
+	}
+	select {
+	case g.wake <- struct{}{}:
+	default:
+	}
+}
+
 func (g *group) updatePolicy(cfg *policy) []*link.Link {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -126,15 +145,23 @@ func (g *group) updatePolicy(cfg *policy) []*link.Link {
 		delete(g.draining, id)
 		g.edge.Remove(id)
 	}
+	healthy := g.hasHealthyLinkLocked()
 	for id, state := range g.attempts {
-		if g.allowsCandidateLocked(cfg, state.candidate) {
+		if !g.allowsCandidateLocked(cfg, state.candidate) {
+			if state.cancel != nil {
+				state.cancel()
+			}
+			delete(g.attempts, id)
 			continue
 		}
-		if state.cancel != nil {
-			state.cancel()
+		// Endpoint updates (e.g. a peer's fresh STUN mapping) should trigger an
+		// immediate punch rather than waiting out a stale backoff interval.
+		if !healthy && !state.inflight && state.candidate.Method == link.Punch && state.candidate.Port == 0 {
+			state.delay = 0
+			state.next = time.Time{}
 		}
-		delete(g.attempts, id)
 	}
+	g.wakeSchedule()
 	return retired
 }
 

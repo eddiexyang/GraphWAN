@@ -156,6 +156,10 @@ func (m *Mesh) installPunch(session *transport.PunchMux) bool {
 	}
 	session.EnsureStreamCapacity(m.punchStreamCapacityLocked(session.Identity()))
 	m.punches[k] = session
+	if m.punchNotify != nil {
+		close(m.punchNotify)
+		m.punchNotify = make(chan struct{})
+	}
 	m.wg.Add(1)
 	m.mu.Unlock()
 	go func() {
@@ -219,6 +223,58 @@ func (m *Mesh) dialTCPPunch(ctx context.Context, candidate link.Candidate, ident
 	return nil, last
 }
 
+const tcpPunchConnectTimeout = 8 * time.Second
+
+func (m *Mesh) findInstalledPunchLocked(remote netip.AddrPort, identity [32]byte) *transport.PunchMux {
+	for existing, session := range m.punches {
+		if existing.remote != remote || existing.identity != identity {
+			continue
+		}
+		select {
+		case <-session.Done():
+			delete(m.punches, existing)
+		default:
+			return session
+		}
+	}
+	return nil
+}
+
+// waitForInstalledPunch waits briefly for an incoming PunchMux accepted on the
+// same 4-tuple when an outgoing DialTCPPort hits EADDRINUSE during handshake.
+func (m *Mesh) waitForInstalledPunch(ctx context.Context, remote netip.AddrPort, identity [32]byte, wait time.Duration) *transport.PunchMux {
+	deadline := time.Now().Add(wait)
+	for {
+		m.mu.Lock()
+		if session := m.findInstalledPunchLocked(remote, identity); session != nil {
+			m.mu.Unlock()
+			return session
+		}
+		notify := m.punchNotify
+		m.mu.Unlock()
+		if notify == nil {
+			return nil
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-notify:
+			timer.Stop()
+		case <-timer.C:
+			m.mu.Lock()
+			session := m.findInstalledPunchLocked(remote, identity)
+			m.mu.Unlock()
+			return session
+		}
+	}
+}
+
 func (m *Mesh) punchStream(ctx context.Context, remote netip.AddrPort, identity ed25519.PublicKey) (*transport.PunchStream, error) {
 	k := punchKey{remote: remote, identity: [32]byte(identity)}
 	m.mu.Lock()
@@ -226,17 +282,9 @@ func (m *Mesh) punchStream(ctx context.Context, remote netip.AddrPort, identity 
 		m.mu.Unlock()
 		return nil, errors.New("TCP punching is not permitted")
 	}
-	for existing, session := range m.punches {
-		if existing.remote != remote || existing.identity != k.identity {
-			continue
-		}
-		select {
-		case <-session.Done():
-			delete(m.punches, existing)
-		default:
-			m.mu.Unlock()
-			return session.Open(ctx)
-		}
+	if session := m.findInstalledPunchLocked(remote, k.identity); session != nil {
+		m.mu.Unlock()
+		return session.Open(ctx)
 	}
 	if pending := m.punchDials[k]; pending != nil {
 		m.mu.Unlock()
@@ -258,8 +306,16 @@ func (m *Mesh) punchStream(ctx context.Context, remote netip.AddrPort, identity 
 	m.punchDials[k] = pending
 	m.mu.Unlock()
 	var result *transport.PunchStream
-	conn, err := transport.DialTCPPort(ctx, m.listener.Addr().(*net.TCPAddr), remote)
-	if err == nil {
+	connectCtx, cancelConnect := context.WithTimeout(ctx, tcpPunchConnectTimeout)
+	conn, err := transport.DialTCPPort(connectCtx, m.listener.Addr().(*net.TCPAddr), remote)
+	cancelConnect()
+	var reused *transport.PunchMux
+	if err != nil && addressInUse(err) {
+		reused = m.waitForInstalledPunch(ctx, remote, k.identity, 2*time.Second)
+	}
+	if reused != nil {
+		err = nil
+	} else if err == nil {
 		var session *transport.PunchMux
 		session, err = transport.NewPunchMux(ctx, conn, m.identity.Public().(ed25519.PublicKey), m.tls, func(pub ed25519.PublicKey) bool { return pub.Equal(identity) && m.allowsTCPPunch(pub) })
 		if err == nil {
@@ -276,5 +332,8 @@ func (m *Mesh) punchStream(ctx context.Context, remote netip.AddrPort, identity 
 	delete(m.punchDials, k)
 	close(pending.done)
 	m.mu.Unlock()
+	if reused != nil {
+		return reused.Open(ctx)
+	}
 	return result, err
 }

@@ -62,6 +62,7 @@ type Mesh struct {
 	tcp            *transport.TCP
 	punches        map[punchKey]*transport.PunchMux
 	punchDials     map[punchKey]*punchDial
+	punchNotify    chan struct{}
 	webListener    *connIngress
 	webServer      *http.Server
 	grpcListener   *connIngress
@@ -78,6 +79,7 @@ type Mesh struct {
 	mu             sync.Mutex
 	groups         map[key]*group
 	slots          chan struct{}
+	punchSlots     chan struct{}
 	acceptSlots    chan struct{}
 	wg             sync.WaitGroup
 	closed         bool
@@ -97,7 +99,7 @@ func New(parent context.Context, identity ed25519.PrivateKey, host string, port 
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(parent)
-	m := &Mesh{grpcSlots: make(chan struct{}, 512), sniffSlots: make(chan struct{}, 8), pending: map[net.Conn]bool{}, identity: bytes.Clone(identity), ctx: ctx, cancel: cancel, listener: listener, udp: udp, receive: receive, groups: map[key]*group{}, slots: make(chan struct{}, 8), acceptSlots: make(chan struct{}, 8)}
+	m := &Mesh{grpcSlots: make(chan struct{}, 512), sniffSlots: make(chan struct{}, 64), pending: map[net.Conn]bool{}, identity: bytes.Clone(identity), ctx: ctx, cancel: cancel, listener: listener, udp: udp, receive: receive, groups: map[key]*group{}, slots: make(chan struct{}, 8), punchSlots: make(chan struct{}, 16), acceptSlots: make(chan struct{}, 64), punchNotify: make(chan struct{})}
 	if len(batches) > 0 {
 		m.receiveBatch = batches[0]
 	}
@@ -481,6 +483,7 @@ type group struct {
 	edge              *link.Edge
 	ctx               context.Context
 	cancel            context.CancelFunc
+	wake              chan struct{}
 	mu                sync.Mutex
 	links             map[string]*link.Link
 	linkCandidates    map[string]link.Candidate
@@ -503,7 +506,7 @@ type attempt struct {
 
 func (m *Mesh) newGroup(cfg *policy) *group {
 	ctx, cancel := context.WithCancel(m.ctx)
-	g := &group{mesh: m, edge: link.NewCoordinatedEdge(cfg.self, cfg.peer.Node.ID, cfg.peer.Edge.PreferredCandidate), ctx: ctx, cancel: cancel, links: map[string]*link.Link{}, linkCandidates: map[string]link.Candidate{}, attempts: map[string]*attempt{}, retained: map[string]link.Candidate{}}
+	g := &group{mesh: m, edge: link.NewCoordinatedEdge(cfg.self, cfg.peer.Node.ID, cfg.peer.Edge.PreferredCandidate), ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), links: map[string]*link.Link{}, linkCandidates: map[string]link.Candidate{}, attempts: map[string]*attempt{}, retained: map[string]link.Candidate{}}
 	g.policy.Store(cfg)
 	g.suppressed = map[string]string{}
 	g.retiring = map[string]*retirement{}
