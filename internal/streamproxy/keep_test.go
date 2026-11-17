@@ -2,6 +2,8 @@ package streamproxy
 
 import (
 	"context"
+	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -81,4 +83,58 @@ func TestKeepsShareOneSendBuffer(t *testing.T) {
 	if budget.total() != 0 || budget.ends != 0 {
 		t.Fatalf("closed ends left %d bytes and %d ends", budget.total(), budget.ends)
 	}
+}
+
+// An egress writing on a hop can be the first to see the peer reset after
+// the reverse direction finished. Its send buffer must be released.
+func TestPeerResetWhileWritingReleasesKeep(t *testing.T) {
+	counters := &Counters{}
+	hop := &writeResetHop{}
+	replay := make(chan struct{}, 1)
+	end := NewEgress(context.Background(), hop, func(uint32) {
+		select {
+		case replay <- struct{}{}:
+		default:
+		}
+	}, counters, nil)
+	t.Cleanup(end.Abort)
+	end.mu.Lock()
+	end.ended = true
+	end.mu.Unlock()
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := end.Write([]byte("payload"))
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		if !errors.Is(err, errAborted) {
+			t.Fatalf("write error = %v, want session reset", err)
+		}
+	case <-replay:
+		t.Fatal("peer reset caused a replay request")
+	case <-time.After(time.Second):
+		t.Fatal("write did not return after the peer reset")
+	}
+	if got := counters.retained.total(); got != 0 {
+		t.Fatalf("reset left %d bytes retained", got)
+	}
+}
+
+type writeResetHop struct {
+	chunkHop
+	keep *Keep
+}
+
+func (h *writeResetHop) SetRetention(keep *Keep) { h.keep = keep }
+func (*writeResetHop) Aborted() bool             { return true }
+
+func (h *writeResetHop) ReadFrom(r io.Reader) (int64, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return 0, err
+	}
+	h.keep.Add(data, nil, 0)
+	return int64(len(data)), io.ErrClosedPipe
 }
