@@ -25,6 +25,7 @@ import (
 type native struct {
 	file                *os.File
 	device              wgtun.Device
+	index               int
 	readBuffers         [][]byte
 	readSizes           []int
 	offloadReadBuffer   [10 + 65535]byte
@@ -80,6 +81,7 @@ func Open(config Config) (Device, error) {
 	if err != nil {
 		return nil, err
 	}
+	device.index = link.Attrs().Index
 	if err := netlink.LinkSetMTU(link, config.MTU); err != nil {
 		return nil, err
 	}
@@ -110,6 +112,7 @@ func Open(config Config) (Device, error) {
 	return device, nil
 }
 func (d *native) Name() string          { return d.config.Name }
+func (d *native) Index() int            { return d.index }
 func (d *native) Configuration() Config { return d.config }
 
 // Read retains compatibility with single-packet users while draining every

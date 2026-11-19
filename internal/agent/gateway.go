@@ -47,3 +47,16 @@ func snatDestination(state *runtimeState, network model.ID, addr netip.Addr) boo
 	}
 	return false
 }
+
+func ownedSelfAddress(state *runtimeState, addr netip.Addr) bool {
+	if state == nil || !addr.IsValid() {
+		return false
+	}
+	addr = addr.Unmap()
+	for _, self := range state.selfAddress {
+		if self == addr {
+			return true
+		}
+	}
+	return false
+}
