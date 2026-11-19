@@ -5,6 +5,7 @@ import (
 
 	"github.com/eWloYW8/GraphWAN/internal/gateway"
 	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eWloYW8/GraphWAN/internal/packet"
 )
 
 func gatewayEntries(state *runtimeState) []gateway.Entry {
@@ -44,6 +45,22 @@ func snatDestination(state *runtimeState, network model.ID, addr netip.Addr) boo
 			}
 		}
 		return mode == model.GatewaySNAT
+	}
+	return false
+}
+
+// crossNetwork reports whether a packet delivered from network is addressed to
+// another network this Agent belongs to. The kernel would route it from one TUN
+// into the other, so a gateway never hands such packets to the host.
+func crossNetwork(state *runtimeState, network model.ID, raw []byte) bool {
+	info, err := packet.InspectAddresses(raw)
+	if err != nil {
+		return false
+	}
+	for _, n := range state.snapshot.Networks {
+		if n.ID != network && n.CIDR.Contains(info.Destination) {
+			return true
+		}
 	}
 	return false
 }

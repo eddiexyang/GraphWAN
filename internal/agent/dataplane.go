@@ -434,6 +434,9 @@ func (r *DataPlane) deliver(ctx context.Context, network model.ID, raw []byte) e
 	if r.replayRequest(state, network, raw) || r.e2eRequest(state, network, raw) {
 		return nil
 	}
+	if crossNetwork(state, network, raw) {
+		return forwarding.ErrDestination
+	}
 	device := state.devices[network]
 	if device == nil {
 		return forwarding.ErrNetwork
@@ -556,10 +559,10 @@ func (r *DataPlane) deliverBatch(ctx context.Context, network model.ID, packets 
 		return errors.New("agent runtime is not configured")
 	}
 	// Replay requests and end-to-end handshakes of this Agent's TCP sessions
-	// never reach the TUN.
+	// never reach the TUN, nor do packets addressed to another network.
 	var kept [][]byte
 	for i, raw := range packets {
-		if r.replayRequest(state, network, raw) || r.e2eRequest(state, network, raw) {
+		if r.replayRequest(state, network, raw) || r.e2eRequest(state, network, raw) || crossNetwork(state, network, raw) {
 			if kept == nil {
 				kept = append(make([][]byte, 0, len(packets)), packets[:i]...)
 			}
