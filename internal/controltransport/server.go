@@ -77,11 +77,12 @@ func NewServer(listener net.Listener, handler http.Handler, config *tls.Config) 
 }
 
 // plainPath lists what a TLS-terminating gateway may forward in plaintext:
-// public assets, token enrollment and Agent routes that then require a signed
-// challenge. Management APIs stay TLS-only.
+// public assets, token enrollment and Agent routes (including registration by
+// public key) that then require a signed challenge. Management APIs stay
+// TLS-only.
 func plainPath(path string) bool {
 	switch path {
-	case "/api/v1/enroll", "/api/v1/agent/control", model.AgentChallengePath:
+	case "/api/v1/enroll", "/api/v1/agent/control", model.AgentChallengePath, model.AgentRegistrationPath:
 		return true
 	}
 	return strings.HasPrefix(path, "/assets/") || strings.HasPrefix(path, "/api/v1/agent/update/")

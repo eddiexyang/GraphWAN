@@ -97,6 +97,7 @@ func TestPlainHTTPAgentRoutesOnly(t *testing.T) {
 		"/api/v1/enroll":                    http.StatusTeapot,
 		"/api/v1/agent/challenge":           http.StatusTeapot,
 		"/api/v1/agent/control":             http.StatusTeapot,
+		"/api/v1/agent/registration":        http.StatusTeapot,
 		"/api/v1/agent/update/latest":       http.StatusTeapot,
 		"/api/v1/state":                     http.StatusUpgradeRequired,
 		"/api/v1/login":                     http.StatusUpgradeRequired,
