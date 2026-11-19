@@ -232,6 +232,9 @@ func (e *Engine) forward(request *tcp.ForwarderRequest) {
 	endpoint, tcpErr := request.CreateEndpoint(&queue)
 	request.Complete(tcpErr != nil)
 	if tcpErr != nil {
+		if abort, ok := remote.(interface{ Abort() }); ok {
+			abort.Abort()
+		}
 		return
 	}
 	local = &accessConn{TCPConn: gonet.NewTCPConn(&queue, endpoint), endpoint: endpoint, queue: &queue}

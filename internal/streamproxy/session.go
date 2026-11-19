@@ -828,6 +828,11 @@ func (e *End) ReadFrom(src io.Reader) (int64, error) {
 		if len(leftover) > 0 {
 			if _, err := hop.Write(leftover); err != nil {
 				e.mu.Lock()
+				if hop.Aborted() {
+					e.finishLocked(errAborted)
+					e.mu.Unlock()
+					return total, errAborted
+				}
 				e.leftover = append(leftover, e.leftover...)
 				e.failLocked(hop)
 				e.mu.Unlock()
@@ -848,6 +853,11 @@ func (e *End) ReadFrom(src io.Reader) (int64, error) {
 			return total, local.err
 		}
 		e.mu.Lock()
+		if hop.Aborted() {
+			e.finishLocked(errAborted)
+			e.mu.Unlock()
+			return total, errAborted
+		}
 		e.failLocked(hop)
 		e.mu.Unlock()
 	}
@@ -1093,7 +1103,8 @@ func (e *End) received(hop Hop, n int, err error) error {
 }
 
 // Close ends the session once the other end delivered all this end sent;
-// until then a failed chain is still rebuilt.
+// until then a failed chain is still rebuilt. Closing before both directions
+// ended aborts the session so an unstarted or abandoned end never leaks.
 func (e *End) Close() error {
 	e.mu.Lock()
 	if e.closed {
@@ -1101,6 +1112,11 @@ func (e *End) Close() error {
 		return nil
 	}
 	e.closed = true
+	if !e.eof || !e.ended {
+		e.finishLocked(errAborted)
+		e.mu.Unlock()
+		return nil
+	}
 	e.mu.Unlock()
 	go func() {
 		e.mu.Lock()
