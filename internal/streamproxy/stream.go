@@ -150,6 +150,10 @@ func During(ctx context.Context, c Conn, operation func() error) error {
 // Relay propagates write-half closes so a server can respond after request EOF.
 // Errors and cancellation interrupt both directions; there is no byte replay.
 func Relay(ctx context.Context, a, b Conn) error {
+	return relay(ctx, a, b, nil)
+}
+
+func relay(ctx context.Context, a, b Conn, onError func(error)) error {
 	closeBoth := sync.OnceFunc(func() { a.Close(); b.Close() })
 	abortBoth := func() {
 		for _, conn := range []Conn{a, b} {
@@ -169,6 +173,9 @@ func Relay(ctx context.Context, a, b Conn) error {
 			err = dst.CloseWrite()
 		}
 		if err != nil {
+			if onError != nil {
+				onError(err)
+			}
 			abortBoth()
 		}
 		errs <- err

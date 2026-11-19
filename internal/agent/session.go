@@ -217,7 +217,7 @@ func (r *DataPlane) startIngress(ctx context.Context, request streamproxy.Reques
 				r.sessions.mu.Unlock()
 			}
 		}
-		hop, next, at, err := r.openChain(ctx, chain, "")
+		hop, next, at, err := r.openChain(ctx, chain, "", nil)
 		if err == nil {
 			r.sessions.mu.Lock()
 			entry.next = next
@@ -237,7 +237,7 @@ func (r *DataPlane) startIngress(ctx context.Context, request streamproxy.Reques
 // over TCP, the chain cannot continue. An Edge without a Link yet is retried.
 // openChain opens the next hop of a chain and returns it with the offset from
 // which it carries the downstream bytes: the egress's answer to At, or Down.
-func (r *DataPlane) openChain(ctx context.Context, request streamproxy.Request, upstream model.ID) (streamproxy.Hop, model.ID, uint64, error) {
+func (r *DataPlane) openChain(ctx context.Context, request streamproxy.Request, upstream model.ID, upstreamHop streamproxy.Hop) (streamproxy.Hop, model.ID, uint64, error) {
 	state := r.state.Load()
 	if state == nil {
 		return nil, "", 0, net.ErrClosed
@@ -265,6 +265,12 @@ func (r *DataPlane) openChain(ctx context.Context, request streamproxy.Request, 
 		s.Close()
 		return nil, "", 0, streamproxy.ErrLegacy
 	}
+	if !streamproxy.TrackOpeningHop(ctx, hop) {
+		return nil, "", 0, net.ErrClosed
+	}
+	if upstreamHop != nil {
+		defer streamproxy.WatchOpeningUpstream(upstreamHop, hop)()
+	}
 	request.Hops--
 	from := request.Down
 	err = streamproxy.During(ctx, hop, func() error {
@@ -288,6 +294,9 @@ func (r *DataPlane) openChain(ctx context.Context, request streamproxy.Request, 
 		return streamproxy.ResponseError(response[0])
 	})
 	if err != nil {
+		if hop.Aborted() {
+			return nil, "", 0, streamproxy.ErrSessionReset
+		}
 		hop.Abort()
 		return nil, "", 0, err
 	}
@@ -365,8 +374,12 @@ func (r *DataPlane) acceptChain(parent, ctx context.Context, network, remote mod
 		r.acceptEgress(parent, ctx, network, remote, hop, request)
 		return
 	}
-	down, next, from, err := r.openChain(ctx, request, remote)
+	down, next, from, err := r.openChain(ctx, request, remote, hop)
 	if err != nil {
+		if errors.Is(err, streamproxy.ErrSessionReset) {
+			hop.AbortSession()
+			return
+		}
 		refuse(ctx, s, chainStatus(err))
 		return
 	}
@@ -374,7 +387,11 @@ func (r *DataPlane) acceptChain(parent, ctx context.Context, network, remote mod
 		_, err := hop.Write(chainAnswer(request, from))
 		return err
 	}); err != nil {
-		down.Abort()
+		if hop.Aborted() {
+			down.AbortSession()
+		} else {
+			down.Abort()
+		}
 		return
 	}
 	hop.Begin(request.Up)
