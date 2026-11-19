@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/eWloYW8/GraphWAN/internal/model"
 )
 
 // Exercise real probe/liveness state transitions with a clock supplied by the
@@ -282,6 +284,34 @@ func TestStreamBytesKeepABusyLinkUp(t *testing.T) {
 		}
 		if at := now.Add(o.Timeout); l.heartbeat(at) || l.healthyLocked(at) {
 			t.Fatalf("accepted=%v: still up a timeout after its last stream bytes", accepted)
+		}
+	}
+}
+
+// A TCP-backed Link survives one retransmission of a pong: the confirmation
+// it waits for arrives a round trip, one of the dialer's heartbeats and a
+// retransmission timeout after the last one. It still fails once that passes.
+func TestTCPLinkToleratesOneRetransmission(t *testing.T) {
+	o := Options{Heartbeat: 167 * time.Millisecond, Timeout: 500 * time.Millisecond, Accepted: true}
+	rtt := 140 * time.Millisecond
+	start := time.Unix(1000, 0)
+	for _, transport := range []model.Transport{model.TCP, model.UDP} {
+		l := &Link{ctx: context.Background(), options: o, info: Info{Transport: transport}, control: make(chan []byte, 8), pending: map[uint64]time.Time{}, started: start, rtt: rtt}
+		l.receivePing(1, 1, start)
+		stalled := start.Add(2*rtt + tcpRTOMin + o.Heartbeat - time.Millisecond)
+		alive := l.heartbeat(stalled) && l.healthyLocked(stalled)
+		if alive != (transport == model.TCP) {
+			t.Fatalf("%s: alive %v after a retransmitted pong", transport, alive)
+		}
+		if transport != model.TCP {
+			continue
+		}
+		l.receivePing(2, 2, stalled)
+		if !l.healthyLocked(stalled.Add(time.Millisecond)) {
+			t.Fatal("tcp: late confirmation did not keep the link")
+		}
+		if dead := stalled.Add(l.timeoutLocked()); l.heartbeat(dead) || l.healthyLocked(dead) {
+			t.Fatal("tcp: link outlived its timeout without confirmations")
 		}
 	}
 }

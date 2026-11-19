@@ -63,6 +63,8 @@ const (
 	tcpQueueBytes = 256 * 1024
 	// acceptedProbe paces an accepted Link's own RTT samples.
 	acceptedProbe = 30 * time.Second
+	// tcpRTOMin is Linux's minimum TCP retransmission timeout.
+	tcpRTOMin = 200 * time.Millisecond
 	// pingSize is a ping: its nonce, then the last pong nonce its sender
 	// received.
 	pingSize = 17
@@ -644,14 +646,28 @@ func (l *Link) movedLocked(t time.Time) time.Time {
 // sawStream records stream bytes arriving at now.
 func (l *Link) sawStream(now time.Time) { l.streamSeen.Store(now.UnixNano()) }
 
+// timeoutLocked is the Link's health timeout. A TCP-backed Link loses no
+// message: a dropped segment stalls it until the kernel retransmits, an RTT
+// plus at least tcpRTOMin later. The exchange a deadline waits for takes a
+// round trip plus up to one of the dialer's heartbeats, so one retransmission
+// on top of it must not fail the Link, even when that exceeds the Network's
+// failure detection.
+func (l *Link) timeoutLocked() time.Duration {
+	if l.rtt == 0 || !l.tcpBacked() {
+		return l.options.Timeout
+	}
+	return max(l.options.Timeout, 2*l.rtt+tcpRTOMin+l.options.Heartbeat)
+}
+
 func (l *Link) healthyLocked(now time.Time) bool {
 	if l.ctx.Err() != nil || l.unverified {
 		return false
 	}
+	timeout := l.timeoutLocked()
 	if l.options.Accepted {
-		return !l.peerPing.IsZero() && now.Sub(l.movedLocked(l.peerPing)) < l.options.Timeout && now.Sub(l.movedLocked(l.heardLocked())) < l.options.Timeout
+		return !l.peerPing.IsZero() && now.Sub(l.movedLocked(l.peerPing)) < timeout && now.Sub(l.movedLocked(l.heardLocked())) < timeout
 	}
-	return !l.lastPong.IsZero() && (l.probeSince.IsZero() || now.Sub(l.movedLocked(l.probeSince)) < l.options.Timeout)
+	return !l.lastPong.IsZero() && (l.probeSince.IsZero() || now.Sub(l.movedLocked(l.probeSince)) < timeout)
 }
 func (l *Link) Stats() model.LinkStatus {
 	l.mu.Lock()
@@ -1094,18 +1110,19 @@ func (l *Link) deadlineLocked() time.Time {
 			deadline = t
 		}
 	}
+	timeout := l.timeoutLocked()
 	if !l.probeSince.IsZero() {
-		earliest(l.movedLocked(l.probeSince).Add(l.options.Timeout))
+		earliest(l.movedLocked(l.probeSince).Add(timeout))
 	}
 	if l.options.Accepted {
 		heard := l.started
 		if l.peerPing.After(heard) {
 			heard = l.peerPing
 		}
-		earliest(l.movedLocked(heard).Add(l.options.Timeout))
+		earliest(l.movedLocked(heard).Add(timeout))
 	}
 	if l.sizeMode == sizeProbeOn && !l.sizeSent.IsZero() {
-		earliest(l.movedLocked(l.sizeSent).Add(l.options.Timeout))
+		earliest(l.movedLocked(l.sizeSent).Add(timeout))
 	}
 	return deadline
 }
@@ -1212,13 +1229,14 @@ func (l *Link) heartbeat(now time.Time) bool {
 		l.sendPathLocked()
 		l.lastPath = now
 	}
+	timeout := l.timeoutLocked()
 	for seq, sent := range l.pending {
-		if now.Sub(sent) >= l.options.Timeout {
+		if now.Sub(sent) >= timeout {
 			delete(l.pending, seq)
 			l.lost++
 		}
 	}
-	if !l.probeSince.IsZero() && now.Sub(l.movedLocked(l.probeSince)) >= l.options.Timeout {
+	if !l.probeSince.IsZero() && now.Sub(l.movedLocked(l.probeSince)) >= timeout {
 		return false
 	}
 	if !l.sizeProbeLocked(now) {
@@ -1232,7 +1250,7 @@ func (l *Link) heartbeat(now time.Time) bool {
 		}
 		// Both directions must work: the dialer's pings arrive, and they
 		// confirm that this side's pongs arrive too.
-		if now.Sub(l.movedLocked(heard)) >= l.options.Timeout || now.Sub(l.movedLocked(l.heardLocked())) >= l.options.Timeout {
+		if now.Sub(l.movedLocked(heard)) >= timeout || now.Sub(l.movedLocked(l.heardLocked())) >= timeout {
 			return false
 		}
 		interval = acceptedProbe

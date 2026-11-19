@@ -549,7 +549,8 @@ const legacyHeartbeat = 2 * time.Second
 // failover time: a silent Link fails within its timeout plus one heartbeat,
 // two thirds of it, which leaves the last third to reroute and rebuild
 // sessions. An acceptor also allows three of the dialer's heartbeats, so a
-// dialer with a slower setting is not taken for failed.
+// dialer with a slower setting is not taken for failed. A TCP-backed Link
+// stretches the timeout to its RTT; see Link.timeoutLocked.
 func linkTiming(detection time.Duration, caps linkCaps) (heartbeat, timeout time.Duration) {
 	timeout = detection / 2
 	if caps.accepted {
