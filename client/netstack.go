@@ -12,6 +12,7 @@ import (
 	"github.com/eddiexyang/graphnet/internal/tunnel"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
@@ -19,6 +20,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
+	"gvisor.dev/gvisor/pkg/waiter"
 )
 
 // netstack stands in for a TUN interface. The embedding application's
@@ -90,6 +92,59 @@ func (n *netstack) protocol() tcpip.NetworkProtocolNumber {
 		return ipv6.ProtocolNumber
 	}
 	return ipv4.ProtocolNumber
+}
+
+// A bound endpoint reserves a source port common to streams and packet TCP.
+// Only the packet route connects the endpoint and starts a TCP handshake.
+type boundTCP struct {
+	tcpip.Endpoint
+	queue waiter.Queue
+	port  uint16
+}
+
+func (n *netstack) bindTCP() (*boundTCP, error) {
+	b := &boundTCP{}
+	endpoint, err := n.stack.NewEndpoint(tcp.ProtocolNumber, n.protocol(), &b.queue)
+	if err != nil {
+		return nil, errors.New(err.String())
+	}
+	b.Endpoint = endpoint
+	if err := endpoint.Bind(fullAddress(netip.AddrPortFrom(n.address(), 0))); err != nil {
+		endpoint.Close()
+		return nil, errors.New(err.String())
+	}
+	address, err := endpoint.GetLocalAddress()
+	if err != nil {
+		endpoint.Close()
+		return nil, errors.New(err.String())
+	}
+	b.port = address.Port
+	return b, nil
+}
+
+func (b *boundTCP) connect(ctx context.Context, destination netip.AddrPort) (net.Conn, error) {
+	if err := ctx.Err(); err != nil {
+		b.Close()
+		return nil, err
+	}
+	entry, ready := waiter.NewChannelEntry(waiter.WritableEvents)
+	b.queue.EventRegister(&entry)
+	defer b.queue.EventUnregister(&entry)
+	err := b.Connect(fullAddress(destination))
+	if _, pending := err.(*tcpip.ErrConnectStarted); pending {
+		select {
+		case <-ctx.Done():
+			b.Close()
+			return nil, ctx.Err()
+		case <-ready:
+			err = b.LastError()
+		}
+	}
+	if err != nil {
+		b.Close()
+		return nil, &net.OpError{Op: "connect", Net: "tcp", Addr: net.TCPAddrFromAddrPort(destination), Err: errors.New(err.String())}
+	}
+	return gonet.NewTCPConn(&b.queue, b.Endpoint), nil
 }
 
 // Read returns the next packet the stack sends, for the data plane.

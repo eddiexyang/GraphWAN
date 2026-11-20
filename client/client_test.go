@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -38,7 +39,7 @@ type clientNetwork struct {
 	port     string
 }
 
-func startClientNetwork(t *testing.T, ctx context.Context, clientKey ed25519.PrivateKey, initialKey ed25519.PublicKey) *clientNetwork {
+func startClientNetwork(t *testing.T, ctx context.Context, clientKey ed25519.PrivateKey, initialKey ed25519.PublicKey, carrier model.Transport) *clientNetwork {
 	t.Helper()
 	state := testutil.Topology()
 	state.Agents = state.Agents[:4]
@@ -48,17 +49,17 @@ func startClientNetwork(t *testing.T, ctx context.Context, clientKey ed25519.Pri
 	state.Agents[3].PublicKey = clientKey.Public().(ed25519.PublicKey)
 	state.Agents[3].Endpoints = []model.Endpoint{}
 	for i := range 3 {
-		listener, err := net.Listen("tcp4", "127.0.0.1:0")
+		socket, err := net.Listen("tcp4", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
 		}
-		port := uint16(listener.Addr().(*net.TCPAddr).Port)
-		listener.Close()
+		port := uint16(socket.Addr().(*net.TCPAddr).Port)
+		socket.Close()
 		state.Agents[i].ListenPort = port
-		state.Agents[i].Endpoints = []model.Endpoint{{ID: testutil.ID(30 + i), Transport: model.TCP, Source: model.Manual, URL: fmt.Sprintf("tcp://127.0.0.1:%d", port)}}
+		state.Agents[i].Endpoints = []model.Endpoint{{ID: testutil.ID(30 + i), Transport: carrier, Source: model.Manual, URL: fmt.Sprintf("%s://127.0.0.1:%d", carrier, port)}}
 	}
 	for i := range n.Edges {
-		n.Edges[i].Transports = []model.Transport{model.TCP}
+		n.Edges[i].Transports = []model.Transport{carrier}
 	}
 	if err := state.Validate(); err != nil {
 		t.Fatal(err)
@@ -159,13 +160,19 @@ func (cn *clientNetwork) serveEcho(t *testing.T, node int, port uint16) {
 // D is a client node attached to A and C, registered by public key: it gets
 // its configuration from a real controller and reaches services on B and C.
 func TestClientReachesServicesThroughTheNetwork(t *testing.T) {
+	for _, carrier := range []model.Transport{model.TCP, model.UDP} {
+		t.Run(string(carrier), func(t *testing.T) { testClientReachesServices(t, carrier) })
+	}
+}
+
+func testClientReachesServices(t *testing.T, carrier model.Transport) {
 	_, clientKey, _ := ed25519.GenerateKey(rand.Reader)
 	// The controller first knows another key for D, so the client's first
 	// registration fails; it must recover once the right key is registered.
 	_, otherKey, _ := ed25519.GenerateKey(rand.Reader)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cn := startClientNetwork(t, ctx, clientKey, otherKey.Public().(ed25519.PublicKey))
+	cn := startClientNetwork(t, ctx, clientKey, otherKey.Public().(ed25519.PublicKey), carrier)
 	state, stacks, db, ca, port := cn.state, cn.stacks, cn.db, cn.ca, cn.port
 	n := &state.Networks[0]
 
@@ -206,11 +213,34 @@ func TestClientReachesServicesThroughTheNetwork(t *testing.T) {
 		if err != nil {
 			t.Fatalf("dial node %d: %v", target, err)
 		}
+		if _, packetTCP := conn.(*gonet.TCPConn); packetTCP != (carrier == model.UDP) {
+			t.Fatalf("dial node %d on %s returned %T", target, carrier, conn)
+		}
+		if err := conn.SetReadDeadline(time.Now().Add(-time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		var timeout net.Error
+		if _, err := conn.Read(make([]byte, 1)); !errors.As(err, &timeout) || !timeout.Timeout() {
+			t.Fatalf("read deadline: %v", err)
+		}
 		conn.SetDeadline(time.Now().Add(20 * time.Second))
-		go conn.Write(payload)
+		done := make(chan error, 1)
+		go func() {
+			_, err := conn.Write(payload)
+			if err == nil {
+				err = conn.(interface{ CloseWrite() error }).CloseWrite()
+			}
+			done <- err
+		}()
 		got := make([]byte, len(payload))
 		if _, err := io.ReadFull(conn, got); err != nil || !bytes.Equal(got, payload) {
 			t.Fatalf("echo from node %d: %v", target, err)
+		}
+		if _, err := conn.Read(make([]byte, 1)); err != io.EOF {
+			t.Fatalf("echo from node %d did not half-close: %v", target, err)
+		}
+		if err := <-done; err != nil {
+			t.Fatalf("send to node %d: %v", target, err)
 		}
 		conn.Close()
 	}
@@ -268,7 +298,7 @@ func TestClientConnectionFollowsRouteChange(t *testing.T) {
 	_, clientKey, _ := ed25519.GenerateKey(rand.Reader)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cn := startClientNetwork(t, ctx, clientKey, clientKey.Public().(ed25519.PublicKey))
+	cn := startClientNetwork(t, ctx, clientKey, clientKey.Public().(ed25519.PublicKey), model.TCP)
 	c, err := Start(ctx, Config{
 		Server:     "https://controller.graphnet.test:" + cn.port,
 		CA:         cn.ca.PEM,

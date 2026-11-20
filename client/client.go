@@ -7,7 +7,7 @@
 // controller, discovers and reports its endpoints, and reaches its peers with
 // every transport, including NAT hole punching. It differs from an Agent only
 // in what the embedding application does not need: it has no TUN interface
-// (connections live in a user-space stack), manages no host routes or gateway
+// (packet connections use a user-space stack), manages no host routes or gateway
 // rules, accepts no inbound connections, and never carries other nodes'
 // traffic. The controller marks its node as a client.
 package client
@@ -31,6 +31,7 @@ import (
 	"github.com/eddiexyang/graphnet/internal/forwarding"
 	"github.com/eddiexyang/graphnet/internal/model"
 	"github.com/eddiexyang/graphnet/internal/sockets"
+	"github.com/eddiexyang/graphnet/internal/streamproxy"
 	"github.com/eddiexyang/graphnet/internal/tunnel"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )
@@ -188,31 +189,31 @@ func (t *trackedStack) Close() error {
 
 // route waits for the configuration that routes destination, and returns the
 // stack of that Network.
-func (c *Client) route(ctx context.Context, destination netip.Addr) (*netstack, error) {
+func (c *Client) route(ctx context.Context, destination netip.Addr) (model.ID, *netstack, error) {
 	delay := 10 * time.Millisecond
 	for {
-		_, local, err := c.runtime.NetworkFor(destination.Unmap())
+		network, local, err := c.runtime.NetworkFor(destination.Unmap())
 		if err == nil {
 			c.mu.Lock()
 			n := c.stacks[local]
 			c.mu.Unlock()
 			if n != nil {
-				return n, nil
+				return network, n, nil
 			}
 		} else if !errors.Is(err, agent.ErrNotConfigured) && !errors.Is(err, forwarding.ErrUnreachable) {
 			// No node owns the destination: fail at once so the application
 			// can choose another way. A missing route is waited for, as
 			// routes converge after start and after Link changes.
-			return nil, fmt.Errorf("%w: %s: %v", ErrUnreachable, destination, err)
+			return "", nil, fmt.Errorf("%w: %s: %v", ErrUnreachable, destination, err)
 		}
 		select {
 		case <-ctx.Done():
 			if err == nil {
 				err = ctx.Err()
 			}
-			return nil, fmt.Errorf("graphnet: waiting for a route to %s: %w", destination, err)
+			return "", nil, fmt.Errorf("graphnet: waiting for a route to %s: %w", destination, err)
 		case <-c.ctx.Done():
-			return nil, net.ErrClosed
+			return "", nil, net.ErrClosed
 		case <-time.After(delay):
 		}
 		delay = min(2*delay, 250*time.Millisecond)
@@ -222,21 +223,37 @@ func (c *Client) route(ctx context.Context, destination netip.Addr) (*netstack, 
 // DialTCP connects to destination through the network.
 func (c *Client) DialTCP(ctx context.Context, destination netip.AddrPort) (net.Conn, error) {
 	destination = netip.AddrPortFrom(destination.Addr().Unmap(), destination.Port())
-	n, err := c.route(ctx, destination.Addr())
+	network, n, err := c.route(ctx, destination.Addr())
 	if err != nil {
 		return nil, err
 	}
 	if n.address().Is4() != destination.Addr().Is4() {
 		return nil, fmt.Errorf("%w: %s is not in the network's address family", ErrUnreachable, destination)
 	}
-	return gonet.DialContextTCP(ctx, n.stack, fullAddress(destination), n.protocol())
+	endpoint, err := n.bindTCP()
+	if err != nil {
+		return nil, err
+	}
+	source := netip.AddrPortFrom(n.address(), endpoint.port)
+	stream, err := c.runtime.OpenEmbeddedTCP(ctx, network, source, destination)
+	if err != nil {
+		endpoint.Close()
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		return nil, &net.OpError{Op: "connect", Net: "tcp", Source: net.TCPAddrFromAddrPort(source), Addr: net.TCPAddrFromAddrPort(destination), Err: err}
+	}
+	if stream == nil {
+		return endpoint.connect(ctx, destination)
+	}
+	return streamproxy.ClientConn(c.ctx, stream, source, destination, endpoint.Close), nil
 }
 
 // ListenUDP returns an unconnected UDP socket in the Network that routes
 // destination. It can send to and receive from any address of that Network.
 func (c *Client) ListenUDP(ctx context.Context, destination netip.Addr) (net.PacketConn, error) {
 	destination = destination.Unmap()
-	n, err := c.route(ctx, destination)
+	_, n, err := c.route(ctx, destination)
 	if err != nil {
 		return nil, err
 	}

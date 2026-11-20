@@ -394,6 +394,42 @@ func (c *Counters) Retained() uint64 { return c.retained.total() }
 // what the egress has read when it told, or down.
 type OpenChain func(ctx context.Context, gen uint32, down, up uint64) (Hop, uint64, error)
 
+type openingHopKey struct{}
+
+// TrackOpeningHop makes a rebuilding end able to reset its new hop while
+// the chain handshake is waiting for the egress's answer.
+func TrackOpeningHop(ctx context.Context, hop Hop) bool {
+	track, ok := ctx.Value(openingHopKey{}).(func(Hop) bool)
+	return !ok || track(hop)
+}
+
+// WatchOpeningUpstream forwards a hop failure during a relay's downstream
+// handshake, before RelayHops can take over.
+func WatchOpeningUpstream(up, down Hop) func() {
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case <-up.Done():
+		case <-stop:
+			select {
+			case <-up.Done():
+			default:
+				return
+			}
+		}
+		if up.Aborted() {
+			down.AbortSession()
+		} else {
+			down.Abort()
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
+}
+
 // End is a session's ingress or egress: the connection Relay copies with the
 // local one. Its writes go to the current chain and are kept until delivered;
 // its reads come from the current chain, without what was already delivered.
@@ -406,17 +442,19 @@ type End struct {
 	keep      *Keep
 	records   *Records // nil when the session's bytes are not sealed
 
-	mu       sync.Mutex
-	cond     *sync.Cond
-	hop      Hop
-	gen      uint32
-	in       uint64 // session offset where the hop's received bytes start
-	inRead   uint64 // received bytes read from the hop
-	read     uint64 // received bytes delivered to the local connection
-	eof      bool   // the local connection ended its writes
-	ended    bool   // the received direction ended
-	leftover []byte
-	busy     bool
+	mu   sync.Mutex
+	cond *sync.Cond
+	hop  Hop
+	// replacement is a hop being opened or replayed before installation.
+	replacement Hop
+	gen         uint32
+	in          uint64 // session offset where the hop's received bytes start
+	inRead      uint64 // received bytes read from the hop
+	read        uint64 // received bytes delivered to the local connection
+	eof         bool   // the local connection ended its writes
+	ended       bool   // the received direction ended
+	leftover    []byte
+	busy        bool
 	// attempt cancels the chain being opened, so a route change does not
 	// wait for an attempt along the old route; rerouted asks the next
 	// attempt to start at once.
@@ -556,7 +594,11 @@ func (e *End) Accept(hop Hop, gen uint32, down, up uint64, at bool, answer func(
 	if old := e.hop; old != nil {
 		old.Abort()
 	}
+	if old := e.replacement; old != nil {
+		old.Abort()
+	}
 	e.hop, e.gen = nil, gen
+	e.replacement = hop
 	if e.orphan.IsZero() {
 		e.orphan = time.Now()
 	}
@@ -564,16 +606,22 @@ func (e *End) Accept(hop Hop, gen uint32, down, up uint64, at bool, answer func(
 		down = max(down, e.read)
 	}
 	e.mu.Unlock()
-	if err := answer(down); err != nil {
-		return err
-	}
-	if err := e.resend(hop, up); err != nil {
-		return err
+	err := answer(down)
+	if err == nil {
+		err = e.resend(hop, up)
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.done || e.gen != gen {
 		return ErrUnknownSession
+	}
+	if hop.Aborted() {
+		e.finishLocked(errAborted)
+		return errAborted
+	}
+	e.replacement = nil
+	if err != nil {
+		return err
 	}
 	e.useLocked(hop, up, down)
 	if e.eof {
@@ -678,26 +726,45 @@ func (e *End) rebuild() {
 		e.mu.Lock()
 		e.attempt = cancel
 		e.mu.Unlock()
-		hop, from, err := e.open(ctx, gen, down, up)
+		hop, from, err := e.open(context.WithValue(ctx, openingHopKey{}, e.trackOpeningHop), gen, down, up)
 		e.mu.Lock()
 		e.attempt = nil
 		rerouted := e.rerouted
 		e.rerouted = false
-		e.mu.Unlock()
-		cancel()
+		if e.done {
+			e.busy = false
+			e.replacement = nil
+			reset := e.err != nil
+			e.mu.Unlock()
+			cancel()
+			if hop != nil {
+				if reset {
+					hop.AbortSession()
+				} else {
+					hop.Abort()
+				}
+			}
+			return
+		}
 		if err == nil {
 			// The old chain, if a reroute left it running, stops here: what it
 			// carried past from is sent again on the new one.
-			e.mu.Lock()
+			e.replacement = hop
 			if old := e.hop; old != nil {
 				e.hop = nil
 				old.Abort()
 			}
-			e.mu.Unlock()
+		} else {
+			e.replacement = nil
+		}
+		e.mu.Unlock()
+		cancel()
+		if err == nil {
 			e.keep.Release(from)
 			err = e.resend(hop, from)
 		}
 		e.mu.Lock()
+		e.replacement = nil
 		switch {
 		case err == nil && !e.done:
 			e.counters.Rebuilds.Add(1)
@@ -723,7 +790,7 @@ func (e *End) rebuild() {
 			e.mu.Unlock()
 			return
 		}
-		if errors.Is(err, ErrUnknownSession) || errors.Is(err, ErrLegacy) || errors.Is(err, errNoPath) {
+		if errors.Is(err, ErrUnknownSession) || errors.Is(err, ErrLegacy) || errors.Is(err, errNoPath) || errors.Is(err, ErrSessionReset) {
 			e.finishLocked(err)
 			e.busy = false
 			e.mu.Unlock()
@@ -741,6 +808,21 @@ func (e *End) rebuild() {
 		}
 		delay = min(2*delay, rebuildMax)
 	}
+}
+
+func (e *End) trackOpeningHop(hop Hop) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.done {
+		e.replacement = hop
+		return true
+	}
+	if e.err != nil {
+		hop.AbortSession()
+	} else {
+		hop.Abort()
+	}
+	return false
 }
 
 func (e *End) waitReplay(gen uint32) {
@@ -809,6 +891,9 @@ func (e *End) finishLocked(err error) {
 	e.done, e.err = true, err
 	if e.hop != nil && err != nil {
 		e.hop.AbortSession()
+	}
+	if e.replacement != nil && err != nil {
+		e.replacement.AbortSession()
 	}
 	e.keep.close()
 	e.cond.Broadcast()
@@ -1149,7 +1234,10 @@ func (e *End) Abort() {
 	e.finishLocked(errAborted)
 }
 
-var errAborted = errors.New("TCP connection reset by peer")
+// ErrSessionReset is a terminal reset as observed during a chain handshake.
+var ErrSessionReset = errors.New("TCP connection reset by peer")
+
+var errAborted = ErrSessionReset
 
 // localSource reads the local connection for a hop's ReadFrom, keeping its
 // error apart from the hop's.

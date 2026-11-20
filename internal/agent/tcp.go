@@ -207,16 +207,7 @@ func (r *DataPlane) newTCP(network model.ID, fingerprint string, mtu int, offloa
 		if err != nil {
 			return nil, err
 		}
-		// A session survives route changes and failed relays; it needs every
-		// hop to support them, else the connection uses a plain stream.
-		session, err := r.startSession(ctx, request)
-		if session == nil && err == nil {
-			session, err = r.openTCP(ctx, request, "")
-		}
-		if err != nil && noRoute(err) {
-			err = fmt.Errorf("%w: %w", streamproxy.ErrNoRoute, err)
-		}
-		return session, err
+		return r.openAccessTCP(ctx, request)
 	}
 	batch := func(packets [][]byte) error {
 		state := r.state.Load()
@@ -301,6 +292,39 @@ func waitStreams(ctx context.Context, state *runtimeState, network, next model.I
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
+}
+
+// OpenEmbeddedTCP opens a routed byte stream when the first Edge carries
+// streams. A nil stream and nil error leave the connection on the packet path.
+func (r *DataPlane) OpenEmbeddedTCP(ctx context.Context, network model.ID, from, to netip.AddrPort) (streamproxy.Conn, error) {
+	state := r.state.Load()
+	if state == nil {
+		return nil, net.ErrClosed
+	}
+	if !r.options.Embedded || !from.Addr().IsValid() || state.selfAddress[network] != from.Addr() {
+		return nil, forwarding.ErrSource
+	}
+	next, local, err := state.router.TCPNextHop(network, from, to)
+	if err != nil || local || !state.mesh.StreamCarrier(network, next) {
+		return nil, nil
+	}
+	request, err := state.router.TCPRequest(network, from, to)
+	if err != nil {
+		return nil, err
+	}
+	return r.openAccessTCP(ctx, request)
+}
+
+func (r *DataPlane) openAccessTCP(ctx context.Context, request streamproxy.Request) (streamproxy.Conn, error) {
+	// A session survives route changes and failed relays when all hops support it.
+	conn, err := r.startSession(ctx, request)
+	if conn == nil && err == nil {
+		conn, err = r.openTCP(ctx, request, "")
+	}
+	if err != nil && noRoute(err) {
+		err = fmt.Errorf("%w: %w", streamproxy.ErrNoRoute, err)
+	}
+	return conn, err
 }
 
 func (r *DataPlane) openTCP(ctx context.Context, request streamproxy.Request, ingress model.ID) (streamproxy.Conn, error) {
