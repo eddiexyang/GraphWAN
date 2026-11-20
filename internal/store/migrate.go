@@ -10,8 +10,7 @@ import (
 // move to the current one.
 const oldDefaultMTU = 1280
 
-// migrate brings a stored state to the current schema and indexes its new
-// Nodes.
+// migrate brings a stored state to the current schema.
 func migrate(state *model.State) {
 	if state.Schema == 1 {
 		dropRemoved(state)

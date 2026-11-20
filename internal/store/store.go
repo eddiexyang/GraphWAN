@@ -17,6 +17,9 @@ import (
 
 var ErrConflict = errors.New("configuration revision conflict")
 var bucket = []byte("graphnet")
+
+// previousBucket held the state before the rename; Open moves it.
+var previousBucket = []byte("graphwan")
 var stateKey = []byte("state")
 
 type Store struct {
@@ -34,6 +37,9 @@ func Open(path string) (*Store, error) {
 	}
 	s := &Store{db: db}
 	err = db.Update(func(tx *bolt.Tx) error {
+		if err := renameBucket(tx, previousBucket, bucket); err != nil {
+			return err
+		}
 		b, err := tx.CreateBucketIfNotExists(bucket)
 		if err != nil {
 			return err
@@ -72,6 +78,11 @@ func read(tx *bolt.Tx) (model.State, error) {
 		return state, err
 	}
 	migrate(&state)
+	// A state stored before indexes indexes its Nodes the same way on every
+	// read until an update stores them.
+	if err := assignIndexes(&state); err != nil {
+		return state, err
+	}
 	if err := state.Validate(); err != nil {
 		return state, err
 	}
@@ -126,4 +137,25 @@ func (s *Store) UpdateWithRecords(expected uint64, change func(*model.State, *Re
 		return model.State{}, err
 	}
 	return result, nil
+}
+
+// renameBucket moves the keys of from into a new bucket to, unless to exists.
+func renameBucket(tx *bolt.Tx, from, to []byte) error {
+	old := tx.Bucket(from)
+	if old == nil || tx.Bucket(to) != nil {
+		return nil
+	}
+	b, err := tx.CreateBucket(to)
+	if err != nil {
+		return err
+	}
+	if err := old.ForEach(func(k, v []byte) error {
+		if v == nil {
+			return errors.New("nested bucket in state")
+		}
+		return b.Put(k, v)
+	}); err != nil {
+		return err
+	}
+	return tx.DeleteBucket(from)
 }
