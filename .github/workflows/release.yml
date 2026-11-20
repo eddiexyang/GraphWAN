@@ -4,8 +4,9 @@ on:
   push:
     branches:
       - master
-      # Feature branches publish prereleases for staged deployment.
+      # Feature and fix branches publish prereleases for staged deployment.
       - 'feat/**'
+      - 'fix/**'
 
 permissions:
   contents: read
