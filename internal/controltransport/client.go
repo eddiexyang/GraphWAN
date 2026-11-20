@@ -51,6 +51,27 @@ func DialContext(kind string, roots *x509.CertPool, serverNames ...string) func(
 	}
 }
 
+// GatewayDialContext dials a controller entrance reached through a gateway.
+// The outer WSS hop is authenticated with gatewayRoots (nil uses the system
+// roots) and the entrance host; plain WebSocket has no outer TLS. The
+// controller TLS handshake still runs above this adapter in the caller's
+// http.Transport, against the pinned controller CA.
+func GatewayDialContext(kind string, gatewayRoots *x509.CertPool) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if err := Validate(kind); err != nil {
+			return nil, err
+		}
+		switch kind {
+		case "websocket", "wss":
+			return dialWebSocket(ctx, kind, addr, gatewayRoots, "")
+		case "grpc":
+			return dialGRPC(ctx, addr)
+		default:
+			return transport.DialTCP(ctx, &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}, network, addr)
+		}
+	}
+}
+
 func dialWebSocket(ctx context.Context, kind, addr string, roots *x509.CertPool, serverName string) (net.Conn, error) {
 	scheme := "ws"
 	if kind == "wss" {

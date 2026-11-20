@@ -123,8 +123,18 @@ func NewClient(cache *Cache, runtime Runtime, options Options) (*Client, error) 
 	if options.ServerTransport == "https" {
 		roots = options.GatewayRoots
 	}
-	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 15 * time.Second, MaxIdleConnsPerHost: 2}
-	transport.DialContext = controltransport.DialContext(options.ServerTransport, options.Roots)
+	tlsConfig := &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}
+	dial := controltransport.DialContext(options.ServerTransport, options.Roots)
+	if tunnelTransport(options.ServerTransport) {
+		// Registration happens before the directory can name the controller's
+		// TLS identity, and a gateway entrance never matches it: pin the
+		// controller by chain, not by the entrance hostname. The gateway hop,
+		// where one exists, is authenticated separately by GatewayDialContext.
+		tlsConfig = pinnedTLSConfig(options.Roots, "")
+		dial = controltransport.GatewayDialContext(options.ServerTransport, options.GatewayRoots)
+	}
+	transport := &http.Transport{TLSClientConfig: tlsConfig, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 15 * time.Second, MaxIdleConnsPerHost: 2}
+	transport.DialContext = dial
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	last, _ := cache.lastServer()
 	configuredServer := ""
@@ -137,6 +147,41 @@ func NewClient(cache *Cache, runtime Runtime, options Options) (*Client, error) 
 	return &Client{configuredServer: configuredServer, lastTarget: last, failedTargets: map[string]bool{}, cache: cache, reconcile: NewReconciler(cache, runtime), options: options, server: server, http: client, transport: transport, endpointsChanged: make(chan struct{}, 1)}, nil
 }
 func (c *Client) Close() { c.transport.CloseIdleConnections() }
+
+// tunnelTransport reports carriers whose byte stream reaches the controller
+// through a tunnel, so the controller TLS handshake runs above the carrier.
+func tunnelTransport(kind string) bool { return kind == "websocket" || kind == "wss" }
+
+// pinnedTLSConfig verifies the controller certificate chain against the pinned
+// CA without comparing it to the entrance hostname. Behind a gateway the entry
+// name belongs to the gateway, and during registration the controller's own
+// TLS name is not known yet.
+func pinnedTLSConfig(roots *x509.CertPool, serverName string) *tls.Config {
+	return &tls.Config{
+		MinVersion:         tls.VersionTLS13,
+		ServerName:         serverName,
+		InsecureSkipVerify: true, // the chain is verified below against the pinned CA
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return errors.New("controller presented no certificate")
+			}
+			leaf, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return err
+			}
+			intermediates := x509.NewCertPool()
+			for _, raw := range rawCerts[1:] {
+				cert, err := x509.ParseCertificate(raw)
+				if err != nil {
+					return err
+				}
+				intermediates.AddCert(cert)
+			}
+			_, err = leaf.Verify(x509.VerifyOptions{Roots: roots, Intermediates: intermediates, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}})
+			return err
+		},
+	}
+}
 func (c *Client) Report() model.AgentReport {
 	r := c.reconcile.Report(c.options.Version)
 	if c.options.Updater != nil {
@@ -612,7 +657,21 @@ func (c *Client) selectTarget() (controlTarget, error) {
 		c.transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: c.options.GatewayRoots, MinVersion: tls.VersionTLS13}, DialContext: controltransport.DialContext(selected.transport, nil), TLSHandshakeTimeout: 3 * time.Second, ResponseHeaderTimeout: 4 * time.Second, MaxIdleConnsPerHost: 2}
 		c.signer = &challengeSigner{id: reg.AgentID, key: c.cache.PrivateKey()}
 	} else {
-		c.transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, Certificates: certificates, ServerName: selected.tlsName, MinVersion: tls.VersionTLS13}, DialContext: controltransport.DialContext(selected.transport, roots, selected.tlsName), TLSHandshakeTimeout: 3 * time.Second, ResponseHeaderTimeout: 4 * time.Second, MaxIdleConnsPerHost: 2}
+		dial := controltransport.DialContext(selected.transport, roots, selected.tlsName)
+		if selected.transport == "wss" && selected.origin == c.configuredServer {
+			// The configured entrance is a gateway: the outer TLS is the
+			// gateway's own certificate, and the controller is verified above
+			// the tunnel by its pinned CA below.
+			dial = controltransport.GatewayDialContext(selected.transport, c.options.GatewayRoots)
+		}
+		inner := &tls.Config{RootCAs: roots, Certificates: certificates, ServerName: selected.tlsName, MinVersion: tls.VersionTLS13}
+		if tunnelTransport(selected.transport) {
+			// Behind a tunnel the entrance name is never the controller name;
+			// pin the controller by chain and keep only its TLS name as SNI.
+			inner = pinnedTLSConfig(roots, selected.tlsName)
+			inner.Certificates = certificates
+		}
+		c.transport = &http.Transport{TLSClientConfig: inner, DialContext: dial, TLSHandshakeTimeout: 3 * time.Second, ResponseHeaderTimeout: 4 * time.Second, MaxIdleConnsPerHost: 2}
 		if reg.KeyOnly() {
 			// Without a certificate the Agent proves its key per request.
 			c.signer = &challengeSigner{id: reg.AgentID, key: c.cache.PrivateKey()}
