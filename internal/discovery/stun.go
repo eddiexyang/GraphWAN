@@ -6,7 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"github.com/eWloYW8/GraphWAN/internal/sockets"
+	"github.com/eddiexyang/graphnet/internal/sockets"
 	"math/rand/v2"
 	"net"
 	"net/netip"
@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 const ObservedLifetime = 2 * time.Minute

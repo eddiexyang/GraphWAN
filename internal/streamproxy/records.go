@@ -6,8 +6,8 @@ import (
 	"math"
 	"sync"
 
-	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
-	"github.com/eWloYW8/GraphWAN/internal/secure"
+	"github.com/eddiexyang/graphnet/internal/packetbuf"
+	"github.com/eddiexyang/graphnet/internal/secure"
 )
 
 // A session between two Agents that share an end-to-end session carries its

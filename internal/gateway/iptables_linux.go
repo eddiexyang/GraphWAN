@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 // nft base-chain ACCEPT cannot override a later iptables FORWARD policy DROP.

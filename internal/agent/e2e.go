@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -9,11 +10,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/forwarding"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/packet"
-	"github.com/eWloYW8/GraphWAN/internal/secure"
-	"github.com/eWloYW8/GraphWAN/internal/streamproxy"
+	"github.com/eddiexyang/graphnet/internal/forwarding"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/packet"
+	"github.com/eddiexyang/graphnet/internal/secure"
+	"github.com/eddiexyang/graphnet/internal/streamproxy"
 )
 
 // The two ends of a TCP session seal its bytes with an end-to-end session
@@ -228,7 +229,11 @@ func (r *DataPlane) startE2ELocked(state *runtimeState, peer e2ePeer, out *e2eOu
 	if err != nil {
 		return nil, false
 	}
-	rand.Read(out.id[:])
+	// A new session's tag differs from the current one's, which the peer
+	// keeps beside it, so neither of them has to try both.
+	for rand.Read(out.id[:]); out.current != nil && [e2eTag]byte(out.id[:]) == [e2eTag]byte(out.current.id[:]); {
+		rand.Read(out.id[:])
+	}
 	out.attempt, out.started = handshake, now
 	out.message = e2eMessage(e2eHello, out.id, message)
 	out.retry, out.delay = now.Add(e2eRetry), 2*e2eRetry
@@ -557,21 +562,23 @@ func (p e2ePackets) Open(network, source model.ID, payload []byte, sealed bool) 
 	if state == nil || state.keys[peer] == nil || e2eHandshake(raw) {
 		return nil, forwarding.ErrSealed
 	}
-	// The session's tag precedes the seal's own.
+	// The session's tag precedes the seal's own. Tags are short, so a packet
+	// tries each kept session its tag matches.
 	tag := [e2eTag]byte(payload[len(payload)-secure.TagSize-e2eTag:])
 	e := &r.e2e
 	e.mu.Lock()
-	var s *e2eSession
+	var candidates [e2eKept]*e2eSession
+	matched := candidates[:0]
 	in := e.incoming[peer]
 	if in != nil {
 		for _, candidate := range in.sessions {
-			if [e2eTag]byte(candidate.id[:]) == tag {
-				s = candidate
+			if [e2eTag]byte(candidate.id[:]) == tag && len(matched) < len(candidates) {
+				matched = append(matched, candidate)
 			}
 		}
 	}
 	notify := false
-	if s == nil {
+	if len(matched) == 0 {
 		if in == nil {
 			in = &e2eIncoming{key: state.keys[peer], pending: map[e2eID]*e2eResponse{}}
 			e.incoming[peer] = in
@@ -581,7 +588,7 @@ func (p e2ePackets) Open(network, source model.ID, payload []byte, sealed bool) 
 		}
 	}
 	e.mu.Unlock()
-	if s == nil {
+	if len(matched) == 0 {
 		if notify {
 			var id e2eID
 			copy(id[:], tag[:])
@@ -591,7 +598,21 @@ func (p e2ePackets) Open(network, source model.ID, payload []byte, sealed bool) 
 	}
 	var headers [packet.MaxReadable]byte
 	ad := packet.Authenticated(&headers, raw)
-	body, err := s.session.OpenPacket(ad, payload[len(ad):], e2eTag)
+	var body []byte
+	err := forwarding.ErrSealed
+	for i, s := range matched {
+		sealed := payload[len(ad):]
+		if i < len(matched)-1 {
+			// A failed open leaves its input undefined; keep it for the next.
+			sealed = bytes.Clone(sealed)
+		}
+		if body, err = s.session.OpenPacket(ad, sealed, e2eTag); err == nil {
+			if i < len(matched)-1 {
+				body = append(payload[len(ad):len(ad)], body...)
+			}
+			break
+		}
+	}
 	if err != nil {
 		return nil, forwarding.ErrSealed
 	}

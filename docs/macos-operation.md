@@ -9,7 +9,7 @@ development environment.
 Build on a Mac with Go 1.26 or newer:
 
 ```sh
-go build -o graphwan ./cmd/graphwan
+go build -o graphnet ./cmd/graphnet
 ```
 
 For a cross-build, set `CGO_ENABLED=0 GOOS=darwin GOARCH=arm64`; use `amd64` for
@@ -19,9 +19,9 @@ its assets. Use the normal controller and enrollment flow from the
 shell on the Mac:
 
 ```sh
-export GRAPHWAN_ENROLLMENT_TOKEN='<one-time-token>'
-./graphwan agent --server https://controller.example.com:8443 \
-  --ca ./ca.pem --name mac-node --data-dir /var/db/graphwan-agent
+export GRAPHNET_ENROLLMENT_TOKEN='<one-time-token>'
+./graphnet agent --server https://controller.example.com:8443 \
+  --ca ./ca.pem --name mac-node --data-dir /var/db/graphnet-agent
 ```
 
 The token is needed only for initial enrollment. Add Network memberships and
@@ -52,7 +52,7 @@ Route handling reads the kernel routing table and matches the exact prefix,
 interface index, scope and usable flags. An existing unscoped route on another
 interface causes a configuration error; it is not replaced or deleted. Scoped
 routes on other interfaces do not satisfy an unscoped subnet route. Route removal
-rechecks interface ownership before issuing the delete command. GraphWAN does not
+rechecks interface ownership before issuing the delete command. GraphNet does not
 coordinate route edits with other privileged administrators making simultaneous
 changes to the same routing-table entry.
 

@@ -9,8 +9,8 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/link"
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/link"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 // A transport change keeps the healthy Link it disallows until an allowed

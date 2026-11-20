@@ -12,7 +12,7 @@ func physical(iface net.Interface) bool {
 		return false
 	}
 	name := strings.ToLower(iface.Name)
-	for _, prefix := range []string{"tun", "tap", "utun", "bridge", "veth", "docker", "wg", "graphwan"} {
+	for _, prefix := range []string{"tun", "tap", "utun", "bridge", "veth", "docker", "wg", "graphnet"} {
 		if strings.HasPrefix(name, prefix) {
 			return false
 		}

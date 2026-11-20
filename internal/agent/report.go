@@ -1,9 +1,8 @@
 package agent
 
 import (
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 	"reflect"
-	"time"
 )
 
 // Idle resource/RTT samples and user-data counters ride on the periodic
@@ -58,6 +57,6 @@ func routedReport(report model.AgentReport, routes map[model.ID][]model.Route, s
 }
 
 func idleLinkMetrics(link *model.LinkStatus) {
-	link.RTTMillis, link.Loss, link.RTTMeasuredAt, link.LastHandshake = 0, 0, time.Time{}, time.Time{}
+	link.RTTMillis, link.Loss = 0, 0
 	link.RXBytes, link.TXBytes = 0, 0
 }

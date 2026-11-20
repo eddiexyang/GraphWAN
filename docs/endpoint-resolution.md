@@ -1,25 +1,18 @@
 # Endpoint discovery, updates and DNS
 
 An Agent advertises automatic TCP/UDP IP endpoints and administrator-provided
-manual URLs. All six transports accept manual hostnames with an explicit port:
+manual URLs. Both transports accept manual hostnames with an explicit port:
 
 ```text
 udp://edge.example.com:24752
 tcp://edge.example.com:24752
-quic://edge.example.com:24752
-ws://edge.example.com:24752/overlay
-wss://edge.example.com:443/overlay
-grpc://edge.example.com:443/overlay
 ```
 
 Configure these on the destination Agent in the management UI. The edge must
-enable the chosen transport and connection method. WS/WSS and gRPC are only
-generated from manual endpoints; their paths identify the configured HTTP entry.
-QUIC also requires a manual endpoint. URLs do not create additional listeners:
+enable the chosen transport and connection method. URLs do not create additional listeners:
 the Agent's configured listen port (24752 by default) is shared by its transports.
 An external hostname/port can instead route through an administrator-managed
-proxy or port forward. See [WebSocket](websocket-operation.md),
-[gRPC](grpc-operation.md), [QUIC](quic-operation.md) and [NAT](nat-operation.md).
+proxy or port forward. See [NAT](nat-operation.md).
 
 ## Automatic interface discovery
 
@@ -88,8 +81,8 @@ name/group edits. See
 ## Live listener changes
 
 Set the Agent's `listen_port` through the management UI or
-[`PATCH /api/v1/agents/{id}`](control-api.md). The default is 24752; TCP/WS/WSS/gRPC
-share its TCP listener and UDP/QUIC share its UDP socket. Wildcard binding covers
+[`PATCH /api/v1/agents/{id}`](control-api.md). The default is 24752; TCP
+uses its TCP listener and UDP its UDP socket. Wildcard binding covers
 both IPv4 and IPv6 where available. A manual URL's port describes the advertised
 entry point; it does not create an extra listener or change `listen_port`.
 
@@ -135,8 +128,8 @@ TCP/UDP punching uses separate candidates under the edge's punch policy.
 
 Every candidate has independent backoff and renewal. Eight Mesh-wide dial slots
 bound simultaneous attempts; an unreachable address cannot prevent another
-address from connecting. Successful Links are retained. UDP, QUIC and gRPC
-release pending admission reservations after the configured Noise handshake;
+address from connecting. Successful Links are retained. UDP
+releases pending admission reservations after the configured Noise handshake;
 TCP pool allowances grow with authorized topology and resolved candidates.
 One common active Link is selected by both Agents.
 Use its Candidate in the edge preference selector to prefer that particular
@@ -155,19 +148,12 @@ longer retried. Removing the endpoint or disabling its method closes its Links.
 Changing the endpoint URL also replaces that endpoint's runtime policy. Unused
 cache entries are removed, and Mesh shutdown cancels and joins pending lookups.
 
-## TLS and peer admission
-
-Only the socket destination changes when selecting a DNS answer. WSS and gRPC
-retain the original hostname for SNI and certificate validation, the URL's host
-and port for HTTP authority, and its configured path. QUIC retains its original
-TLS hostname as well. A TLS frontend with an independent certificate must pass
-normal CA/hostname validation. The encrypted peer handshake still authenticates
-the configured Agent behind it.
+## Peer admission
 
 The authenticated Link introduction includes an endpoint fingerprint and, for
 DNS candidates, the concrete DNS target. The
 receiving Agent reconstructs its Candidate ID against an advertised manual
-hostname endpoint, permitted family/method and actual ingress transport/path.
+hostname endpoint, permitted family/method and actual ingress transport.
 It rejects an inconsistent hash, disabled family or attempt to override a literal
 endpoint. Target validation does not require a second DNS lookup: split-horizon DNS
 and reverse proxies can make its answer set different from the initiator's.
@@ -189,14 +175,13 @@ Wildcard TCP and UDP binds (`:port`, `0.0.0.0:port`, `[::]:port`) reserve separa
 IPv4 and IPv6 sockets on the same port. Only a kernel-unavailable address family
 may be omitted. Other errors close all partial reservations; a port-zero
 collision retries at most eight times. Explicit non-wildcard addresses retain
-normal single-address binding behavior. Native UDP, STUN and QUIC share the
+normal single-address binding behavior. Native UDP and STUN share the
 selected family's socket, peer/admission budgets remain shared across families,
 and close interrupts accepts/readers on both sockets.
 
 A wildcard native UDP listener records the destination IP of the first incoming
 datagram and uses it as the reply source. This prevents a request to a secondary
-local address from receiving its response from the host's default address. The
-same behavior applies with or without a shared QUIC listener; socket sharing,
+local address from receiving its response from the host's default address. Socket sharing,
 STUN data-port reuse and IP fragmentation are preserved. The implementation uses
 `x/net` packet control messages on Unix and native Winsock packet information on
 Windows. Truncated datagrams/control data are discarded without stopping the

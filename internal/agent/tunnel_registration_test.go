@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/control"
-	"github.com/eWloYW8/GraphWAN/internal/controltransport"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/pki"
-	"github.com/eWloYW8/GraphWAN/internal/store"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/control"
+	"github.com/eddiexyang/graphnet/internal/controltransport"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/pki"
+	"github.com/eddiexyang/graphnet/internal/store"
+	"github.com/eddiexyang/graphnet/internal/testutil"
 )
 
 // A fresh Agent registering by public key through a controller tunnel must

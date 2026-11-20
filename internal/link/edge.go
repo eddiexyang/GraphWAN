@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/packetbuf"
 )
 
 type Edge struct {

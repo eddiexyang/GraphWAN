@@ -1,17 +1,17 @@
 # Linux operation
 
 The Linux Agent currently supports TUN interfaces, IPv4/IPv6 packet parsing,
-weighted forwarding, authenticated TCP/UDP/QUIC/WS/WSS/gRPC peer channels, multiple retained Links,
+weighted forwarding, authenticated TCP/UDP peer channels, multiple retained Links,
 health probes and durable controller configuration.
 
 ## Start and configure
 
-Build with `go build -o bin/graphwan ./cmd/graphwan`. Start the controller as in the
+Build with `go build -o bin/graphnet ./cmd/graphnet`. Start the controller as in the
 README, distribute its public `ca.pem` to clients through a trusted channel, and
 create one enrollment token per Agent via `POST /api/v1/enrollment-tokens`.
 
-Run `graphwan agent --server https://host:8443 --ca ca.pem --name my-node
---data-dir /var/lib/graphwan-agent` with `GRAPHWAN_ENROLLMENT_TOKEN` in the
+Run `graphnet agent --server https://host:8443 --ca ca.pem --name my-node
+--data-dir /var/lib/graphnet-agent` with `GRAPHNET_ENROLLMENT_TOKEN` in the
 environment for initial enrollment. The token is not required on subsequent
 starts. The Agent database contains its private key, registration certificate,
 desired snapshot and last applied snapshot. Keep it private and do not copy an
@@ -19,10 +19,7 @@ Agent identity to a second concurrently running installation.
 
 A new Agent waits for Network memberships. Use the management API to create a
 Network, assign each enrolled Agent a fixed virtual address and add explicit Edges.
-TCP, UDP, QUIC, WS, WSS and gRPC direct connectivity are operational. Configure WS/WSS
-using [manual endpoints](websocket-operation.md); gRPC has its own
-[endpoint guide](grpc-operation.md). See [QUIC setup](quic-operation.md) for
-QUIC manual endpoints and datagram MTU behavior. [STUN and TCP/UDP hole punching](nat-operation.md)
+TCP and UDP direct connectivity are operational. [STUN and TCP/UDP hole punching](nat-operation.md)
 are described with their traversal limits in that guide.
 
 Built-in service management supports systemd, OpenRC and OpenWrt procd +

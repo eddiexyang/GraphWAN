@@ -6,7 +6,7 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/testutil"
 )
 
 func TestBoundedStreamSetup(t *testing.T) {

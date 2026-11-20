@@ -15,7 +15,7 @@ func TestStaticFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	for path, content := range map[string]string{
-		"index.html":                        "<html>GraphWAN</html>",
+		"index.html":                        "<html>GraphNet</html>",
 		"assets/agent/revision/linux-amd64": "0123456789",
 		"private.txt":                       "private",
 	} {
@@ -29,7 +29,7 @@ func TestStaticFiles(t *testing.T) {
 		status                    int
 		body                      string
 	}{
-		{"GET", "/", "", 200, "<html>GraphWAN</html>"},
+		{"GET", "/", "", 200, "<html>GraphNet</html>"},
 		{"GET", "/assets/agent/revision/linux-amd64", "", 200, "0123456789"},
 		{"HEAD", "/assets/agent/revision/linux-amd64", "", 200, ""},
 		{"GET", "/assets/agent/revision/linux-amd64", "bytes=2-4", 206, "234"},

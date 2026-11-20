@@ -3,7 +3,7 @@ package transport
 import (
 	"context"
 	"errors"
-	"github.com/eWloYW8/GraphWAN/internal/sockets"
+	"github.com/eddiexyang/graphnet/internal/sockets"
 	"io"
 	"net"
 	"net/netip"

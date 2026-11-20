@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const DeltaSubprotocol = "graphwan.control.delta.v1"
+const DeltaSubprotocol = "graphnet.control.delta.v1"
 
 func SupportsRoutes(protocol string) bool {
 	return protocol == RoutingSubprotocol || protocol == DeltaSubprotocol

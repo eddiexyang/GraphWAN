@@ -50,11 +50,11 @@ export function Enrollment({ csrf, close }: { csrf: string; close: () => void })
           </dl>
           <h4>Command</h4>
 
-          <pre>{`sudo graphwan agent enroll --invitation-file - --name my-agent --data-dir /var/lib/graphwan-agent <<'GRAPHWAN_INVITATION'
+          <pre>{`sudo graphnet agent enroll --invitation-file - --name my-agent --data-dir /var/lib/graphnet-agent <<'GRAPHNET_INVITATION'
 ${result.invitation}
-GRAPHWAN_INVITATION
+GRAPHNET_INVITATION
 
-sudo graphwan agent run --data-dir /var/lib/graphwan-agent`}</pre>
+sudo graphnet agent run --data-dir /var/lib/graphnet-agent`}</pre>
 
           <button className="primary wide" onClick={close}>
             Done
@@ -441,7 +441,7 @@ export default function Agents({
                       title={
                         status?.update?.managed
                           ? 'Update from GitHub Release'
-                          : 'Requires graphwan agent service'
+                          : 'Requires graphnet agent service'
                       }
                     >
                       Update

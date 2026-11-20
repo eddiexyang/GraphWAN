@@ -16,10 +16,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/controltransport"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/pki"
-	"github.com/eWloYW8/GraphWAN/internal/store"
+	"github.com/eddiexyang/graphnet/internal/controltransport"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/pki"
+	"github.com/eddiexyang/graphnet/internal/store"
 )
 
 type Invitation struct {

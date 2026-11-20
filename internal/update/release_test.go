@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 func testAsset(body []byte) model.ReleaseAsset {
@@ -26,8 +26,8 @@ func testAsset(body []byte) model.ReleaseAsset {
 	if runtime.GOOS == "windows" {
 		suffix = ".exe"
 	}
-	name := "graphwan-v9.9.9-" + runtime.GOOS + "-" + runtime.GOARCH + suffix
-	return model.ReleaseAsset{Version: "v9.9.9", OS: runtime.GOOS, Arch: runtime.GOARCH, Name: name, URL: "https://github.com/eWloYW8/GraphWAN/releases/download/v9.9.9/" + name, SHA256: hex.EncodeToString(digest[:]), Size: int64(len(body))}
+	name := "graphnet-v9.9.9-" + runtime.GOOS + "-" + runtime.GOARCH + suffix
+	return model.ReleaseAsset{Version: "v9.9.9", OS: runtime.GOOS, Arch: runtime.GOARCH, Name: name, URL: "https://github.com/eddiexyang/graphnet/releases/download/v9.9.9/" + name, SHA256: hex.EncodeToString(digest[:]), Size: int64(len(body))}
 }
 
 type roundTrip func(*http.Request) (*http.Response, error)
@@ -119,7 +119,7 @@ func TestManagerDeduplicatesAndPreservesExecutable(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(body) }))
 	defer server.Close()
 	dir := t.TempDir()
-	executable := filepath.Join(dir, "graphwan")
+	executable := filepath.Join(dir, "graphnet")
 	os.WriteFile(executable, []byte("old"), 0700)
 	req := model.UpdateRequest{ID: model.NewID(), Asset: a, Source: "server", CreatedAt: time.Now()}
 	installed := make(chan struct{}, 1)

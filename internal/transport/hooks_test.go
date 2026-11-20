@@ -2,7 +2,6 @@ package transport
 
 import (
 	"context"
-	"crypto/ed25519"
 	"net"
 	"net/netip"
 	"strconv"
@@ -11,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/sockets"
+	"github.com/eddiexyang/graphnet/internal/sockets"
 )
 
 type hookRecorder struct {
@@ -43,7 +42,7 @@ func (r *hookRecorder) count(network string) int {
 	return r.controls[network]
 }
 
-// Every socket GraphWAN opens and every name it resolves goes through the
+// Every socket GraphNet opens and every name it resolves goes through the
 // hooks of its context, so an embedding host can keep them off its own TUN.
 func TestSocketHooksApplyToListenAndDial(t *testing.T) {
 	r := &hookRecorder{controls: map[string]int{}}
@@ -57,12 +56,10 @@ func TestSocketHooksApplyToListenAndDial(t *testing.T) {
 	if r.count("tcp4") == 0 {
 		t.Fatal("TCP listener bypassed the socket hook")
 	}
-	_, identity, _ := ed25519.GenerateKey(nil)
-	udp, quic, err := ListenUDPQUIC(ctx, "127.0.0.1:0", identity)
+	udp, err := ListenUDP(ctx, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer quic.Close()
 	defer udp.Close()
 	if r.count("udp4") == 0 {
 		t.Fatal("UDP socket bypassed the socket hook")
@@ -81,12 +78,12 @@ func TestSocketHooksApplyToListenAndDial(t *testing.T) {
 	before := r.count("tcp4")
 	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	conn, err := DialTCP(dialCtx, &net.Dialer{}, "tcp4", "graphwan.invalid:"+port)
+	conn, err := DialTCP(dialCtx, &net.Dialer{}, "tcp4", "graphnet.invalid:"+port)
 	if err != nil {
 		t.Fatalf("dial through the lookup hook: %v", err)
 	}
 	conn.Close()
-	if r.count("tcp4") == before || len(r.lookups) != 1 || r.lookups[0] != "ip4 graphwan.invalid" {
+	if r.count("tcp4") == before || len(r.lookups) != 1 || r.lookups[0] != "ip4 graphnet.invalid" {
 		t.Fatalf("dial: controls %d→%d, lookups %v", before, r.count("tcp4"), r.lookups)
 	}
 	before = r.count("tcp4")

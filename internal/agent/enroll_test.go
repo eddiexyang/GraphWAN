@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/pki"
-	"github.com/eWloYW8/GraphWAN/internal/store"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/pki"
+	"github.com/eddiexyang/graphnet/internal/store"
+	"github.com/eddiexyang/graphnet/internal/testutil"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -33,7 +33,7 @@ func TestInvitationEnrollmentAndRepeat(t *testing.T) {
 	defer cache.Close()
 	fixture := testutil.Topology()
 	server := model.Server{ID: testutil.ID(90), Name: "test server", PublicKey: fixture.Agents[0].PublicKey}
-	invite := model.AgentInvitation{Kind: "graphwan-agent", Version: 1, Token: base64.RawURLEncoding.EncodeToString(make([]byte, 32)), ExpiresAt: time.Now().Add(time.Hour), Directory: model.ServerDirectory{ClusterID: testutil.ID(99), Revision: 1, CA: ca.PEM, Servers: []model.Server{server}}}
+	invite := model.AgentInvitation{Kind: "graphnet-agent", Version: 1, Token: base64.RawURLEncoding.EncodeToString(make([]byte, 32)), ExpiresAt: time.Now().Add(time.Hour), Directory: model.ServerDirectory{ClusterID: testutil.ID(99), Revision: 1, CA: ca.PEM, Servers: []model.Server{server}}}
 	requests := 0
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++

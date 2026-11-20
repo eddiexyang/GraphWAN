@@ -8,11 +8,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 	"github.com/hashicorp/yamux"
 )
 
-const channelProtocol = "graphwan.cluster.v1"
+const channelProtocol = "graphnet.cluster.v1"
 
 var errLegacyPeer = errors.New("server does not support bidirectional cluster channels")
 

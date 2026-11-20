@@ -13,11 +13,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/link"
-	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
-	"github.com/eWloYW8/GraphWAN/internal/peer"
-	"github.com/eWloYW8/GraphWAN/internal/secure"
-	"github.com/eWloYW8/GraphWAN/internal/streamproxy"
+	"github.com/eddiexyang/graphnet/internal/link"
+	"github.com/eddiexyang/graphnet/internal/packetbuf"
+	"github.com/eddiexyang/graphnet/internal/peer"
+	"github.com/eddiexyang/graphnet/internal/secure"
+	"github.com/eddiexyang/graphnet/internal/streamproxy"
 )
 
 // Stream frames share an Edge's existing Links with packets. A stream belongs

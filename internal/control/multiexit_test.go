@@ -4,8 +4,8 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/testutil"
 )
 
 func TestMultiExitNeedsCapableAgents(t *testing.T) {

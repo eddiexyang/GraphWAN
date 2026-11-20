@@ -7,7 +7,7 @@ variable "RELEASE_DIR" {
 }
 
 variable "AGENT_IMAGE" {
-  default = "graphwan-agent:dev"
+  default = "graphnet-agent:dev"
 }
 
 group "default" {
@@ -23,7 +23,7 @@ target "common" {
   args = {
     VERSION = RELEASE_TAG
   }
-  cache-from = ["type=gha,scope=graphwan"]
+  cache-from = ["type=gha,scope=graphnet"]
 }
 
 target "controller" {
@@ -34,7 +34,7 @@ target "controller" {
     agent-arm64 = "target:agent-arm64"
   }
   output = ["type=registry"]
-  cache-to = ["type=gha,scope=graphwan,mode=max"]
+  cache-to = ["type=gha,scope=graphnet,mode=max"]
 }
 
 target "agent" {

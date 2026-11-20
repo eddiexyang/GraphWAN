@@ -6,7 +6,7 @@ import (
 	"net"
 	"net/netip"
 
-	"github.com/eWloYW8/GraphWAN/internal/forwarding"
+	"github.com/eddiexyang/graphnet/internal/forwarding"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )

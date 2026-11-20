@@ -1,6 +1,6 @@
-// Package client embeds a GraphWAN client node in another application, for
+// Package client embeds a GraphNet client node in another application, for
 // example as an outbound of a proxy client. The application hands it
-// connections to IP destinations; the client sends them into the GraphWAN
+// connections to IP destinations; the client sends them into the GraphNet
 // network, which routes them.
 //
 // A client node is a full Agent on the network side: it connects to the
@@ -27,11 +27,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/agent"
-	"github.com/eWloYW8/GraphWAN/internal/forwarding"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/sockets"
-	"github.com/eWloYW8/GraphWAN/internal/tunnel"
+	"github.com/eddiexyang/graphnet/internal/agent"
+	"github.com/eddiexyang/graphnet/internal/forwarding"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/sockets"
+	"github.com/eddiexyang/graphnet/internal/tunnel"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )
 
@@ -60,7 +60,7 @@ type Config struct {
 }
 
 // ErrUnreachable means the network has no route to a destination.
-var ErrUnreachable = errors.New("graphwan: destination is not reachable in the network")
+var ErrUnreachable = errors.New("graphnet: destination is not reachable in the network")
 
 type Client struct {
 	ctx     context.Context
@@ -78,7 +78,7 @@ type Client struct {
 // first configuration may still be on its way, which DialTCP waits for.
 func Start(ctx context.Context, cfg Config) (*Client, error) {
 	if len(cfg.PrivateKey) != ed25519.PrivateKeySize {
-		return nil, errors.New("graphwan: invalid private key")
+		return nil, errors.New("graphnet: invalid private key")
 	}
 	if cfg.ServerTransport == "" {
 		cfg.ServerTransport = "tcp"
@@ -93,20 +93,20 @@ func Start(ctx context.Context, cfg Config) (*Client, error) {
 	if len(cfg.CA) > 0 {
 		roots = x509.NewCertPool()
 		if !roots.AppendCertsFromPEM(cfg.CA) {
-			return nil, errors.New("graphwan: CA contains no certificates")
+			return nil, errors.New("graphnet: CA contains no certificates")
 		}
 	}
 	c := &Client{stacks: map[netip.Addr]*netstack{}, done: make(chan struct{})}
 	dir := cfg.StateDir
 	if dir == "" {
-		if dir, err = os.MkdirTemp("", "graphwan-client-"); err != nil {
+		if dir, err = os.MkdirTemp("", "graphnet-client-"); err != nil {
 			return nil, err
 		}
 		c.temp = dir
 	}
 	if c.cache, err = agent.OpenCacheWithKey(filepath.Join(dir, "agent.db"), cfg.PrivateKey); err != nil {
 		c.removeTemp()
-		return nil, fmt.Errorf("graphwan: open state: %w", err)
+		return nil, fmt.Errorf("graphnet: open state: %w", err)
 	}
 	c.ctx, c.cancel = context.WithCancel(sockets.With(context.WithoutCancel(ctx), sockets.Hooks{Control: cfg.Control, Lookup: cfg.Lookup}))
 	var control *agent.Client
@@ -148,7 +148,7 @@ func Start(ctx context.Context, cfg Config) (*Client, error) {
 			if c.ctx.Err() != nil {
 				return
 			}
-			cfg.Logger.Warn("graphwan client node restarting", "error", err, "retry_in", delay)
+			cfg.Logger.Warn("graphnet client node restarting", "error", err, "retry_in", delay)
 			select {
 			case <-c.ctx.Done():
 				return
@@ -210,7 +210,7 @@ func (c *Client) route(ctx context.Context, destination netip.Addr) (*netstack, 
 			if err == nil {
 				err = ctx.Err()
 			}
-			return nil, fmt.Errorf("graphwan: waiting for a route to %s: %w", destination, err)
+			return nil, fmt.Errorf("graphnet: waiting for a route to %s: %w", destination, err)
 		case <-c.ctx.Done():
 			return nil, net.ErrClosed
 		case <-time.After(delay):

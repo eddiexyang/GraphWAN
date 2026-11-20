@@ -22,7 +22,7 @@ def package(builds, destination):
         raise ValueError("output directory already exists; choose a new directory")
     destination.parent.mkdir(parents=True, exist_ok=True)
     seen = set()
-    with tempfile.TemporaryDirectory(prefix=".graphwan-package-", dir=destination.parent) as temporary:
+    with tempfile.TemporaryDirectory(prefix=".graphnet-package-", dir=destination.parent) as temporary:
         stage = Path(temporary) / "release"
         stage.mkdir()
         for build in manifest["builds"]:
@@ -32,7 +32,7 @@ def package(builds, destination):
             seen.add(target)
             system, arch = target.split("/")
             suffix = ".exe" if system == "windows" else ""
-            relative = f"{system}-{arch}/graphwan{suffix}"
+            relative = f"{system}-{arch}/graphnet{suffix}"
             if build["path"] != relative:
                 raise ValueError(f"unexpected binary path for {target}")
             source = builds / relative
@@ -41,7 +41,7 @@ def package(builds, destination):
             binary = source.read_bytes()
             if len(binary) != build["bytes"] or hashlib.sha256(binary).hexdigest() != build["sha256"]:
                 raise ValueError(f"binary size/hash mismatch: {target}")
-            output = stage / f"graphwan-{version}-{system}-{arch}{suffix}"
+            output = stage / f"graphnet-{version}-{system}-{arch}{suffix}"
             output.write_bytes(binary)
             output.chmod(0o755)
         os.rename(stage, destination)

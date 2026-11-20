@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 // pausingProxy forwards TCP to target; while paused it moves no bytes in

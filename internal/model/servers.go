@@ -83,7 +83,7 @@ type Server struct {
 	Revoked     bool             `json:"revoked,omitempty"`
 }
 
-func (s Server) TLSName() string { return "server-" + string(s.ID) + ".graphwan" }
+func (s Server) TLSName() string { return "server-" + string(s.ID) + ".graphnet" }
 func (s Server) Validate() error {
 	if s.Update != nil {
 		if err := s.Update.Validate(); err != nil {

@@ -1,8 +1,8 @@
 package agent
 
 import (
-	"github.com/eWloYW8/GraphWAN/internal/routing"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/routing"
+	"github.com/eddiexyang/graphnet/internal/testutil"
 	"reflect"
 	"testing"
 )

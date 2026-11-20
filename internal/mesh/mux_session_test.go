@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/link"
+	"github.com/eddiexyang/graphnet/internal/link"
 )
 
 // sessionPair opens a stream from a to b and starts both as session hops; b

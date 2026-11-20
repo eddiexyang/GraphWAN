@@ -7,7 +7,7 @@ import (
 	"errors"
 	"math"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 	bolt "go.etcd.io/bbolt"
 )
 

@@ -7,8 +7,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/eWloYW8/GraphWAN/internal/packet"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/packet"
+	"github.com/eddiexyang/graphnet/internal/testutil"
 )
 
 func example() packet.Packet {

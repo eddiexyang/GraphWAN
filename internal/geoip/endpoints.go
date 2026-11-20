@@ -8,7 +8,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 var excluded = []netip.Prefix{

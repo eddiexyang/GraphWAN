@@ -11,12 +11,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 	bolt "go.etcd.io/bbolt"
 )
 
 var ErrConflict = errors.New("configuration revision conflict")
-var bucket = []byte("graphwan")
+var bucket = []byte("graphnet")
 var stateKey = []byte("state")
 
 type Store struct {
@@ -71,6 +71,7 @@ func read(tx *bolt.Tx) (model.State, error) {
 	if err := json.Unmarshal(raw, &state); err != nil {
 		return state, err
 	}
+	migrate(&state)
 	if err := state.Validate(); err != nil {
 		return state, err
 	}
@@ -108,6 +109,9 @@ func (s *Store) UpdateWithRecords(expected uint64, change func(*model.State, *Re
 			return err
 		}
 		state.Revision = expected + 1
+		if err := assignIndexes(&state); err != nil {
+			return err
+		}
 		if err := state.Validate(); err != nil {
 			return err
 		}

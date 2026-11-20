@@ -1,6 +1,6 @@
-# Build, install and operate GraphWAN
+# Build, install and operate GraphNet
 
-The same binary runs either `graphwan server` or `graphwan agent`. The React UI
+The same binary runs either `graphnet server` or `graphnet agent`. The React UI
 is embedded; no Node.js process, external web server or packet relay is required.
 Other platform adapters and their restrictions
 are described in the linked operation guides; a successful cross-build alone
@@ -13,8 +13,8 @@ builds. After editing the frontend, use the pinned Node/pnpm versions and run
 `pnpm --dir web install --frozen-lockfile` and `pnpm --dir web build` first.
 
 ```sh
-python3 scripts/cross-build.py --target linux/amd64 --output /tmp/graphwan-builds
-python3 scripts/package.py --builds /tmp/graphwan-builds --output /tmp/graphwan-release
+python3 scripts/cross-build.py --target linux/amd64 --output /tmp/graphnet-builds
+python3 scripts/package.py --builds /tmp/graphnet-builds --output /tmp/graphnet-release
 ```
 
 The output directory must not already exist. Omit `--target` to compile all
@@ -27,7 +27,7 @@ records the exact source revision and worktree state.
 
 Release preparation verifies every binary's size and SHA-256 against the internal
 build manifest, then writes one executable per target:
-`graphwan-<version>-<os>-<arch>` (`.exe` on Windows). Output files contain exactly
+`graphnet-<version>-<os>-<arch>` (`.exe` on Windows). Output files contain exactly
 the compiled binary; no archives, documents, manifests or checksum files are
 included. Unix files have executable permissions. This script prepares local
 files and does not publish releases.
@@ -36,8 +36,8 @@ The [release workflow](../.github/workflows/release.yml) builds and publishes th
 binaries automatically when a version tag is pushed. See [release CI](continuous-integration.md)
 for tag formats, architecture coverage and release contents.
 
-Download the matching binary and rename it to `graphwan` or `graphwan.exe`.
-On Unix, run `chmod +x graphwan` after downloading. Documentation, service examples
+Download the matching binary and rename it to `graphnet` or `graphnet.exe`.
+On Unix, run `chmod +x graphnet` after downloading. Documentation, service examples
 and helper scripts remain in the repository at the matching version tag.
 
 Windows Agents also require Wintun. From a checkout of the matching tag, run
@@ -54,14 +54,14 @@ Install only the unit and configuration needed on each host. Commands below are
 administrator actions on the deployment host, not part of the build process.
 
 ```sh
-sudo install -m 0755 graphwan /usr/local/bin/graphwan
-sudo install -d -m 0700 /etc/graphwan
+sudo install -m 0755 graphnet /usr/local/bin/graphnet
+sudo install -d -m 0700 /etc/graphnet
 # Controller host:
-sudo install -m 0600 deploy/linux/server.env.example /etc/graphwan/server.env
-sudo install -m 0644 deploy/linux/graphwan-server.service /etc/systemd/system/
+sudo install -m 0600 deploy/linux/server.env.example /etc/graphnet/server.env
+sudo install -m 0644 deploy/linux/graphnet-server.service /etc/systemd/system/
 # Agent host:
-sudo install -m 0600 deploy/linux/agent.env.example /etc/graphwan/agent.env
-sudo install -m 0644 deploy/linux/graphwan-agent.service /etc/systemd/system/
+sudo install -m 0600 deploy/linux/agent.env.example /etc/graphnet/agent.env
+sudo install -m 0644 deploy/linux/graphnet-agent.service /etc/systemd/system/
 ```
 
 Edit `server.env` before starting: set the listener, the DNS names/IPs clients
@@ -72,15 +72,15 @@ port only where administrators and Agents need access.
 
 ```sh
 sudo systemctl daemon-reload
-sudo systemctl enable --now graphwan-server
-sudo journalctl -u graphwan-server -n 50 --no-pager
+sudo systemctl enable --now graphnet-server
+sudo journalctl -u graphnet-server -n 50 --no-pager
 ```
 
 The controller runs as a dynamic unprivileged account. systemd manages its private
-`/var/lib/graphwan-server` state directory. After initialization, remove
-`GRAPHWAN_ADMIN_PASSWORD` from `server.env`; changing that variable does not reset
-the stored password. Copy `/var/lib/graphwan-server/ca.pem` using a trusted channel
-to administrative clients and to `/etc/graphwan/ca.pem` on each Agent host. This is
+`/var/lib/graphnet-server` state directory. After initialization, remove
+`GRAPHNET_ADMIN_PASSWORD` from `server.env`; changing that variable does not reset
+the stored password. Copy `/var/lib/graphnet-server/ca.pem` using a trusted channel
+to administrative clients and to `/etc/graphnet/ca.pem` on each Agent host. This is
 the **public** certificate; keep the controller database and CA private key private.
 
 HTTPS uses an ECDSA P-256 server key for TLS 1.3 signature negotiation. The
@@ -95,17 +95,17 @@ HTTPS controller origin, CA file, initial display name and token. Then:
 
 ```sh
 sudo modprobe tun
-sudo systemctl enable --now graphwan-agent
-sudo journalctl -u graphwan-agent -n 50 --no-pager
+sudo systemctl enable --now graphnet-agent
+sudo journalctl -u graphnet-agent -n 50 --no-pager
 ```
 
 After the log reports enrollment and the Agent appears in the UI, remove
-`GRAPHWAN_ENROLLMENT_TOKEN` from `agent.env`. Its identity, certificate and cached
-configuration persist in `/var/lib/graphwan-agent`; do not reuse that directory
+`GRAPHNET_ENROLLMENT_TOKEN` from `agent.env`. Its identity, certificate and cached
+configuration persist in `/var/lib/graphnet-agent`; do not reuse that directory
 on another machine. The Agent's controller origin cannot be changed while retaining
 an identity enrolled against a different origin.
 
-Set `GRAPHWAN_SERVER_TRANSPORT` to `tcp` (default), `websocket`, `grpc` or `wss`
+Set `GRAPHNET_SERVER_TRANSPORT` to `tcp` (default), `websocket`, `grpc` or `wss`
 for its first enrollment. Registered Agents ignore bootstrap transport changes
 and use their locally persisted Server directory. The CLI equivalent is
 `--server-transport`. All carriers use the existing controller port and the same
@@ -140,7 +140,7 @@ manual literal IPs; IPv4 is preferred within each source. DNS-only manual
 endpoints are not resolved for geolocation because they can point to proxies.
 
 On demand, the Server queries `https://api.ip.sb/geoip/{IP}` over HTTPS with a
-custom GraphWAN User-Agent. IP.SB supports IPv4 and IPv6 and credits MaxMind GeoIP
+custom GraphNet User-Agent. IP.SB supports IPv4 and IPv6 and credits MaxMind GeoIP
 as its data source. Only advertised public endpoint IPs are sent; no Agent
 upgrade or extra Agent telemetry is required. Missing coordinates remain unlocated.
 
@@ -153,7 +153,7 @@ Queries do not block controller startup, management HTTP requests or routing.
 Every Server replica maintains its own cache outside the replicated state;
 replicas sharing a public egress IP also share IP.SB's external rate limit.
 
-The former DB-IP downloads and `GRAPHWAN_GEOIP_DB` override are no longer used.
+The former DB-IP downloads and `GRAPHNET_GEOIP_DB` override are no longer used.
 Existing MMDB files may be removed; they are neither read nor refreshed.
 Provider attribution is preserved in the globe, node details and bundled notices.
 See https://ip.sb/api/ for service limits and commercial-use plans.
@@ -162,14 +162,14 @@ See https://ip.sb/api/ for service limits and commercial-use plans.
 
 Download the new binary from the release. Stop the corresponding service before
 replacing its binary; stopping the Agent temporarily removes its owned TUN devices
-and routes. Install the replacement to `/usr/local/bin/graphwan.new`, then rename
-it to `/usr/local/bin/graphwan` on the same filesystem and restart the service.
+and routes. Install the replacement to `/usr/local/bin/graphnet.new`, then rename
+it to `/usr/local/bin/graphnet` on the same filesystem and restart the service.
 If both services share the binary, stop and restart both. Keep environment files,
 the public CA and state directories. Restarting an enrolled Agent needs no token.
 Do not run two instances against one state directory.
 
 For a consistent backup, stop the service and copy its **entire** state directory
-and corresponding `/etc/graphwan` files to private storage, preserving permissions.
+and corresponding `/etc/graphnet` files to private storage, preserving permissions.
 The controller database contains the authority and topology; the Agent database
 contains private identity and durable configuration. Restore each to its original
 service path before starting. There is no online-backup command or general

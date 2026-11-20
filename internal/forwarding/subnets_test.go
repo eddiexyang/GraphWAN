@@ -7,11 +7,11 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/eWloYW8/GraphWAN/internal/forwarding"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/packet"
-	"github.com/eWloYW8/GraphWAN/internal/routing"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/forwarding"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/packet"
+	"github.com/eddiexyang/graphnet/internal/routing"
+	"github.com/eddiexyang/graphnet/internal/testutil"
 )
 
 func ipv4(src, dst string) []byte {

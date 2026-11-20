@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 // Selection is an authenticated control message received on the proposed Link.

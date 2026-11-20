@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/forwarding"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/packet"
-	"github.com/eWloYW8/GraphWAN/internal/streamproxy"
+	"github.com/eddiexyang/graphnet/internal/forwarding"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/packet"
+	"github.com/eddiexyang/graphnet/internal/streamproxy"
 )
 
 const (
@@ -472,11 +472,8 @@ func (r *DataPlane) acceptEgress(parent, ctx context.Context, network, remote mo
 
 // egressRecords returns what opens a new session's records: the ingress's
 // end-to-end session it names. A session to this Node must name one, so no
-// relay can have the egress send its bytes unsealed; one to a WireGuard leaf
-// this Agent attaches, which has no Agent key, is sealed per hop only. The
-// sealer is the Source, or for a WireGuard leaf the Agent it attaches, which
-// the session authenticates but this Agent cannot tell from another: the
-// leaf's address is as much the hops' word as it is without sealing.
+// relay can have the egress send its bytes unsealed. The sealer must be the
+// Source, which the session authenticates.
 func (r *DataPlane) egressRecords(network model.ID, request streamproxy.Request) (*streamproxy.Records, bool) {
 	state := r.state.Load()
 	if state == nil {
@@ -488,7 +485,7 @@ func (r *DataPlane) egressRecords(network model.ID, request streamproxy.Request)
 	if request.E2E == (e2eID{}) {
 		return nil, false
 	}
-	if _, keyed := state.keys[e2ePeer{network, request.Source}]; keyed && request.Sealer != request.Source {
+	if request.Sealer != request.Source {
 		return nil, false
 	}
 	s := r.e2eAccepted(network, request.Sealer, request.E2E)

@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/eWloYW8/GraphWAN/internal/controltransport"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/store"
+	"github.com/eddiexyang/graphnet/internal/controltransport"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/store"
 )
 
 type clients struct {

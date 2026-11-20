@@ -1,15 +1,15 @@
 # Client nodes
 
-A client node lets another application, such as an outbound of a proxy client,
-send its connections into a GraphWAN Network. The application decides which
-connections use GraphWAN and resolves names itself; the client node takes IP
+A client node lets another application that embeds GraphNet send its
+connections into a GraphNet Network. The application decides which
+connections use GraphNet and resolves names itself; the client node takes IP
 destinations and the Network routes them, for example to a node advertising
 `0.0.0.0/0` as an exit.
 
 On the network side a client node is a full Agent: it connects to the
 controller, discovers and reports its endpoints, and reaches its peers with every
-transport, including NAT hole punching. It differs only in what an embedded
-outbound does not need:
+transport, including NAT hole punching. It differs only in what an embedding
+application does not need:
 
 - connections live in a user-space stack at the node's overlay address instead of
   a TUN interface, and no host routes or gateway rules are managed;
@@ -21,7 +21,7 @@ outbound does not need:
 ## Add a client
 
 1. Create the node's identity in the embedding application, or run
-   `graphwan agent key --data-dir DIR` and take its public key.
+   `graphnet agent key --data-dir DIR` and take its public key.
 2. Register the public key with `POST /api/v1/agents` (see
    [registration by public key](control-api.md#registration-by-public-key)), or
    enroll the Agent with a token instead.

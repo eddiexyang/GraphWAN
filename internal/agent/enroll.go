@@ -10,8 +10,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/controltransport"
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/controltransport"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 // Enroll installs identity only: no TUN, peer listener or background service.

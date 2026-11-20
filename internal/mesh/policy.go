@@ -6,8 +6,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/link"
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/link"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 // Candidate IDs describe a stable preference. Bind the introduction separately

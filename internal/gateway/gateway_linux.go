@@ -6,11 +6,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 func applyPlatform(ctx context.Context, id model.ID, entries []Entry) error {
-	name := "graphwan_" + string(id)
+	name := "graphnet_" + string(id)
 	if !automatic(entries) {
 		if err := compatibilityForwarding(ctx, id, nil); err != nil {
 			return err

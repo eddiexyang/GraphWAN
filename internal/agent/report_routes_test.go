@@ -3,7 +3,7 @@ package agent
 import (
 	"testing"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 // The installed routes go to the controller with the first report of a

@@ -3,7 +3,7 @@ package packetbuf
 import (
 	"testing"
 
-	"github.com/eWloYW8/GraphWAN/internal/packet"
+	"github.com/eddiexyang/graphnet/internal/packet"
 )
 
 // Storage returns to the pool only when its last owner releases it.

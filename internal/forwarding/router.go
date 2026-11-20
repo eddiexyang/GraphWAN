@@ -12,9 +12,9 @@ import (
 	"slices"
 	"sync/atomic"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/packet"
-	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/packet"
+	"github.com/eddiexyang/graphnet/internal/packetbuf"
 )
 
 var (
@@ -67,6 +67,7 @@ type node struct {
 	id      model.ID
 	address netip.Addr
 	wire    [16]byte
+	index   uint16
 }
 
 type network struct {
@@ -79,7 +80,7 @@ type network struct {
 	subnets       map[netip.Prefix][]exit
 	prefixLengths []int
 	byNode        map[[16]byte]*node
-	wireguard     map[netip.Addr]*node
+	byIndex       map[uint16]*node
 	peers         map[model.ID]bool
 	// routes lists each destination's next hops, lowest Node ID first.
 	routes map[model.ID][]model.ID
@@ -199,7 +200,7 @@ func (r *Router) Configure(snapshot model.Snapshot) error {
 	}
 	next := &table{agentID: snapshot.AgentID, revision: snapshot.Revision, networks: map[model.ID]*network{}, byWire: map[[16]byte]*network{}}
 	for _, config := range snapshot.Networks {
-		n := &network{id: config.ID, self: config.Self, mtu: config.MTU, byAddress: map[netip.Addr]*node{}, byNode: map[[16]byte]*node{}, peers: map[model.ID]bool{}, routes: map[model.ID][]model.ID{}, costs: map[model.ID]uint64{}, ecmp: config.EqualCostPaths == model.EqualCostECMP}
+		n := &network{id: config.ID, self: config.Self, mtu: config.MTU, byAddress: map[netip.Addr]*node{}, byNode: map[[16]byte]*node{}, byIndex: map[uint16]*node{}, peers: map[model.ID]bool{}, routes: map[model.ID][]model.ID{}, costs: map[model.ID]uint64{}, ecmp: config.EqualCostPaths == model.EqualCostECMP}
 		// Snapshot validation above is the sole place where IDs need checking.
 		header, err := (packet.Packet{Header: packet.Header{Network: config.ID, Source: config.Self.ID, Destination: config.Self.ID, HopLimit: packet.DefaultHopLimit, Epoch: snapshot.Revision}, Payload: []byte{0}}).MarshalBinary()
 		if err != nil {
@@ -211,12 +212,13 @@ func (r *Router) Configure(snapshot model.Snapshot) error {
 		n.subnets = map[netip.Prefix][]exit{}
 		lengths := map[int]bool{}
 		for _, dest := range config.Directory {
-			entry := &node{id: dest.NodeID, address: dest.Address}
+			entry := &node{id: dest.NodeID, address: dest.Address, index: dest.Index}
 			if _, err := hex.Decode(entry.wire[:], []byte(dest.NodeID)); err != nil {
 				return err
 			}
 			n.byAddress[dest.Address] = entry
 			n.byNode[entry.wire] = entry
+			n.byIndex[entry.index] = entry
 			for _, subnet := range dest.AdvertisedSubnets {
 				n.subnets[subnet.Prefix] = append(n.subnets[subnet.Prefix], exit{entry, subnet.Metric})
 				lengths[subnet.Prefix.Bits()] = true
@@ -230,11 +232,7 @@ func (r *Router) Configure(snapshot model.Snapshot) error {
 		}
 		slices.Sort(n.prefixLengths)
 		slices.Reverse(n.prefixLengths)
-		n.wireguard = map[netip.Addr]*node{}
 		for _, peer := range config.Peers {
-			if peer.Node.WireGuard != nil {
-				n.wireguard[peer.Node.Address] = n.byAddress[peer.Node.Address]
-			}
 			n.peers[peer.Node.ID] = true
 		}
 		for _, route := range config.Routes {
@@ -603,6 +601,32 @@ func (r *Router) timeExceeded(ctx context.Context, n *network, raw []byte) error
 // CompactHeader rebuilds the header a compact Link omitted. Source and
 // destination are the owners of the inner addresses: the only Nodes fromPeer
 // admits for them, so the expanded frame still passes every FromPeer check.
+// CompactIndex returns the wire index of a network's Node.
+func (r *Router) CompactIndex(networkWire, nodeWire [16]byte) (uint16, bool) {
+	n := r.state.Load().byWire[networkWire]
+	if n == nil {
+		return 0, false
+	}
+	entry := n.byNode[nodeWire]
+	if entry == nil {
+		return 0, false
+	}
+	return entry.index, true
+}
+
+// CompactNode returns the Node of a network's wire index.
+func (r *Router) CompactNode(networkWire [16]byte, index uint16) ([16]byte, bool) {
+	n := r.state.Load().byWire[networkWire]
+	if n == nil {
+		return [16]byte{}, false
+	}
+	entry := n.byIndex[index]
+	if entry == nil {
+		return [16]byte{}, false
+	}
+	return entry.wire, true
+}
+
 func (r *Router) CompactHeader(header []byte, networkWire [16]byte, hopLimit uint8, payload []byte) bool {
 	n := r.state.Load().byWire[networkWire]
 	if n == nil {
@@ -748,27 +772,4 @@ func (n *network) next(destination model.ID, flow func() uint64) (model.ID, bool
 		return hops[0], true
 	}
 	return hops[flow()%uint64(len(hops))], true
-}
-
-// FromWireGuard accepts plaintext only after WireGuard authenticates the peer
-// and enforces its /32 or /128 AllowedIP. The active snapshot checks it again.
-func (r *Router) FromWireGuard(ctx context.Context, networkID model.ID, raw []byte) error {
-	n := r.state.Load().networks[networkID]
-	if n == nil {
-		return ErrNetwork
-	}
-	info, err := packet.InspectAddresses(raw)
-	if err != nil {
-		return err
-	}
-	client := n.wireguard[info.Source]
-	if client == nil {
-		return ErrSource
-	}
-	buffer, hop, err := r.encapsulateSource(ctx, n, raw, client)
-	if err != nil || buffer == nil {
-		return err
-	}
-	defer buffer.Release()
-	return r.send(ctx, networkID, hop, buffer.Data)
 }

@@ -59,7 +59,7 @@ Reproduce compile-time checks from Linux:
 
 ```sh
 GOOS=dragonfly GOARCH=amd64 CGO_ENABLED=0 go vet ./internal/tunnel ./internal/agent ./internal/discovery
-python3 scripts/cross-build.py --target dragonfly/amd64 --output /tmp/graphwan-dragonfly-build
+python3 scripts/cross-build.py --target dragonfly/amd64 --output /tmp/graphnet-dragonfly-build
 ```
 
 ## Physical-interface discovery

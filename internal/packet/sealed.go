@@ -10,7 +10,7 @@ import "encoding/binary"
 // flag marks such a frame; the frame's payload is then the IP packet and its
 // trailer.
 const (
-	Trailer = 24
+	Trailer = 21
 	// Sealed is the overlay header's flag byte value for a sealed packet.
 	Sealed = 1
 	// MaxReadable bounds HeaderLen: an IPv4 header with options and 8 bytes.

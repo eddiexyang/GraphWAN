@@ -3,7 +3,7 @@ package mesh
 import (
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/link"
+	"github.com/eddiexyang/graphnet/internal/link"
 )
 
 type retirement struct {

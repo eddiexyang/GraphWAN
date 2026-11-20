@@ -121,7 +121,7 @@ func Open(config Config) (_ Device, resultError error) {
 			}
 		}
 	}()
-	directory := filepath.Join("/dev", "graphwan-"+lease.token)
+	directory := filepath.Join("/dev", "graphnet-"+lease.token)
 	if err := os.Mkdir(directory, 0700); err != nil {
 		return nil, err
 	}

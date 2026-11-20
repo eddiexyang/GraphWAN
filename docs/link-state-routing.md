@@ -64,7 +64,7 @@ Agent reports to the controller today).
 - A new adjacency exchanges the current database, including the sender's own
   LSA, once. Sync messages are sent only to neighbours advertising support.
 - LSAs are not signed. Transit Agents are already trusted hop forwarders in
-  GraphWAN's model; LSAs are authenticated per hop by the peer session, like
+  GraphNet's model; LSAs are authenticated per hop by the peer session, like
   data.
 
 Convergence target: under 30 s under ordinary delivery conditions. The existing
@@ -112,7 +112,7 @@ connection, under the same per-hop trust as LSAs.
 Agent:
 
 - Every 5 s the Agent writes its routing view to `<data-dir>/linkstate.json`;
-  `graphwan agent status --data-dir <dir> [--lsdb|--routes|--events|--json]`
+  `graphnet agent status --data-dir <dir> [--lsdb|--routes|--events|--json]`
   prints it without a local control port:
   - LSDB: origin, sequence, age, revision, reported edges;
   - edges: each end's report (up, down, none) and the two-way result;

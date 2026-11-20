@@ -12,15 +12,15 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/eWloYW8/GraphWAN/internal/controltransport"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/store"
+	"github.com/eddiexyang/graphnet/internal/controltransport"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/store"
 	"github.com/hashicorp/raft"
 )
 
 type address string
 
-func (a address) Network() string { return "graphwan-cluster" }
+func (a address) Network() string { return "graphnet-cluster" }
 func (a address) String() string  { return string(a) }
 
 type streamLayer struct {

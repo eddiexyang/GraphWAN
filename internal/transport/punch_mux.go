@@ -16,7 +16,7 @@ import (
 	"github.com/hashicorp/yamux"
 )
 
-const punchALPN = "graphwan.punch.v1"
+const punchALPN = "graphnet.punch.v1"
 
 var punchMagic = [4]byte{'H', 'G', 'W', 1}
 
@@ -33,8 +33,10 @@ type PunchMux struct {
 // ends exchange their identity hint, authorize it against current topology, then
 // prove possession with mutually pinned TLS 1.3. The smaller key is TLS/yamux
 // client, independently of which kernel called accept. Every logical stream
-// subsequently runs the ordinary per-Network/Edge Noise admission.
-func NewPunchMux(ctx context.Context, conn net.Conn, identity ed25519.PublicKey, certificate *tls.Config, authorize func(ed25519.PublicKey) bool) (_ *PunchMux, err error) {
+// subsequently runs the ordinary per-Network/Edge Noise admission. A passive
+// end, one that accepted the connection, says nothing until the peer's hint is
+// authorized, so a probe learns neither the protocol nor the identity.
+func NewPunchMux(ctx context.Context, conn net.Conn, identity ed25519.PublicKey, certificate *tls.Config, authorize func(ed25519.PublicKey) bool, passive bool) (_ *PunchMux, err error) {
 	defer func() {
 		if err != nil {
 			conn.Close()
@@ -48,11 +50,13 @@ func NewPunchMux(ctx context.Context, conn net.Conn, identity ed25519.PublicKey,
 	if len(identity) != ed25519.PublicKeySize {
 		return nil, errors.New("invalid local punch identity")
 	}
-	var hello [36]byte
-	copy(hello[:4], punchMagic[:])
-	copy(hello[4:], identity)
-	if err := writeFull(conn, hello[:]); err != nil {
-		return nil, ctxError(ctx, err)
+	var hello, own [36]byte
+	copy(own[:4], punchMagic[:])
+	copy(own[4:], identity)
+	if !passive {
+		if err := writeFull(conn, own[:]); err != nil {
+			return nil, ctxError(ctx, err)
+		}
 	}
 	if _, err := io.ReadFull(conn, hello[:]); err != nil {
 		return nil, ctxError(ctx, err)
@@ -60,6 +64,11 @@ func NewPunchMux(ctx context.Context, conn net.Conn, identity ed25519.PublicKey,
 	remote := ed25519.PublicKey(bytes.Clone(hello[4:]))
 	if [4]byte(hello[:4]) != punchMagic || remote.Equal(identity) || !authorize(remote) {
 		return nil, errors.New("unconfigured TCP punch peer")
+	}
+	if passive {
+		if err := writeFull(conn, own[:]); err != nil {
+			return nil, ctxError(ctx, err)
+		}
 	}
 	client := bytes.Compare(identity, remote) < 0
 	config := certificate.Clone()

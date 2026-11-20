@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 // Reporting status leaves coordinated selection untouched: no new sequence,

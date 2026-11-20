@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/secure"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
-	"github.com/eWloYW8/GraphWAN/internal/transport"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/secure"
+	"github.com/eddiexyang/graphnet/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/transport"
 )
 
 // The receiver exposes only the original single-message transport API.
@@ -88,7 +88,8 @@ func TestPacketChannelBatchWithLegacyReceiver(t *testing.T) {
 						} else if i == count-1 {
 							size = secure.MaxPlaintext
 						}
-						payloads[i] = bytes.Repeat([]byte{byte(i + 1)}, size)
+						// First bytes stay below Masked, which a packet is.
+						payloads[i] = bytes.Repeat([]byte{byte(i%(Masked-1) + 1)}, size)
 						originals[i] = bytes.Clone(payloads[i])
 					}
 					done := make(chan error, 1)
@@ -176,7 +177,7 @@ func TestSealedPayloadIsEncryptedOnce(t *testing.T) {
 	header := append([]byte{SealedPayload}, bytes.Repeat([]byte("H"), SealedHeader-1)...)
 	sealed := append(bytes.Clone(header), bytes.Repeat([]byte("already sealed"), 500)...)
 	data := bytes.Repeat([]byte("D"), 1000)
-	readable := append([]byte{SealedPrefix, 40}, bytes.Repeat([]byte("R"), 38)...)
+	readable := append([]byte{Masked | 32}, bytes.Repeat([]byte("R"), MaskedRegion)...)
 	packet := append(bytes.Clone(readable), bytes.Repeat([]byte("sealed packet"), 100)...)
 	for _, batch := range [][][]byte{{sealed}, {packet}, {data, sealed, packet, data, sealed}} {
 		recording.sent.Reset()
@@ -201,15 +202,19 @@ func TestSealedPayloadIsEncryptedOnce(t *testing.T) {
 			}
 		}
 		wire := recording.sent.Bytes()
-		if bytes.Contains(wire, header) || bytes.Contains(wire, readable[2:]) || bytes.Contains(wire, data[:64]) {
+		if bytes.Contains(wire, header) || bytes.Contains(wire, readable[1:]) || bytes.Contains(wire, data[:64]) {
 			t.Fatal("the channel sent bytes it should have encrypted")
 		}
 		for _, m := range batch {
-			if rest := m[prefix(m):]; len(rest) > 0 && !bytes.Contains(wire, rest) {
+			end := prefix(m)
+			if m[0] >= Masked {
+				end = maskedSpan(m)
+			}
+			if rest := m[end:]; len(rest) > 0 && !bytes.Contains(wire, rest) {
 				t.Fatal("the channel encrypted bytes already sealed")
 			}
 			// The rest went to the transport where it was, not copied.
-			if rest := m[prefix(m):]; len(rest) > 0 && !slices.ContainsFunc(recording.parts, func(part []byte) bool { return len(part) > 0 && &part[0] == &rest[0] }) {
+			if rest := m[end:]; len(rest) > 0 && !slices.ContainsFunc(recording.parts, func(part []byte) bool { return len(part) > 0 && &part[0] == &rest[0] }) {
 				t.Fatal("the channel copied bytes past its seal")
 			}
 		}

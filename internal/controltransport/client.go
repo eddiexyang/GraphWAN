@@ -6,14 +6,14 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"github.com/eWloYW8/GraphWAN/internal/sockets"
+	"github.com/eddiexyang/graphnet/internal/sockets"
 	"net"
 	"net/http"
 	"net/url"
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/eWloYW8/GraphWAN/internal/transport"
+	"github.com/eddiexyang/graphnet/internal/transport"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -138,7 +138,7 @@ func dialGRPC(ctx context.Context, addr string) (net.Conn, error) {
 		header, headerErr := stream.Header()
 		if headerErr != nil {
 			err = headerErr
-		} else if values := header.Get("graphwan-protocol"); len(values) != 1 || values[0] != GRPCProtocol {
+		} else if values := header.Get("graphnet-protocol"); len(values) != 1 || values[0] != GRPCProtocol {
 			err = errors.New("controller did not acknowledge gRPC tunnel protocol")
 		}
 	}

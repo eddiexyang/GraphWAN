@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/linkstate"
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/linkstate"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 // Edge damping keeps a flapping edge out of link-state. An edge that goes

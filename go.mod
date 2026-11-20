@@ -1,4 +1,4 @@
-module github.com/eWloYW8/GraphWAN
+module github.com/eddiexyang/graphnet
 
 go 1.26.3
 
@@ -15,6 +15,7 @@ require (
 	github.com/kardianos/service v1.2.4
 	github.com/quic-go/quic-go v0.63.0
 	github.com/vishvananda/netlink v1.3.1
+	github.com/vishvananda/netns v0.0.5
 	go.etcd.io/bbolt v1.5.0
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.58.0
@@ -38,7 +39,6 @@ require (
 	github.com/hashicorp/golang-lru v1.0.2 // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
-	github.com/vishvananda/netns v0.0.5 // indirect
 	golang.org/x/exp v0.0.0-20250711185948-6ae5c78190dc // indirect
 	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.15.0 // indirect

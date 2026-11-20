@@ -105,7 +105,7 @@ export default function Servers({
                   disabled={
                     server.revoked || !software.find((s) => s.id === server.id)?.update?.managed
                   }
-                  title="Requires graphwan server service"
+                  title="Requires graphnet server service"
                   onClick={() => setUpdating(server)}
                 >
                   Update

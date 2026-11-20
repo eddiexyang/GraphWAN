@@ -3,7 +3,6 @@ package model
 import (
 	"bytes"
 	"crypto/ed25519"
-	"encoding/base64"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -67,13 +66,13 @@ func (s Snapshot) Validate(agentID ID) error {
 			}
 		}
 		prefixes = append(prefixes, n.CIDR)
-		if n.MTU < DefaultMTU || n.MTU > MaxMTU || !n.Cipher.Valid() {
+		if n.MTU < MinMTU || n.MTU > MaxMTU || !n.Cipher.Valid() {
 			return fmt.Errorf("invalid MTU or cipher")
 		}
 		if !n.EqualCostPaths.Valid() || !validFailureDetection(n.FailureDetection) {
 			return fmt.Errorf("invalid equal-cost path or failure detection setting")
 		}
-		if n.Self.AgentID != agentID || n.Self.WireGuard != nil {
+		if n.Self.AgentID != agentID {
 			return fmt.Errorf("network self membership belongs to another agent")
 		}
 		if err := validateName(n.Self.Name); err != nil {
@@ -86,7 +85,12 @@ func (s Snapshot) Validate(agentID ID) error {
 		addresses := map[netip.Addr]bool{}
 		advertised := 0
 		subnetDirectory := map[ID][]AdvertisedSubnet{}
+		indexes := map[uint16]bool{}
 		for _, d := range n.Directory {
+			if d.Index == 0 || indexes[d.Index] {
+				return fmt.Errorf("directory node %s needs a unique nonzero index", d.NodeID)
+			}
+			indexes[d.Index] = true
 			if err := validateAdvertised(n.CIDR, d.AdvertisedSubnets, &advertised); err != nil {
 				return err
 			}
@@ -124,33 +128,23 @@ func (s Snapshot) Validate(agentID ID) error {
 			if addr, ok := directory[p.Node.ID]; !ok || addr != p.Node.Address {
 				return fmt.Errorf("peer is absent from address directory")
 			}
-			if p.Node.WireGuard != nil {
-				if err := p.Node.WireGuard.Validate(); err != nil {
-					return err
-				}
-				decoded, _ := base64.StdEncoding.DecodeString(p.Node.WireGuard.PublicKey)
-				if p.Node.AgentID != "" || len(p.Node.AdvertisedSubnets) != 0 || len(subnetDirectory[p.Node.ID]) != 0 || len(p.Endpoints) != 0 || !bytes.Equal(decoded, p.PublicKey) {
-					return fmt.Errorf("invalid WireGuard peer")
-				}
-			} else {
-				if err := p.Node.AgentID.Validate(); err != nil {
-					return err
-				}
-				if members[p.Node.AgentID] {
-					return fmt.Errorf("duplicate peer agent")
-				}
-				members[p.Node.AgentID] = true
-				if err := validateName(p.Node.Name); err != nil {
-					return err
-				}
-				if len(p.PublicKey) != ed25519.PublicKeySize {
-					return fmt.Errorf("invalid peer identity")
-				}
-				if prior, ok := identities[p.Node.AgentID]; ok && !bytes.Equal(prior, p.PublicKey) {
-					return fmt.Errorf("conflicting peer identities")
-				}
-				identities[p.Node.AgentID] = p.PublicKey
+			if err := p.Node.AgentID.Validate(); err != nil {
+				return err
 			}
+			if members[p.Node.AgentID] {
+				return fmt.Errorf("duplicate peer agent")
+			}
+			members[p.Node.AgentID] = true
+			if err := validateName(p.Node.Name); err != nil {
+				return err
+			}
+			if len(p.PublicKey) != ed25519.PublicKeySize {
+				return fmt.Errorf("invalid peer identity")
+			}
+			if prior, ok := identities[p.Node.AgentID]; ok && !bytes.Equal(prior, p.PublicKey) {
+				return fmt.Errorf("conflicting peer identities")
+			}
+			identities[p.Node.AgentID] = p.PublicKey
 			if err := validateEndpoints(p.Endpoints); err != nil {
 				return err
 			}
@@ -169,17 +163,6 @@ func (s Snapshot) Validate(agentID ID) error {
 			}
 			if len(e.PreferredCandidate) > 256 || len(e.Transports) == 0 {
 				return fmt.Errorf("invalid edge transport policy")
-			}
-			if p.Node.WireGuard != nil {
-				if len(e.Transports) != 1 || e.Transports[0] != WireGuard || e.PreferredCandidate != "" {
-					return fmt.Errorf("invalid WireGuard edge")
-				}
-			} else {
-				for _, t := range e.Transports {
-					if t == WireGuard {
-						return fmt.Errorf("invalid regular peer transport")
-					}
-				}
 			}
 			transports := map[Transport]bool{}
 			for _, t := range e.Transports {
@@ -211,16 +194,13 @@ func (s Snapshot) Validate(agentID ID) error {
 			if !ok || r.Cost < uint64(peer.Edge.Weight) || r.Cost > uint64(MaxNodes)*uint64(^uint32(0)) {
 				return fmt.Errorf("invalid next hop or route cost")
 			}
-			if peer.Node.WireGuard != nil && r.Destination != r.NextHop {
-				return fmt.Errorf("WireGuard peer cannot forward transit traffic")
-			}
 			if r.Destination == r.NextHop && r.Cost != uint64(peer.Edge.Weight) {
 				return fmt.Errorf("invalid direct route cost")
 			}
 			previous := r.NextHop
 			for _, alternate := range r.Alternates {
 				peer, ok := peers[alternate]
-				if !ok || alternate <= previous || r.Cost < uint64(peer.Edge.Weight) || peer.Node.WireGuard != nil && r.Destination != alternate {
+				if !ok || alternate <= previous || r.Cost < uint64(peer.Edge.Weight) {
 					return fmt.Errorf("invalid alternate next hop")
 				}
 				previous = alternate

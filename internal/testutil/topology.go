@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 func ID(n int) model.ID { return model.ID(fmt.Sprintf("%032x", n)) }
@@ -22,7 +22,7 @@ func Topology() model.State {
 		seed[0] = byte(i + 1)
 		key := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
 		s.Agents = append(s.Agents, model.Agent{ID: ID(10 + i), Name: fmt.Sprintf("Agent %c", 'A'+i), PublicKey: key, ListenPort: model.DefaultPort, Endpoints: []model.Endpoint{{ID: ID(30 + i), Transport: model.UDP, URL: fmt.Sprintf("udp://192.0.2.%d:24752", i+1), Source: model.Manual}}})
-		n.Nodes = append(n.Nodes, model.Node{ID: ID(20 + i), AgentID: ID(10 + i), Name: fmt.Sprintf("Node %c", 'A'+i), Address: netip.MustParseAddr(fmt.Sprintf("10.42.0.%d", i+1))})
+		n.Nodes = append(n.Nodes, model.Node{ID: ID(20 + i), AgentID: ID(10 + i), Name: fmt.Sprintf("Node %c", 'A'+i), Address: netip.MustParseAddr(fmt.Sprintf("10.42.0.%d", i+1)), Index: uint16(i + 1)})
 	}
 	for i, pair := range [][3]int{{0, 1, 10}, {1, 2, 10}, {0, 3, 1}, {3, 2, 30}} {
 		n.Edges = append(n.Edges, model.Edge{ID: ID(40 + i), A: ID(20 + pair[0]), B: ID(20 + pair[1]), Weight: uint32(pair[2]), Enabled: true, Transports: []model.Transport{model.UDP, model.TCP}, Methods: model.ConnectionMethods{IPv4Direct: true, IPv6Direct: true, HolePunch: true}})

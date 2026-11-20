@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 type InterfaceOptions struct {

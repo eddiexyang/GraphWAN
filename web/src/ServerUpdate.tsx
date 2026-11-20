@@ -41,7 +41,7 @@ export default function ServerUpdate({
       </dl>
       {current?.error && <ErrorBox>{current.error}</ErrorBox>}
       {!current?.managed && !queued && (
-        <ErrorBox>Requires an online Server installed with graphwan server service.</ErrorBox>
+        <ErrorBox>Requires an online Server installed with graphnet server service.</ErrorBox>
       )}
       <div className="actions">
         <button

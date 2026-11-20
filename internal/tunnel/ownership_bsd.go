@@ -15,7 +15,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const persistentTunRegistry = "/var/run/graphwan-tun"
+const persistentTunRegistry = "/var/run/graphnet-tun"
 
 // The record is durable before creation; its lock remains held until cleanup.
 // An interface is recoverable only after its description carries this random
@@ -241,7 +241,7 @@ func cleanTunLease(name, token string) error {
 func removeTunNode(token string) error {
 	// Resolve the private directory once without following symlinks. Never walk
 	// through a replacement path to unlink another application's device node.
-	path := filepath.Join("/dev", "graphwan-"+token)
+	path := filepath.Join("/dev", "graphnet-"+token)
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil

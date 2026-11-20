@@ -7,8 +7,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/update"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/update"
 )
 
 func (s *Server) latestRelease(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +53,7 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if status == nil || !status.Connected || time.Since(status.LastSeen) > 45*time.Second || status.Update == nil || !status.Update.Managed {
-		fail(w, 409, "agent must be online and managed by graphwan agent service")
+		fail(w, 409, "agent must be online and managed by graphnet agent service")
 		return
 	}
 	if status.Update.Phase == "downloading" || status.Update.Phase == "installing" {

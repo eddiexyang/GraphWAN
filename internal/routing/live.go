@@ -4,7 +4,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 type EdgeKey struct{ Network, Edge model.ID }
@@ -47,18 +47,6 @@ func Availability(state model.State, reports []model.AgentStatus, now time.Time)
 				continue
 			}
 			key := EdgeKey{n.ID, edge.ID}
-			if slices.Contains(edge.Transports, model.WireGuard) {
-				gateway := a
-				if gateway == "" {
-					gateway = b
-				}
-				for _, t := range ready[gateway][key] {
-					if t == model.WireGuard {
-						up[key] = true
-					}
-				}
-				continue
-			}
 			for id, transport := range ready[a][key] {
 				if ready[b][key][id] == transport && slices.Contains(edge.Transports, transport) {
 					up[key] = true

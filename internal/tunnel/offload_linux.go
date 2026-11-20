@@ -7,7 +7,7 @@ import (
 	"errors"
 	"io"
 
-	"github.com/eWloYW8/GraphWAN/internal/packet"
+	"github.com/eddiexyang/graphnet/internal/packet"
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/checksum"

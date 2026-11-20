@@ -75,5 +75,5 @@ jobs:
               --notes "Controller image digest: $IMAGE_DIGEST
           Agent image: $AGENT_IMAGE@$AGENT_DIGEST"
           fi
-          gh release upload "$RELEASE_TAG" "$RELEASE_DIR"/graphwan-* --clobber
+          gh release upload "$RELEASE_TAG" "$RELEASE_DIR"/graphnet-* --clobber
           gh release edit "$RELEASE_TAG" --draft=false --prerelease

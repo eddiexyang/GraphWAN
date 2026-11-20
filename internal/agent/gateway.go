@@ -3,9 +3,9 @@ package agent
 import (
 	"net/netip"
 
-	"github.com/eWloYW8/GraphWAN/internal/gateway"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/packet"
+	"github.com/eddiexyang/graphnet/internal/gateway"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/packet"
 )
 
 func gatewayEntries(state *runtimeState) []gateway.Entry {

@@ -9,7 +9,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 	"github.com/flynn/noise"
 )
 
@@ -58,7 +58,7 @@ func NewHandshake(config Config) (*Handshake, error) {
 	if !config.Initiator {
 		initiator, responder = responder, initiator
 	}
-	return newHandshake(config, []byte(fmt.Sprintf("GraphWAN/peer/v1/%s/%s/%s/%s/%s", config.Network, config.Edge, initiator, responder, config.Transport)))
+	return newHandshake(config, []byte(fmt.Sprintf("GraphNet/peer/v1/%s/%s/%s/%s/%s", config.Network, config.Edge, initiator, responder, config.Transport)))
 }
 
 // E2EConfig names the two Nodes of an end-to-end session: where traffic
@@ -97,7 +97,7 @@ func NewEndToEndHandshake(config E2EConfig) (*Handshake, error) {
 		initiator, responder = responder, initiator
 	}
 	return newHandshake(Config{Network: config.Network, Local: config.Local, Peer: config.Peer, Cipher: config.Cipher, Identity: config.Identity, PeerIdentity: config.PeerIdentity, Initiator: config.Initiator},
-		[]byte(fmt.Sprintf("GraphWAN/e2e/v1/%s/%s/%s", config.Network, initiator, responder)))
+		[]byte(fmt.Sprintf("GraphNet/e2e/v1/%s/%s/%s", config.Network, initiator, responder)))
 }
 
 func newHandshake(config Config, prologue []byte) (*Handshake, error) {
@@ -119,7 +119,7 @@ func newHandshake(config Config, prologue []byte) (*Handshake, error) {
 	return &Handshake{state: state, config: config, prologue: prologue, proof: proof}, nil
 }
 func identityProof(prologue []byte, initiator bool, static []byte) []byte {
-	message := append([]byte("GraphWAN/identity/v1/"), prologue...)
+	message := append([]byte("GraphNet/identity/v1/"), prologue...)
 	role := byte(0)
 	if initiator {
 		role = 1
@@ -183,5 +183,5 @@ func (h *Handshake) finish(first, second *noise.CipherState) *Session {
 		send, receive = receive, send
 	}
 	binding := bytes.Clone(h.state.ChannelBinding())
-	return newSession(hex.EncodeToString(binding), binding, send.Cipher(), receive.Cipher())
+	return newSession(hex.EncodeToString(binding), binding, send.Cipher(), receive.Cipher(), maskKey(send), maskKey(receive))
 }

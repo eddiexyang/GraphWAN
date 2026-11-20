@@ -13,10 +13,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/discovery"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/store"
-	"github.com/eWloYW8/GraphWAN/internal/transport"
+	"github.com/eddiexyang/graphnet/internal/discovery"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/store"
+	"github.com/eddiexyang/graphnet/internal/transport"
 )
 
 // InterfaceEndpoints shares the Agent's physical-interface and container

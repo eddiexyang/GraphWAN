@@ -5,7 +5,7 @@ import (
 	"crypto/cipher"
 	"encoding/binary"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 	"github.com/flynn/noise"
 	"golang.org/x/crypto/chacha20poly1305"
 )
@@ -23,7 +23,7 @@ func cipherFunction(suite model.CipherSuite) noise.CipherFunc {
 	}
 }
 
-// AES128GCM and XChaChaPoly are GraphWAN extensions to Noise's CipherFunc.
+// AES128GCM and XChaChaPoly are GraphNet extensions to Noise's CipherFunc.
 // Distinct names domain-separate their handshake transcripts and derived keys.
 type extendedCipher struct{ suite model.CipherSuite }
 

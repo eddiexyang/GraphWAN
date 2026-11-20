@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/resources"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/resources"
 )
 
 // Runtime.Apply must either install the whole snapshot or return an error while

@@ -12,10 +12,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/link"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/peer"
-	"github.com/eWloYW8/GraphWAN/internal/transport"
+	"github.com/eddiexyang/graphnet/internal/link"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/peer"
+	"github.com/eddiexyang/graphnet/internal/transport"
 )
 
 type introduction struct {
@@ -29,7 +29,6 @@ type introduction struct {
 	// LinkState offers link-state advertisements on this Link.
 	LinkState bool `json:"link_state,omitempty"`
 	// CompactData offers data frames without the packet header.
-	CompactData bool `json:"compact_data,omitempty"`
 	// SizeProbe offers full-size probes before the Link carries traffic.
 	SizeProbe bool `json:"size_probe,omitempty"`
 	// TCPResume offers resumable TCP sessions, on streams or a carrier TCP.
@@ -249,18 +248,6 @@ func (g *group) connect(ctx context.Context, candidate link.Candidate) (*peer.Ch
 			return nil, linkCaps{}, err
 		}
 		raw = transport.NewStream(conn)
-	} else if candidate.Endpoint.Transport == model.WS || candidate.Endpoint.Transport == model.WSS {
-		conn, err := transport.DialWebSocketAt(ctx, candidate.Endpoint, candidate.Family, g.policy.Load().peer.PublicKey, nil, target)
-		if err != nil {
-			return nil, linkCaps{}, err
-		}
-		raw = conn
-	} else if candidate.Endpoint.Transport == model.GRPC {
-		conn, err := transport.DialGRPCAt(ctx, candidate.Endpoint, candidate.Family, g.policy.Load().peer.PublicKey, nil, target)
-		if err != nil {
-			return nil, linkCaps{}, err
-		}
-		raw = conn
 	} else if candidate.Endpoint.Transport == model.QUIC {
 		conn, err := g.mesh.quic.DialAt(ctx, candidate.Endpoint, candidate.Family, g.policy.Load().peer.PublicKey, target)
 		if err != nil {
@@ -292,9 +279,9 @@ func (g *group) connect(ctx context.Context, candidate link.Candidate) (*peer.Ch
 		return nil, linkCaps{}, err
 	}
 	streams := g.mesh.streamsEnabled() && streamTransport(candidate.Endpoint.Transport)
-	offered := linkCaps{streams: streams, resume: g.mesh.resumeEnabled(), windows: streams && g.mesh.resumeEnabled(), linkState: g.mesh.linkStateEnabled(), compact: g.mesh.compactHeader() != nil, sizeProbe: streamTransport(candidate.Endpoint.Transport)}
+	offered := linkCaps{streams: streams, resume: g.mesh.resumeEnabled(), windows: streams && g.mesh.resumeEnabled(), linkState: g.mesh.linkStateEnabled(), sizeProbe: streamTransport(candidate.Endpoint.Transport)}
 	heartbeat, _ := linkTiming(g.policy.Load().detection, offered)
-	intro := introduction{Candidate: candidate.ID, Endpoint: endpointFingerprint(candidate.Endpoint), Scope: link.ScopeIdentity(candidate.Scope), PathExchange: true, TCPStreams: offered.streams, LinkState: offered.linkState, CompactData: offered.compact, SizeProbe: offered.sizeProbe, TCPResume: offered.resume, Windows: offered.windows, Heartbeat: uint32(heartbeat.Milliseconds())}
+	intro := introduction{Candidate: candidate.ID, Endpoint: endpointFingerprint(candidate.Endpoint), Scope: link.ScopeIdentity(candidate.Scope), PathExchange: true, TCPStreams: offered.streams, LinkState: offered.linkState, SizeProbe: offered.sizeProbe, TCPResume: offered.resume, Windows: offered.windows, Heartbeat: uint32(heartbeat.Milliseconds())}
 	if candidate.Target.IsValid() {
 		intro.Target = candidate.Target.String()
 	}

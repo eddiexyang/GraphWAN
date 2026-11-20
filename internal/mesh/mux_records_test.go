@@ -8,10 +8,10 @@ import (
 	"io"
 	"testing"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/secure"
-	"github.com/eWloYW8/GraphWAN/internal/streamproxy"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/secure"
+	"github.com/eddiexyang/graphnet/internal/streamproxy"
+	"github.com/eddiexyang/graphnet/internal/testutil"
 )
 
 func e2eSessions(t testing.TB) (*secure.Session, *secure.Session) {

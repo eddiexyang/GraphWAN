@@ -8,7 +8,7 @@ import (
 	"net/netip"
 	"sync"
 
-	"github.com/eWloYW8/GraphWAN/internal/tunnel"
+	"github.com/eddiexyang/graphnet/internal/tunnel"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"

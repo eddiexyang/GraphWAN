@@ -12,8 +12,10 @@ import (
 type udpBatchSocket struct{}
 type udpBatchSend struct{}
 
-func newUDPBatchSocket(*net.UDPConn) *udpBatchSocket       { return nil }
-func setUDPReadBuffer(socket *net.UDPConn, size int) error { return socket.SetReadBuffer(size) }
+func newUDPBatchSocket(socket *net.UDPConn) *udpBatchSocket {
+	_ = socket.SetReadBuffer(udpReceiveBuffer)
+	return nil
+}
 
 // SendBatchParts sends datagram i as payloads[i] followed by tails[i], when
 // tails is not nil; without sendmmsg each datagram is joined first.
@@ -36,7 +38,7 @@ func (d *Datagram) SendBatch(ctx context.Context, payloads [][]byte) error {
 		return errors.New("invalid UDP batch size")
 	}
 	for _, raw := range payloads {
-		if len(raw) == 0 || len(raw) > MaxMessage {
+		if len(raw) == 0 || len(raw) > MaxMessage || raw[0] < udpFirstKind {
 			return errors.New("invalid UDP message size")
 		}
 	}
@@ -50,7 +52,7 @@ func (d *Datagram) SendBatch(ctx context.Context, payloads [][]byte) error {
 
 type udpPacketReader struct {
 	socket  *net.UDPConn
-	buffer  [MaxMessage + udpHeaderSize + 1]byte
+	buffer  [MaxMessage + udpTokenSize + 1]byte
 	control [256]byte
 }
 

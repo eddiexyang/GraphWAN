@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 // Exercise real probe/liveness state transitions with a clock supplied by the

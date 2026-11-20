@@ -9,13 +9,13 @@ import (
 // TLS-terminating gateway, or registered by public key) sign a single-use
 // controller challenge with their Ed25519 key, carried in these headers.
 const (
-	AgentIDHeader        = "X-GraphWAN-Agent"
-	AgentChallengeHeader = "X-GraphWAN-Challenge"
-	AgentSignatureHeader = "X-GraphWAN-Signature"
+	AgentIDHeader        = "X-GraphNet-Agent"
+	AgentChallengeHeader = "X-GraphNet-Challenge"
+	AgentSignatureHeader = "X-GraphNet-Signature"
 	AgentChallengePath   = "/api/v1/agent/challenge"
 	// AgentKeyHeader identifies the Agent by its public key instead of its ID.
 	// An Agent registered by public key uses it once, to learn its ID.
-	AgentKeyHeader = "X-GraphWAN-Agent-Key"
+	AgentKeyHeader = "X-GraphNet-Agent-Key"
 	// AgentRegistrationPath returns the Agent ID, CA and controller directory
 	// to an authenticated Agent.
 	AgentRegistrationPath = "/api/v1/agent/registration"
@@ -24,13 +24,13 @@ const (
 // AgentChallengeMessage is the exact byte string an Agent signs. The prefix
 // keeps these signatures distinct from any other use of the Agent key.
 func AgentChallengeMessage(id ID, challenge string) []byte {
-	return []byte("graphwan agent challenge v1\n" + string(id) + "\n" + challenge)
+	return []byte("graphnet agent challenge v1\n" + string(id) + "\n" + challenge)
 }
 
 // AgentKeyChallengeMessage is signed when the Agent identifies by public key.
 // Its distinct prefix keeps it from being replayed as an ID challenge.
 func AgentKeyChallengeMessage(key ed25519.PublicKey, challenge string) []byte {
-	return []byte("graphwan agent key challenge v1\n" + EncodeAgentKey(key) + "\n" + challenge)
+	return []byte("graphnet agent key challenge v1\n" + EncodeAgentKey(key) + "\n" + challenge)
 }
 
 // EncodeAgentKey is the header and API text form of an Agent public key.

@@ -4,8 +4,8 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/testutil"
 )
 
 func TestValidateTopology(t *testing.T) {
@@ -50,9 +50,8 @@ func TestValidateTopology(t *testing.T) {
 		"zero weight":    func(s *model.State) { s.Networks[0].Edges[0].Weight = 0 },
 		"unknown cipher": func(s *model.State) { s.Networks[0].Cipher = "none" },
 		"invalid MTU":    func(s *model.State) { s.Networks[0].MTU = 65535 },
-		"automatic websocket": func(s *model.State) {
-			s.Agents[0].Endpoints[0].Source = model.Interface
-			s.Agents[0].Endpoints[0].Transport = model.WSS
+		"removed transport": func(s *model.State) {
+			s.Agents[0].Endpoints[0].Transport = "wss"
 		},
 		"missing expiry": func(s *model.State) { s.Agents[0].Endpoints[0].Source = model.Observed },
 		"overlapping networks": func(s *model.State) {

@@ -6,9 +6,9 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/link"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/link"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/testutil"
 )
 
 func TestPunchExtensionPolicy(t *testing.T) {

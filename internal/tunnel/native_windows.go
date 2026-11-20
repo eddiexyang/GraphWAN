@@ -76,11 +76,11 @@ type windowsDevice struct {
 }
 
 // Wintun may rename an existing adapter to make room for a requested alias.
-// Serialize GraphWAN creators across processes and reject occupied aliases first.
+// Serialize GraphNet creators across processes and reject occupied aliases first.
 // A Windows mutex belongs to an OS thread, so pin that thread until release.
 func reserveWindowsName(name string) (func(), error) {
 	hash := sha256.Sum256([]byte(strings.ToLower(name)))
-	mutexName, _ := windows.UTF16PtrFromString(fmt.Sprintf(`Global\GraphWAN.TUN.%x`, hash))
+	mutexName, _ := windows.UTF16PtrFromString(fmt.Sprintf(`Global\GraphNet.TUN.%x`, hash))
 	mutex, err := windows.CreateMutex(nil, false, mutexName)
 	if err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
 		return nil, err
@@ -129,7 +129,7 @@ func Open(config Config) (Device, error) {
 			return nil, fmt.Errorf("incompatible wintun.dll: missing %s: %w", name, err)
 		}
 	}
-	adapter, err := wintun.CreateAdapter(config.Name, "GraphWAN", nil)
+	adapter, err := wintun.CreateAdapter(config.Name, "GraphNet", nil)
 	if err != nil {
 		return nil, fmt.Errorf("create Wintun (requires administrator and matching wintun.dll beside the executable): %w", err)
 	}

@@ -1,6 +1,7 @@
+import ipaddr from 'ipaddr.js'
 import { effectiveEdges, pruneGroups, type FullMeshGroup, type GroupLink } from './groups'
-export type Transport = 'udp' | 'tcp' | 'quic' | 'ws' | 'wss' | 'grpc' | 'wireguard'
-export const transports: Transport[] = ['udp', 'tcp', 'quic', 'ws', 'wss', 'grpc']
+export type Transport = 'udp' | 'tcp' | 'quic'
+export const transports: Transport[] = ['udp', 'tcp', 'quic']
 export type Endpoint = {
   id: string
   transport: Transport
@@ -26,7 +27,6 @@ export type AdvertisedSubnet = {
   metric?: number
 }
 export type Node = {
-  wireguard?: { public_key: string; endpoint?: string }
   advertised_subnets?: AdvertisedSubnet[]
   id: string
   agent_id: string
@@ -87,10 +87,6 @@ export type State = {
   agents: Agent[]
 }
 export type Link = {
-  rtt_valid?: boolean
-  rtt_measured_at?: string
-  wireguard_public_key?: string
-  last_handshake?: string
   network_id: string
   edge_id: string
   link_id: string
@@ -106,18 +102,8 @@ export type Link = {
   rx_bytes: number
   tx_bytes: number
 }
-// WireGuard uses optional ICMP samples; missing replies never imply zero RTT.
 export function linkRTT(link: Link | undefined): number | undefined {
   if (!link || !Number.isFinite(link.rtt_ms) || link.rtt_ms < 0) return undefined
-  if (
-    link.transport === 'wireguard' &&
-    (!link.rtt_valid ||
-      !link.healthy ||
-      !link.rtt_measured_at ||
-      !Number.isFinite(Date.parse(link.rtt_measured_at)) ||
-      Date.now() - Date.parse(link.rtt_measured_at) > 40_000)
-  )
-    return undefined
   return link.rtt_ms
 }
 export function latencyLabel(link: Link | undefined) {
@@ -292,9 +278,7 @@ export function edgeView(
       })),
   )
   const active = links.filter((l) => l.active && l.healthy)
-  const same = edge.transports.includes('wireguard')
-    ? active.length === 1
-    : active.length === 2 && active[0].link_id === active[1].link_id
+  const same = active.length === 2 && active[0].link_id === active[1].link_id
   const chosen = active[0]
   const speed = chosen ? rates[linkKey(chosen.agent, chosen.link_id)] : undefined
   return {
@@ -313,15 +297,10 @@ export function edgeView(
   }
 }
 export function removeNode(network: Network, id: string): Network {
-  const removed = new Set([id])
-  for (const edge of network.edges) {
-    const other = edge.a === id ? edge.b : edge.b === id ? edge.a : ''
-    if (network.nodes.find((n) => n.id === other)?.wireguard) removed.add(other)
-  }
   return pruneGroups({
     ...network,
-    nodes: network.nodes.filter((n) => !removed.has(n.id)),
-    edges: network.edges.filter((e) => !removed.has(e.a) && !removed.has(e.b)),
+    nodes: network.nodes.filter((n) => n.id !== id),
+    edges: network.edges.filter((e) => e.a !== id && e.b !== id),
   })
 }
 export function createEdge(network: Network, a: string, b: string): Edge | undefined {
@@ -332,20 +311,40 @@ export function createEdge(network: Network, a: string, b: string): Edge | undef
     effectiveEdges(network).some((e) => (e.a === a && e.b === b) || (e.a === b && e.b === a))
   )
     return
-  const left = network.nodes.find((n) => n.id === a)!,
-    right = network.nodes.find((n) => n.id === b)!
-  if (left.wireguard && right.wireguard) return
-  const wg = left.wireguard ? left : right.wireguard ? right : undefined
-  if (wg && network.edges.some((e) => e.a === wg.id || e.b === wg.id)) return
   return {
     id: newID(),
     a,
     b,
     weight: 10,
     enabled: true,
-    transports: wg ? ['wireguard'] : ['udp', 'tcp'],
+    transports: ['udp', 'tcp'],
     methods: { ipv4_direct: true, ipv6_direct: true, hole_punch: false },
   }
+}
+export function nextAddress(network: Network) {
+  try {
+    const [address, bits] = ipaddr.parseCIDR(network.cidr)
+    const raw = address.toByteArray()
+    const width = raw.length * 8
+    const base =
+      (raw.reduce((n, b) => (n << 8n) | BigInt(b), 0n) >> BigInt(width - bits)) <<
+      BigInt(width - bits)
+    const end = base + (1n << BigInt(width - bits))
+    const used = new Set(network.nodes.map((n) => ipaddr.parse(n.address).toNormalizedString()))
+    for (
+      let value = base + (width === 32 && bits >= 31 ? 0n : 1n);
+      value < end && value <= base + BigInt(network.nodes.length + 2);
+      value++
+    ) {
+      if (width === 32 && bits <= 30 && value === end - 1n) break
+      const bytes = raw.map((_, i) => Number((value >> BigInt((raw.length - i - 1) * 8)) & 255n))
+      const candidate = ipaddr.fromByteArray(bytes)
+      if (!used.has(candidate.toNormalizedString())) return candidate.toString()
+    }
+  } catch {
+    /* Invalid drafts are validated when saved. */
+  }
+  return ''
 }
 export type Draft = { network: Network; base: Network; revision: number }
 export function rebase(draft: Draft, state: State): Draft {

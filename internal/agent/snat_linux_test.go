@@ -17,18 +17,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/forwarding"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/tunnel"
+	"github.com/eddiexyang/graphnet/internal/forwarding"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/tunnel"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
 )
 
 func TestDialSNATIsolatesHostAndOtherNetworkRoutes(t *testing.T) {
-	if os.Getenv("GRAPHWAN_SNAT_NETNS_HELPER") != "1" {
+	if os.Getenv("GRAPHNET_SNAT_NETNS_HELPER") != "1" {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestDialSNATIsolatesHostAndOtherNetworkRoutes$", "-test.v")
-		cmd.Env = append(os.Environ(), "GRAPHWAN_SNAT_NETNS_HELPER=1")
+		cmd.Env = append(os.Environ(), "GRAPHNET_SNAT_NETNS_HELPER=1")
 		attrs := &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWNET}
 		if os.Geteuid() != 0 {
 			attrs.Cloneflags |= syscall.CLONE_NEWUSER
@@ -178,7 +178,7 @@ func TestDialSNATIsolatesHostAndOtherNetworkRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Open two GraphWAN TUNs on this host: Network A (6.6.6.2/24) and Network B (7.7.7.2/24).
+	// Open two GraphNet TUNs on this host: Network A (6.6.6.2/24) and Network B (7.7.7.2/24).
 	tunA, err := tunnel.Open(tunnel.Config{Address: netip.MustParsePrefix("6.6.6.2/24"), MTU: 1280})
 	if err != nil {
 		if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.EPERM) {

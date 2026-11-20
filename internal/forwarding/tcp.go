@@ -6,29 +6,29 @@ import (
 	"errors"
 	"net/netip"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/packet"
-	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
-	"github.com/eWloYW8/GraphWAN/internal/streamproxy"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/packet"
+	"github.com/eddiexyang/graphnet/internal/packetbuf"
+	"github.com/eddiexyang/graphnet/internal/streamproxy"
 )
 
 // TCPIngress validates local access packets before the userspace TCP stack sees
-// them. WireGuard passes its already authenticated source through the same table.
-func (r *Router) TCPIngress(networkID model.ID, raw []byte, wireguard bool) error {
-	return r.tcpIngress(networkID, raw, len(raw), wireguard)
+// them.
+func (r *Router) TCPIngress(networkID model.ID, raw []byte) error {
+	return r.tcpIngress(networkID, raw, len(raw))
 }
 
 // TCPIngressGSO admits only native access TCP with validated kernel segmentation
-// metadata. The MTU still bounds each resulting IP segment; ordinary access and
-// WireGuard packets retain their full-packet MTU bound.
+// metadata. The MTU still bounds each resulting IP segment; ordinary access
+// packets retain their full-packet MTU bound.
 func (r *Router) TCPIngressGSO(networkID model.ID, raw []byte, segmentSize int) error {
 	if segmentSize <= 0 || segmentSize > len(raw) || len(raw) > 65535 || !packet.IsTCP(raw) {
 		return ErrMTU
 	}
-	return r.tcpIngress(networkID, raw, segmentSize, false)
+	return r.tcpIngress(networkID, raw, segmentSize)
 }
 
-func (r *Router) tcpIngress(networkID model.ID, raw []byte, segmentSize int, wireguard bool) error {
+func (r *Router) tcpIngress(networkID model.ID, raw []byte, segmentSize int) error {
 	n := r.state.Load().networks[networkID]
 	if n == nil {
 		return ErrNetwork
@@ -40,11 +40,7 @@ func (r *Router) tcpIngress(networkID model.ID, raw []byte, segmentSize int, wir
 	if err != nil {
 		return err
 	}
-	if wireguard {
-		if n.wireguard[info.Source] == nil {
-			return ErrSource
-		}
-	} else if !n.admits(n.byAddress[n.self.Address], info.Source) {
+	if !n.admits(n.byAddress[n.self.Address], info.Source) {
 		return ErrSource
 	}
 	if n.exit(info.Destination, func() uint64 { return 0 }) == nil {
@@ -56,7 +52,7 @@ func (r *Router) tcpIngress(networkID model.ID, raw []byte, segmentSize int, wir
 func wireID(id model.ID) (out [16]byte) { hex.Decode(out[:], []byte(id)); return }
 
 // NextHop returns the neighbor that carries traffic to destination, or local
-// when this Agent delivers it (its own addresses and attached WireGuard leaves).
+// when this Agent delivers it.
 func (r *Router) NextHop(networkID model.ID, destination netip.Addr) (next model.ID, local bool, err error) {
 	return r.nextHop(networkID, destination, func() uint64 { return 0 })
 }
@@ -82,9 +78,6 @@ func (r *Router) nextHop(networkID model.ID, destination netip.Addr, flow func()
 	next, ok := n.next(dest.id, flow)
 	if !ok {
 		return "", false, ErrUnreachable
-	}
-	if n.wireguard[dest.address] != nil && next == dest.id {
-		return "", true, nil
 	}
 	return next, false, nil
 }
@@ -127,7 +120,6 @@ func (r *Router) TCPRequest(networkID model.ID, from, to netip.AddrPort) (stream
 }
 
 // TCPRoute uses the same weighted/live table and address ownership as datagrams.
-// A WireGuard leaf terminates at its attaching Agent, which emits local TCP to it.
 func (r *Router) TCPRoute(request streamproxy.Request, ingress model.ID) (next model.ID, local bool, err error) {
 	if err := request.Validate(); err != nil {
 		return "", false, err
@@ -152,9 +144,6 @@ func (r *Router) TCPRoute(request streamproxy.Request, ingress model.ID) (next m
 	next, ok := n.next(dest.id, func() uint64 { return packet.TCPFlowHash(request.From, request.To) })
 	if !ok {
 		return "", false, ErrUnreachable
-	}
-	if n.wireguard[dest.address] != nil && next == dest.id {
-		return "", true, nil
 	}
 	if request.Hops <= 1 {
 		return "", false, packet.ErrHopLimit
@@ -185,13 +174,6 @@ func (r *Router) TCPOutput(ctx context.Context, networkID model.ID, raw []byte) 
 	dest := n.exit(info.Destination, flow)
 	if dest == nil {
 		return ErrDestination
-	}
-	if n.wireguard[info.Destination] != nil {
-		frame, err := (packet.Packet{Header: packet.Header{Network: networkID, Source: n.self.ID, Destination: dest.id, HopLimit: packet.DefaultHopLimit}, Payload: raw}).MarshalBinary()
-		if err != nil {
-			return err
-		}
-		return r.send(ctx, networkID, dest.id, frame)
 	}
 	source := self
 	if !n.admits(source, info.Source) {
@@ -232,7 +214,6 @@ func (r *Router) TCPOutputLocal(networkID model.ID, destination netip.Addr) erro
 
 // TCPOutputBatch preserves local access packet order and ownership checks while
 // allowing the TUN adapter to coalesce consecutive TCP segments with GRO.
-// WireGuard access keeps its existing per-packet send path.
 func (r *Router) TCPOutputBatch(ctx context.Context, networkID model.ID, packets [][]byte) error {
 	n := r.state.Load().networks[networkID]
 	if n == nil {

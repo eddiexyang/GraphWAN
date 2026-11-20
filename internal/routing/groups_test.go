@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/testutil"
 )
 
 func meshFixture() model.State {
@@ -94,8 +94,8 @@ func TestGroupedTopologyRouting(t *testing.T) {
 			t.Fatal("unstable edge ID")
 		}
 	}
-	clone.Networks[0].Groups[0].Transports[0] = model.QUIC
-	clone.Networks[0].GroupLinks[0].Transports[0] = model.QUIC
+	clone.Networks[0].Groups[0].Transports[0] = model.TCP
+	clone.Networks[0].GroupLinks[0].Transports[0] = model.UDP
 	if n.Groups[0].Transports[0] != model.UDP || n.GroupLinks[0].Transports[0] != model.TCP {
 		t.Fatal("clone aliases policy")
 	}
@@ -150,7 +150,7 @@ func TestGroupToGroupLinkAndOverrides(t *testing.T) {
 	expensive := uint32(1000)
 	disabled := false
 	n.Groups[0].Overrides = []model.EdgeOverride{{A: n.Nodes[1].ID, B: n.Nodes[0].ID, Weight: &expensive}}
-	n.GroupLinks[0].Overrides = []model.EdgeOverride{{A: n.Nodes[2].ID, B: n.Nodes[4].ID, Enabled: &disabled, Transports: []model.Transport{model.QUIC}}}
+	n.GroupLinks[0].Overrides = []model.EdgeOverride{{A: n.Nodes[2].ID, B: n.Nodes[4].ID, Enabled: &disabled, Transports: []model.Transport{model.UDP}}}
 	if err := s.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestGroupToGroupLinkAndOverrides(t *testing.T) {
 				t.Fatalf("internal override not applied: %+v", e)
 			}
 		case model.GroupEdgeID(n.GroupLinks[0].ID, n.Nodes[4].ID, n.Nodes[2].ID):
-			if e.Enabled || e.Weight != 5 || !slices.Equal(e.Transports, []model.Transport{model.QUIC}) {
+			if e.Enabled || e.Weight != 5 || !slices.Equal(e.Transports, []model.Transport{model.UDP}) {
 				t.Fatalf("link override not applied: %+v", e)
 			}
 		}
@@ -193,7 +193,7 @@ func TestGroupToGroupLinkAndOverrides(t *testing.T) {
 	clone := s.Clone()
 	*clone.Networks[0].Groups[0].Overrides[0].Weight = 1
 	clone.Networks[0].GroupLinks[0].Overrides[0].Transports[0] = model.TCP
-	if *n.Groups[0].Overrides[0].Weight != 1000 || n.GroupLinks[0].Overrides[0].Transports[0] != model.QUIC {
+	if *n.Groups[0].Overrides[0].Weight != 1000 || n.GroupLinks[0].Overrides[0].Transports[0] != model.UDP {
 		t.Fatal("clone aliases overrides")
 	}
 	clone = s.Clone()
@@ -231,7 +231,7 @@ func TestGroupToGroupRejectsConflicts(t *testing.T) {
 			n.GroupLinks[0].Overrides = []model.EdgeOverride{o, {A: o.B, B: o.A}}
 		},
 		"invalid override value": func(n *model.Network) {
-			n.GroupLinks[0].Overrides = []model.EdgeOverride{{A: n.Nodes[0].ID, B: n.Nodes[3].ID, Transports: []model.Transport{model.WireGuard}}}
+			n.GroupLinks[0].Overrides = []model.EdgeOverride{{A: n.Nodes[0].ID, B: n.Nodes[3].ID, Transports: []model.Transport{model.Transport("ws")}}}
 		},
 	}
 	for name, change := range cases {

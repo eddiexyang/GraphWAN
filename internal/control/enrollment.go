@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/store"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/store"
 )
 
 type enrollmentToken struct {
@@ -55,7 +55,7 @@ func (s *Server) createEnrollmentToken(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503, "server directory unavailable")
 		return
 	}
-	invitation, err := (model.AgentInvitation{Kind: "graphwan-agent", Version: 1, Token: token, ExpiresAt: record.Expires, Directory: *directory}).Encode()
+	invitation, err := (model.AgentInvitation{Kind: "graphnet-agent", Version: 1, Token: token, ExpiresAt: record.Expires, Directory: *directory}).Encode()
 	if err != nil {
 		s.internal(w, err)
 		return

@@ -10,9 +10,9 @@ import (
 
 const (
 	WebSocketPath     = "/api/v1/agent/tunnel"
-	WebSocketProtocol = "graphwan.control.v1"
-	GRPCMethod        = "/graphwan.control.v1.Tunnel/Connect"
-	GRPCProtocol      = "graphwan-control-v1"
+	WebSocketProtocol = "graphnet.control.v1"
+	GRPCMethod        = "/graphnet.control.v1.Tunnel/Connect"
+	GRPCProtocol      = "graphnet-control-v1"
 	maxChunk          = 32 << 10
 )
 

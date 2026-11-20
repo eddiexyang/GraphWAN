@@ -11,7 +11,7 @@ import (
 	"net/netip"
 	"sync"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 const SetupLimit = 512
@@ -38,9 +38,9 @@ type Request struct {
 	// ingress resends only past it. A relay that predates it drops it, and the
 	// egress then answers StatusOK.
 	At bool `json:"at,omitempty"`
-	// A session sealed end to end names the ingress's Node, Source unless
-	// that is a WireGuard leaf, its end-to-end session toward the egress, and
-	// the channel of it that its records use.
+	// A session sealed end to end names the ingress's Node, which is its
+	// Source, its end-to-end session toward the egress, and the channel of it
+	// that its records use.
 	Sealer  model.ID `json:"sealer,omitempty"`
 	E2E     E2EID    `json:"e2e,omitzero"`
 	Channel uint32   `json:"channel,omitempty"`

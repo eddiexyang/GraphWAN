@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/packet"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
-	"github.com/eWloYW8/GraphWAN/internal/transport"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/packet"
+	"github.com/eddiexyang/graphnet/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/transport"
 )
 
 func TestUDPPunchAcrossPortRestrictedConeAndBlockAllFirewall(t *testing.T) {
@@ -150,8 +150,8 @@ func TestUDPPunchAcrossPortRestrictedConeAndBlockAllFirewall(t *testing.T) {
 	edgeID := testutil.ID(31)
 
 	dir := []model.Destination{
-		{NodeID: nodeA, Address: netip.MustParseAddr("10.99.0.1"), Client: true, PublicKey: keyA.Public().(ed25519.PublicKey)},
-		{NodeID: nodeB, Address: netip.MustParseAddr("10.99.0.2"), PublicKey: keyB.Public().(ed25519.PublicKey)},
+		{NodeID: nodeA, Address: netip.MustParseAddr("10.99.0.1"), Client: true, PublicKey: keyA.Public().(ed25519.PublicKey), Index: 1},
+		{NodeID: nodeB, Address: netip.MustParseAddr("10.99.0.2"), PublicKey: keyB.Public().(ed25519.PublicKey), Index: 2},
 	}
 	snapA := func(rev uint64) model.Snapshot {
 		return model.Snapshot{
@@ -263,7 +263,7 @@ func TestTCPPunchIgnoresDirectDialStarvation(t *testing.T) {
 	defer cancel()
 
 	// Create 8 stalling TCP listeners that accept connections and never send
-	// GraphWAN hellos, saturating all normal Direct dial slots for 12s.
+	// GraphNet hellos, saturating all normal Direct dial slots for 12s.
 	var stalledEndpoints []model.Endpoint
 	for i := range 8 {
 		ln, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -317,8 +317,8 @@ func TestTCPPunchIgnoresDirectDialStarvation(t *testing.T) {
 	epB := model.Endpoint{ID: testutil.ID(42), Transport: model.TCP, Source: model.Manual, URL: fmt.Sprintf("tcp://127.0.0.1:%d", mB.Port())}
 
 	dir := []model.Destination{
-		{NodeID: nodeA, Address: netip.MustParseAddr("10.99.0.1"), Client: true, PublicKey: keyA.Public().(ed25519.PublicKey)},
-		{NodeID: nodeB, Address: netip.MustParseAddr("10.99.0.2"), PublicKey: keyB.Public().(ed25519.PublicKey)},
+		{NodeID: nodeA, Address: netip.MustParseAddr("10.99.0.1"), Client: true, PublicKey: keyA.Public().(ed25519.PublicKey), Index: 1},
+		{NodeID: nodeB, Address: netip.MustParseAddr("10.99.0.2"), PublicKey: keyB.Public().(ed25519.PublicKey), Index: 2},
 	}
 	// A has 8 stalling Direct endpoints + 1 Punch endpoint to B.
 	aPeersEndpoints := append([]model.Endpoint{}, stalledEndpoints...)
@@ -406,8 +406,8 @@ func TestWaitForInstalledPunchWakesImmediately(t *testing.T) {
 			ID: netID, Name: "net", CIDR: netip.MustParsePrefix("10.99.0.0/24"), MTU: 1280, Cipher: model.AES128GCM,
 			Self: model.Node{ID: nodeA, AgentID: testutil.ID(11), Name: "A", Address: netip.MustParseAddr("10.99.0.1"), Client: true},
 			Directory: []model.Destination{
-				{NodeID: nodeA, Address: netip.MustParseAddr("10.99.0.1"), Client: true, PublicKey: keyA.Public().(ed25519.PublicKey)},
-				{NodeID: nodeB, Address: netip.MustParseAddr("10.99.0.2"), PublicKey: keyB.Public().(ed25519.PublicKey)},
+				{NodeID: nodeA, Address: netip.MustParseAddr("10.99.0.1"), Client: true, PublicKey: keyA.Public().(ed25519.PublicKey), Index: 1},
+				{NodeID: nodeB, Address: netip.MustParseAddr("10.99.0.2"), PublicKey: keyB.Public().(ed25519.PublicKey), Index: 2},
 			},
 			Peers: []model.Peer{{
 				Node:      model.Node{ID: nodeB, AgentID: testutil.ID(12), Name: "B", Address: netip.MustParseAddr("10.99.0.2")},
@@ -440,12 +440,12 @@ func TestWaitForInstalledPunchWakesImmediately(t *testing.T) {
 
 	errCh := make(chan error, 2)
 	go func() {
-		_, err := transport.NewPunchMux(ctx, c2, keyB.Public().(ed25519.PublicKey), mB.tls, func(ed25519.PublicKey) bool { return true })
+		_, err := transport.NewPunchMux(ctx, c2, keyB.Public().(ed25519.PublicKey), mB.tls, func(ed25519.PublicKey) bool { return true }, false)
 		errCh <- err
 	}()
 
 	time.AfterFunc(100*time.Millisecond, func() {
-		session, err := transport.NewPunchMux(ctx, c1, keyA.Public().(ed25519.PublicKey), mA.tls, func(ed25519.PublicKey) bool { return true })
+		session, err := transport.NewPunchMux(ctx, c1, keyA.Public().(ed25519.PublicKey), mA.tls, func(ed25519.PublicKey) bool { return true }, false)
 		errCh <- err
 		if err != nil {
 			return

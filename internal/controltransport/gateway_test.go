@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/eWloYW8/GraphWAN/internal/controltransport"
+	"github.com/eddiexyang/graphnet/internal/controltransport"
 )
 
 // echoTunnel serves the WebSocket tunnel protocol on a TLS listener whose

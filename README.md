@@ -1,4 +1,4 @@
-# GraphWAN
+# GraphNet
 
 A centrally managed overlay network with administrator-defined graph topology,
 weighted multi-hop routing and peer-to-peer data transport.
@@ -6,14 +6,14 @@ weighted multi-hop routing and peer-to-peer data transport.
 ## Run the controller
 
 ```sh
-go build -o bin/graphwan ./cmd/graphwan
+go build -o bin/graphnet ./cmd/graphnet
 # Required only for the first initialization. Choose your own strong password.
-export GRAPHWAN_ADMIN_PASSWORD='replace-with-your-own-password'
-./bin/graphwan server --data-dir ./graphwan-data
+export GRAPHNET_ADMIN_PASSWORD='replace-with-your-own-password'
+./bin/graphnet server --data-dir ./graphnet-data
 ```
 
 The default listener is `https://127.0.0.1:8443`. The controller creates a private
-CA and exports its public certificate to `graphwan-data/ca.pem`; trust this file
+CA and exports its public certificate to `graphnet-data/ca.pem`; trust this file
 on administrative clients. Supply `--tls-hosts` with your deployment's DNS names
 and IPs, and `--listen` to expose it on the intended interface. Keep the data
 directory private and back it up: it contains the CA key and configuration.
@@ -23,8 +23,8 @@ Open the controller URL in a browser and sign in to the management UI. See the
 [UI guide](docs/management-ui.md) and [management API](docs/control-api.md). Setting
 a different password environment variable on restart does not replace the stored password.
 
-The [administrative CLI](docs/admin-cli.md) supports `graphwan network create`,
-`graphwan network list`, `graphwan node list` and `graphwan edge add`, with JSON
+The [administrative CLI](docs/admin-cli.md) supports `graphnet network create`,
+`graphnet network list`, `graphnet node list` and `graphnet edge add`, with JSON
 output, verified HTTPS and revision-checked updates.
 
 ## Run a Linux agent
@@ -33,21 +33,21 @@ Create an enrollment invitation from **Agents → Enroll agent**, save it as
 `agent-invitation.txt`, then register and run:
 
 ```sh
-sudo ./bin/graphwan agent enroll --invitation-file ./agent-invitation.txt \
-  --name laptop --data-dir /var/lib/graphwan-agent
-sudo ./bin/graphwan agent run --data-dir /var/lib/graphwan-agent
+sudo ./bin/graphnet agent enroll --invitation-file ./agent-invitation.txt \
+  --name laptop --data-dir /var/lib/graphnet-agent
+sudo ./bin/graphnet agent run --data-dir /var/lib/graphnet-agent
 ```
 
 The invitation includes Server addresses, transport types, the cluster CA public
 certificate and a one-use token. No separate `--server`, `--server-transport` or
 `--ca` is required. Treat the invitation as a credential; Base64 is not encryption.
-Use `--invitation-file -` for stdin or `GRAPHWAN_AGENT_INVITATION` for automation.
+Use `--invitation-file -` for stdin or `GRAPHNET_AGENT_INVITATION` for automation.
 Enrollment saves identity and exits without starting a service. Repeating it for
 the same cluster preserves the existing identity; another cluster is rejected.
-The legacy `graphwan agent --server ...` enrollment remains supported.
+The legacy `graphnet agent --server ...` enrollment remains supported.
 
 Agent control connections accept `--server-transport tcp|websocket|grpc|wss`
-(default `tcp`, also configurable with `GRAPHWAN_SERVER_TRANSPORT`). All four
+(default `tcp`, also configurable with `GRAPHNET_SERVER_TRANSPORT`). All four
 carriers share the controller's existing listen port and preserve the inner
 TLS 1.3 authentication and WebSocket control protocol. `--server` and
 `--server-transport` apply only to first enrollment. After registration, the Agent
@@ -59,9 +59,7 @@ See [control transport configuration](docs/control-api.md#control-transport-carr
 TUN setup requires root or `CAP_NET_ADMIN`. Add the enrolled Agent to a Network
 with a fixed virtual address, then create the desired Edges. Linux automatically
 advertises TCP/UDP endpoints from underlay interfaces; manual endpoints are also
-supported. QUIC, WS/WSS and gRPC use explicit manual URLs; see
-[QUIC setup](docs/quic-operation.md), [WebSocket setup](docs/websocket-operation.md)
-and [gRPC setup](docs/grpc-operation.md).
+supported. QUIC uses explicit manual URLs; see [QUIC setup](docs/quic-operation.md).
 New Agents automatically discover public mappings using configurable STUN services.
 For STUN discovery and TCP/UDP hole punching, see [NAT setup](docs/nat-operation.md).
 Manual hostname behavior, multiple DNS addresses and TLS identity are documented
@@ -73,9 +71,6 @@ controller is unavailable.
 Nodes can advertise external subnets within a Network, with optional automatic
 gateway forwarding and Linux SNAT. External OS routes remain administrator-managed;
 see [advertised subnets](docs/advertised-subnets.md).
-
-iOS, Android and other standard WireGuard clients can join as leaf nodes through
-an Agent, with configuration downloads and QR codes. See [WireGuard access](docs/wireguard.md).
 
 For built-in Linux, Windows and macOS service management, see
 [service management](docs/service-management.md).
@@ -90,7 +85,7 @@ Platform setup and limitations: [Linux](docs/linux-operation.md),
 
 ## Known issues
 
-- **Mixed UDP and TCP transport paths:** When a multi-hop path mixes packet-only transports (`udp`, `quic`) with stream-backed transports (`tcp`, `ws`, `wss`, `grpc`), an intermediate relay converting transit TCP packets from a UDP link into a resumable TCP session seals the session with its own Agent identity (`Sealer != Source`), causing end-to-end session authentication to fail at the egress node. Keep Edges along a path on a uniform transport class (all packet-based or all stream-based).
+- **Mixed packet and stream transport paths:** TCP from an Agent whose first hop is packet-only `udp` crosses as packets; a later stream-backed hop (`tcp`, `quic`) refuses it rather than run TCP over TCP, and a relay cannot seal it as a session for the Source. Datagrams cross any mix. Keep TCP paths that start on `udp` on `udp`, or start them on `tcp` or `quic`.
 
 ## Development
 

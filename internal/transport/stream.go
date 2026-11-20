@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
+	"github.com/eddiexyang/graphnet/internal/packetbuf"
 )
 
 // Stream adapts TCP, TLS and other net.Conn streams to complete messages. One

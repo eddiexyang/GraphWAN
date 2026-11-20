@@ -127,7 +127,7 @@ export default function GroupEditor({
       target.kind === 'link' &&
       ((link.source_group
         ? !network.groups?.some((g) => g.id === link.source_group)
-        : !network.nodes.some((n) => n.id === link.node && !n.wireguard)) ||
+        : !network.nodes.some((n) => n.id === link.node)) ||
         !Number.isInteger(link.weight) ||
         link.weight < 1 ||
         link.weight > 4294967295)
@@ -217,32 +217,30 @@ export default function GroupEditor({
             </Field>
             <h4>Members · {group.members.length}</h4>
             <div className="mesh-members">
-              {network.nodes
-                .filter((n) => !n.wireguard)
-                .map((n) => {
-                  const occupied = network.groups?.some(
-                    (g) => g.id !== group.id && g.members.includes(n.id),
-                  )
-                  return (
-                    <label className="check" key={n.id}>
-                      <input
-                        type="checkbox"
-                        disabled={occupied}
-                        checked={group.members.includes(n.id)}
-                        onChange={(e) =>
-                          setGroup({
-                            ...group,
-                            members: e.target.checked
-                              ? [...group.members, n.id]
-                              : group.members.filter((id) => id !== n.id),
-                          })
-                        }
-                      />
-                      {n.name}
-                      {occupied ? ' (grouped)' : ''}
-                    </label>
-                  )
-                })}
+              {network.nodes.map((n) => {
+                const occupied = network.groups?.some(
+                  (g) => g.id !== group.id && g.members.includes(n.id),
+                )
+                return (
+                  <label className="check" key={n.id}>
+                    <input
+                      type="checkbox"
+                      disabled={occupied}
+                      checked={group.members.includes(n.id)}
+                      onChange={(e) =>
+                        setGroup({
+                          ...group,
+                          members: e.target.checked
+                            ? [...group.members, n.id]
+                            : group.members.filter((id) => id !== n.id),
+                        })
+                      }
+                    />
+                    {n.name}
+                    {occupied ? ' (grouped)' : ''}
+                  </label>
+                )
+              })}
             </div>
             <div className="mesh-note">
               {(group.members.length * (group.members.length - 1)) / 2} internal edges · Weight{' '}
@@ -278,13 +276,11 @@ export default function GroupEditor({
                   </optgroup>
                 )}
                 <optgroup label="Nodes">
-                  {network.nodes
-                    .filter((n) => !n.wireguard)
-                    .map((n) => (
-                      <option key={n.id} value={`node:${n.id}`}>
-                        {n.name}
-                      </option>
-                    ))}
+                  {network.nodes.map((n) => (
+                    <option key={n.id} value={`node:${n.id}`}>
+                      {n.name}
+                    </option>
+                  ))}
                 </optgroup>
               </select>
             </Field>

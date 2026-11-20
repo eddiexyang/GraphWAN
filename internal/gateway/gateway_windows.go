@@ -10,7 +10,7 @@ import (
 	"strings"
 	"unicode/utf16"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 func applyPlatform(ctx context.Context, id model.ID, entries []Entry) error {
@@ -40,7 +40,7 @@ func applyPlatform(ctx context.Context, id model.ID, entries []Entry) error {
 	if err != nil {
 		return err
 	}
-	group := "GraphWAN-Gateway-" + string(id)
+	group := "GraphNet-Gateway-" + string(id)
 	script := fmt.Sprintf(`
 $ErrorActionPreference = 'Stop'
 $group = '%s'

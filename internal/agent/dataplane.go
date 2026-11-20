@@ -15,14 +15,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/forwarding"
-	"github.com/eWloYW8/GraphWAN/internal/gateway"
-	"github.com/eWloYW8/GraphWAN/internal/linkstate"
-	"github.com/eWloYW8/GraphWAN/internal/mesh"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/packet"
-	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
-	"github.com/eWloYW8/GraphWAN/internal/tunnel"
+	"github.com/eddiexyang/graphnet/internal/forwarding"
+	"github.com/eddiexyang/graphnet/internal/gateway"
+	"github.com/eddiexyang/graphnet/internal/linkstate"
+	"github.com/eddiexyang/graphnet/internal/mesh"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/packet"
+	"github.com/eddiexyang/graphnet/internal/packetbuf"
+	"github.com/eddiexyang/graphnet/internal/tunnel"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
@@ -202,13 +202,12 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 		if err != nil {
 			return fmt.Errorf("listen for peers: %w", err)
 		}
-		next.mesh.EnableWireGuard(r.receiveWireGuard)
 		next.mesh.EnableStreams(r.acceptTCP)
 		if r.options.legacyStreams {
 			next.mesh.DisableResume()
 		}
 		next.mesh.EnableLinkState(r.linkStateHandler())
-		next.mesh.EnableCompact(r.compactHeader)
+		next.mesh.EnableCompact(compactor{r})
 		newMesh = true
 	}
 	forwardingSnapshot := carryLiveRoutes(snapshot, r.lastRoutes)
@@ -223,12 +222,6 @@ func (r *DataPlane) Apply(ctx context.Context, snapshot model.Snapshot) error {
 	for _, network := range snapshot.Networks {
 		fingerprint := tcpFingerprint(network)
 		_, offload := next.devices[network.ID].Device.(tunnel.TCPPacketWriter)
-		for _, peer := range network.Peers {
-			if peer.Node.WireGuard != nil {
-				offload = false
-				break
-			}
-		}
 		if previous != nil && previous.tcp[network.ID] != nil && previous.tcp[network.ID].fingerprint == fingerprint && previous.tcp[network.ID].offload == offload {
 			next.tcp[network.ID] = previous.tcp[network.ID]
 			continue
@@ -408,15 +401,32 @@ func (r *DataPlane) readTunnel(network model.ID, device *runtimeTunnel) {
 		}
 		// Invalid, unroutable or congested packets are dropped independently; a bad
 		// packet cannot terminate the interface forwarding loop.
-		r.accessPacket(state, r.ctx, network, buffer[:n], false)
+		r.accessPacket(state, r.ctx, network, buffer[:n])
 	}
 }
 
 // compactHeader expands compact Link frames against the active forwarding
 // table; frames arriving before the first table is published are dropped.
-func (r *DataPlane) compactHeader(header []byte, network [16]byte, hopLimit uint8, payload []byte) bool {
-	state := r.state.Load()
+// compactor maps compact frames to the active forwarding table.
+type compactor struct{ r *DataPlane }
+
+func (c compactor) Expand(header []byte, network [16]byte, hopLimit uint8, payload []byte) bool {
+	state := c.r.state.Load()
 	return state != nil && state.router.CompactHeader(header, network, hopLimit, payload)
+}
+
+func (c compactor) Index(network, node [16]byte) (uint16, bool) {
+	if state := c.r.state.Load(); state != nil {
+		return state.router.CompactIndex(network, node)
+	}
+	return 0, false
+}
+
+func (c compactor) Node(network [16]byte, index uint16) ([16]byte, bool) {
+	if state := c.r.state.Load(); state != nil {
+		return state.router.CompactNode(network, index)
+	}
+	return [16]byte{}, false
 }
 
 func (r *DataPlane) receive(ctx context.Context, remote model.ID, frame []byte) error {
@@ -510,7 +520,7 @@ func (r *DataPlane) readTunnelBatch(network model.ID, device *runtimeTunnel, bat
 				state.router.FromTunnelBatch(r.ctx, network, packets[start:i])
 			}
 			start = i + 1
-			admitted := state.router.TCPIngress(network, raw, false) == nil
+			admitted := state.router.TCPIngress(network, raw) == nil
 			if segmentSizes[i] > 0 {
 				admitted = state.router.TCPIngressGSO(network, raw, segmentSizes[i]) == nil
 			}
@@ -595,11 +605,4 @@ func (r *DataPlane) deliverBatch(ctx context.Context, network model.ID, packets 
 		r.failTunnel(network, device, err)
 	}
 	return err
-}
-
-func (r *DataPlane) receiveWireGuard(network model.ID, raw []byte) {
-	state := r.state.Load()
-	if state != nil {
-		_ = r.accessPacket(state, r.ctx, network, raw, true)
-	}
 }

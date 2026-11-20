@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
+	"github.com/eddiexyang/graphnet/internal/packetbuf"
 )
 
 // A resumable connection is a session between its ingress, which terminates

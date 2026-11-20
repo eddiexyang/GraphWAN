@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/packet"
-	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
-	"github.com/eWloYW8/GraphWAN/internal/peer"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/packet"
+	"github.com/eddiexyang/graphnet/internal/packetbuf"
+	"github.com/eddiexyang/graphnet/internal/peer"
 )
 
 const (
@@ -36,10 +36,9 @@ const (
 	linkStateHelloMessage = 13
 	linkStateMessage      = 14
 	linkStateQueue        = 256
-	// Compact data omits the packet header after the same in-band confirmation:
-	// [compactDataMessage][hop limit][IP packet]. The receiver rebuilds it.
-	compactHelloMessage = 15
-	compactDataMessage  = 16
+	// Compact data omits the packet header: [compactDataMessage][hop
+	// limit][IP packet]. The receiver rebuilds it.
+	compactDataMessage = 16
 	// The acceptor confirms resumable TCP sessions offered in the
 	// introduction; see Options.Resume.
 	resumeHelloMessage = 20
@@ -49,13 +48,11 @@ const (
 	// A stream message whose data is sealed end to end, which the channel
 	// does not encrypt again; see peer.SealedPayload.
 	sealedStreamMessage = peer.SealedPayload
-	// A compact frame of a packet sealed end to end keeps its source and
-	// destination Nodes, which its seal depends on: [compactSealedMessage][hop
-	// limit][source][destination][IP packet][trailer]. A frame of such a
-	// packet, compact or not, travels in a sealedFrame envelope, whose
-	// readable part the channel seals: [peer.SealedPrefix][k][message].
-	compactSealedMessage = 22
-	sealedFrame          = peer.SealedPrefix
+	// A packet sealed end to end travels as peer.Masked, which the channel
+	// does not encrypt again: [peer.Masked|hop limit][source index][destination
+	// index][IP packet][trailer]. Its source and destination Nodes, which its
+	// seal depends on, travel as their wire indexes; see model.Node.Index.
+	maskedHeader = 1 + 2 + 2
 	// Leave room for multiple kernel GSO bursts while writers process bounded
 	// batches. The queue is still finite; control messages use a separate queue.
 	queueSize = 512
@@ -120,12 +117,9 @@ type Options struct {
 	// the accepting side, as for streams. Any transport may carry them.
 	LinkState      LinkStateHandler
 	LinkStateHello bool
-	// Compact rebuilds the packet header of a compact data frame from its inner
-	// addresses; it is set when both sides offered the capability. The accepting
-	// side sets CompactHello and sends compact frames at once; the dialer only
-	// after that announcement arrives. Either side accepts them throughout.
-	Compact      CompactHeader
-	CompactHello bool
+	// Compact rebuilds packet headers that frames omit. A Link without it
+	// sends whole headers, as tests do.
+	Compact Compactor
 	// SizeProbe holds the Link back from traffic until a full-size probe is
 	// answered; see sizeprobe.go. SizeProbeHello is set by the accepting side.
 	SizeProbe      bool
@@ -135,9 +129,16 @@ type Options struct {
 	Failed func()
 }
 
-// CompactHeader writes the omitted packet header into header[:packet.HeaderSize]
-// for payload, or reports that its addresses have no admitted owners.
-type CompactHeader func(header []byte, network [16]byte, hopLimit uint8, payload []byte) bool
+// Compactor maps what compact frames omit to the active forwarding table.
+type Compactor interface {
+	// Expand writes the omitted packet header into header[:packet.HeaderSize]
+	// for payload, or reports that its addresses have no admitted owners.
+	Expand(header []byte, network [16]byte, hopLimit uint8, payload []byte) bool
+	// Index returns the wire index of a network's Node.
+	Index(network, node [16]byte) (uint16, bool)
+	// Node returns the Node of a network's wire index.
+	Node(network [16]byte, index uint16) ([16]byte, bool)
+}
 
 // LinkStateHandler receives advertisements; payload is only valid during the call.
 type LinkStateHandler interface {
@@ -238,7 +239,6 @@ type Link struct {
 	linkStateReady  atomic.Bool
 	linkStateOut    chan []byte
 	linkStateLost   atomic.Uint64
-	compactOut      atomic.Bool
 	networkWire     [16]byte
 	// tcpPackets counts TCP packets refused on a TCP-backed Link: TCP over
 	// TCP, which access TCP termination exists to prevent.
@@ -302,11 +302,6 @@ func New(parent context.Context, channel Channel, info Info, options Options) (*
 		if _, err := hex.Decode(l.networkWire[:], []byte(info.NetworkID)); err != nil {
 			cancel()
 			return nil, err
-		}
-		if options.CompactHello {
-			// The dialer offered compact frames, so it already accepts them.
-			l.control <- []byte{compactHelloMessage, 1}
-			l.compactOut.Store(true)
 		}
 	}
 	l.wg.Add(3)
@@ -496,9 +491,15 @@ func (l *Link) enqueue(ctx context.Context, frames [][]byte, owners []*packetbuf
 			break
 		}
 		var buffer *packetbuf.Buffer
-		if packet.IsSealed(frame) {
-			buffer = sealedFrameOf(frame, owners, i, l.compactOut.Load())
-		} else if l.compactOut.Load() {
+		if l.options.Compact != nil && packet.IsSealed(frame) {
+			if buffer = l.maskedFrame(frame, owners, i); buffer == nil {
+				// A Node without an index is one this Link's table no
+				// longer has: the packet is lost as on a full queue.
+				l.dropped.Add(1)
+				accepted, consumed = accepted+1, i+1
+				continue
+			}
+		} else if l.options.Compact != nil {
 			buffer = compactFrame(frame, owners, i)
 		} else if owners != nil && owners[i].PrependByte(dataMessage) {
 			buffer = owners[i]
@@ -544,56 +545,36 @@ func compactFrame(frame []byte, owners []*packetbuf.Buffer, i int) *packetbuf.Bu
 	return buffer
 }
 
-// sealedFrameOf wraps the frame of a sealed packet in its envelope, in place
-// for an owned buffer with the headroom; the channel seals the envelope, the
-// message's kind, the packet header or hop limit, and the readable headers.
-func sealedFrameOf(frame []byte, owners []*packetbuf.Buffer, i int, compact bool) *packetbuf.Buffer {
-	readable := packet.HeaderLen(frame[packet.HeaderSize : len(frame)-packet.Trailer])
-	var buffer *packetbuf.Buffer
-	if compact {
-		const prefix = 4 + 32
-		hop := frame[3]
+// maskedFrame replaces the packet header of a sealed packet with the masked
+// one, in place for an owned buffer, or returns nil when a Node has no index.
+func (l *Link) maskedFrame(frame []byte, owners []*packetbuf.Buffer, i int) *packetbuf.Buffer {
+	source, ok := l.options.Compact.Index(l.networkWire, [16]byte(frame[24:40]))
+	destination, found := l.options.Compact.Index(l.networkWire, [16]byte(frame[40:56]))
+	if !ok || !found {
 		if owners != nil {
-			// The destination moves first: the source's new place covers it.
-			buffer = owners[i]
-			buffer.Data = buffer.Data[packet.HeaderSize-prefix:]
-			copy(buffer.Data[20:36], frame[40:56])
-			copy(buffer.Data[4:20], frame[24:40])
-		} else {
-			buffer = packetbuf.Get(len(frame) - packet.HeaderSize + prefix)
-			copy(buffer.Data[4:20], frame[24:40])
-			copy(buffer.Data[20:36], frame[40:56])
-			copy(buffer.Data[prefix:], frame[packet.HeaderSize:])
+			owners[i].Release()
 		}
-		buffer.Data[2], buffer.Data[3] = compactSealedMessage, hop
-		readable += prefix
-	} else {
-		if owners != nil && owners[i].PrependByte(dataMessage) && owners[i].PrependByte(0) && owners[i].PrependByte(sealedFrame) {
-			buffer = owners[i]
-		} else {
-			buffer = packetbuf.Get(len(frame) + 3)
-			buffer.Data[2] = dataMessage
-			copy(buffer.Data[3:], frame)
-			if owners != nil {
-				owners[i].Release()
-			}
-		}
-		readable += 3 + packet.HeaderSize
+		return nil
 	}
-	buffer.Data[0], buffer.Data[1] = sealedFrame, byte(readable)
+	var buffer *packetbuf.Buffer
+	if owners != nil {
+		buffer = owners[i]
+		buffer.Data = buffer.Data[packet.HeaderSize-maskedHeader:]
+	} else {
+		buffer = packetbuf.Get(len(frame) - packet.HeaderSize + maskedHeader)
+		copy(buffer.Data[maskedHeader:], frame[packet.HeaderSize:])
+	}
+	buffer.Data[0] = peer.Masked | min(frame[3], peer.MaxHopLimit)
+	binary.BigEndian.PutUint16(buffer.Data[1:3], source)
+	binary.BigEndian.PutUint16(buffer.Data[3:5], destination)
 	return buffer
 }
 
-// TCPBacked reports a TCP, WS, WSS or gRPC Link.
+// TCPBacked reports a Link over a reliable stream, TCP or QUIC.
 func (l *Link) TCPBacked() bool { return l.tcpBacked() }
 
 func (l *Link) tcpBacked() bool {
-	switch l.info.Transport {
-	case model.TCP, model.WS, model.WSS, model.GRPC:
-		return true
-	default:
-		return false
-	}
+	return l.info.Transport == model.TCP || l.info.Transport == model.QUIC
 }
 
 func (l *Link) notifyData() {
@@ -773,11 +754,29 @@ func (l *Link) readLoop() {
 		if len(raw) == 0 {
 			return
 		}
-		if raw[0] == sealedFrame {
-			if len(raw) < 3 || raw[2] != dataMessage && raw[2] != compactSealedMessage {
-				return
+		if raw[0] >= peer.Masked {
+			// Masked packets are not authenticated per hop: one that does not
+			// parse is dropped, never taken for the peer's failure.
+			buffer := l.unmasked(raw, owning)
+			if buffer == nil {
+				l.dropped.Add(1)
+				continue
 			}
-			raw = raw[2:]
+			l.rx.Add(uint64(len(buffer.Data)))
+			if owning {
+				ready[count] = buffer
+				count++
+				if count == len(ready) {
+					flush()
+				}
+				continue
+			}
+			select {
+			case l.packets <- buffer.Data:
+			default:
+				l.dropped.Add(1)
+			}
+			continue
 		}
 		switch raw[0] {
 		case pathMessage, retireMessage, retiredMessage:
@@ -804,40 +803,6 @@ func (l *Link) readLoop() {
 					l.dropped.Add(1)
 				}
 			}
-		case compactHelloMessage:
-			if len(raw) != 2 || l.options.Compact == nil || l.options.CompactHello {
-				return
-			}
-			l.sizeProbeUnsupported()
-			l.compactOut.Store(true)
-		case compactSealedMessage:
-			const prefix = 2 + 32
-			if len(raw) <= prefix || len(raw)-prefix > packet.MaxPayload {
-				return
-			}
-			var buffer *packetbuf.Buffer
-			if owning {
-				buffer = packetbuf.Get(packet.HeaderSize + len(raw) - prefix)
-			} else {
-				buffer = packetbuf.Wrap(make([]byte, packet.HeaderSize+len(raw)-prefix))
-			}
-			packet.PutHeader(buffer.Data, l.networkWire, [16]byte(raw[2:18]), [16]byte(raw[18:34]), raw[1], len(raw)-prefix)
-			packet.SetSealed(buffer.Data, true)
-			copy(buffer.Data[packet.HeaderSize:], raw[prefix:])
-			l.rx.Add(uint64(len(buffer.Data)))
-			if owning {
-				ready[count] = buffer
-				count++
-				if count == len(ready) {
-					flush()
-				}
-				continue
-			}
-			select {
-			case l.packets <- buffer.Data:
-			default:
-				l.dropped.Add(1)
-			}
 		case compactDataMessage:
 			if l.options.Compact == nil || len(raw) <= 2 || len(raw)-2 > packet.MaxPayload {
 				return
@@ -850,7 +815,7 @@ func (l *Link) readLoop() {
 			} else {
 				buffer = packetbuf.Wrap(make([]byte, packet.HeaderSize+len(raw)-2))
 			}
-			if !l.options.Compact(buffer.Data[:packet.HeaderSize], l.networkWire, raw[1], raw[2:]) {
+			if !l.options.Compact.Expand(buffer.Data[:packet.HeaderSize], l.networkWire, raw[1], raw[2:]) {
 				buffer.Release()
 				l.dropped.Add(1)
 				continue
@@ -1052,16 +1017,13 @@ func (l *Link) writeLoop() {
 			return
 		}
 		for i, raw := range messages[:count] {
-			if raw[0] == sealedFrame {
-				raw = raw[2:]
-			}
-			switch raw[0] {
-			case dataMessage, streamMessage, sealedStreamMessage:
+			switch {
+			case raw[0] >= peer.Masked:
+				l.tx.Add(uint64(len(raw) - maskedHeader + packet.HeaderSize))
+			case raw[0] == dataMessage, raw[0] == streamMessage, raw[0] == sealedStreamMessage:
 				l.tx.Add(uint64(len(raw) - 1))
-			case compactDataMessage:
+			case raw[0] == compactDataMessage:
 				l.tx.Add(uint64(len(raw) - 2 + packet.HeaderSize))
-			case compactSealedMessage:
-				l.tx.Add(uint64(len(raw) - 34 + packet.HeaderSize))
 			}
 			messages[i] = nil
 			owners[i].Release()
@@ -1376,4 +1338,28 @@ func (l *Link) heartbeat(now time.Time) bool {
 	default:
 	}
 	return true
+}
+
+// unmasked rebuilds the overlay frame of a masked packet the channel
+// revealed, or returns nil for one that does not parse.
+func (l *Link) unmasked(raw []byte, owning bool) *packetbuf.Buffer {
+	if l.options.Compact == nil || len(raw) <= maskedHeader+packet.Trailer || len(raw)-maskedHeader > packet.MaxPayload || raw[0]&^peer.Masked == 0 {
+		return nil
+	}
+	source, ok := l.options.Compact.Node(l.networkWire, binary.BigEndian.Uint16(raw[1:3]))
+	destination, found := l.options.Compact.Node(l.networkWire, binary.BigEndian.Uint16(raw[3:5]))
+	if !ok || !found {
+		return nil
+	}
+	size := packet.HeaderSize + len(raw) - maskedHeader
+	var buffer *packetbuf.Buffer
+	if owning {
+		buffer = packetbuf.Get(size)
+	} else {
+		buffer = packetbuf.Wrap(make([]byte, size))
+	}
+	packet.PutHeader(buffer.Data, l.networkWire, source, destination, raw[0]&^peer.Masked, len(raw)-maskedHeader)
+	packet.SetSealed(buffer.Data, true)
+	copy(buffer.Data[packet.HeaderSize:], raw[maskedHeader:])
+	return buffer
 }

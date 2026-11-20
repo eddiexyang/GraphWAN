@@ -3,19 +3,15 @@ package model
 import "time"
 
 type LinkStatus struct {
-	RTTValid           bool      `json:"rtt_valid,omitempty"`
-	RTTMeasuredAt      time.Time `json:"rtt_measured_at,omitempty"`
-	WireGuardPublicKey string    `json:"wireguard_public_key,omitempty"`
-	LastHandshake      time.Time `json:"last_handshake,omitempty"`
-	NetworkID          ID        `json:"network_id"`
-	EdgeID             ID        `json:"edge_id"`
-	LinkID             string    `json:"link_id"`
-	CandidateID        string    `json:"candidate_id"`
-	Transport          Transport `json:"transport"`
-	Local              string    `json:"local,omitempty"`
-	ObservedLocal      string    `json:"observed_local,omitempty"`
-	Remote             string    `json:"remote"`
-	Healthy            bool      `json:"healthy"`
+	NetworkID     ID        `json:"network_id"`
+	EdgeID        ID        `json:"edge_id"`
+	LinkID        string    `json:"link_id"`
+	CandidateID   string    `json:"candidate_id"`
+	Transport     Transport `json:"transport"`
+	Local         string    `json:"local,omitempty"`
+	ObservedLocal string    `json:"observed_local,omitempty"`
+	Remote        string    `json:"remote"`
+	Healthy       bool      `json:"healthy"`
 	// Unhealthy marks a Link that failed but stays open as its Edge's only
 	// path. It carries traffic only while nothing healthy is available.
 	Unhealthy bool    `json:"unhealthy,omitempty"`

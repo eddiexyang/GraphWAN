@@ -76,7 +76,7 @@ configure another reachable Agent path when direct traversal fails.
 
 ## Observations and lifetimes
 
-UDP STUN runs on the exact socket that carries native UDP and QUIC. TCP STUN
+UDP STUN runs on the exact socket that carries native UDP. TCP STUN
 binds outgoing connections to the same local port as the shared peer listener
 and TCP punch dials, and retains each observation connection between refreshes.
 An observation includes its actual externally mapped port, which may differ from
@@ -117,7 +117,7 @@ closes its sessions.
 
 ## STUN admission and limits
 
-GraphWAN encodes and decodes the RFC 8489 Binding messages it needs itself.
+GraphNet encodes and decodes the RFC 8489 Binding messages it needs itself.
 Binding requests use random 96-bit transaction IDs and fingerprints. A response must match both an outstanding ID and the exact
 resolved service address. Replies are bounded to 2048 bytes and checked for valid
 lengths, fingerprints when present, supported required attributes, response type,
@@ -184,7 +184,7 @@ The active/passive kernel result does not choose the TLS role; public-key order
 chooses that role and each multiplexed stream still authenticates Network/Edge.
 
 The Go 1.26.8 `net` sources (`sock_posix.go`, `sockopt_windows.go`) were checked
-for hook ordering and default options. GraphWAN uses platform-specific constants
+for hook ordering and default options. GraphNet uses platform-specific constants
 through `x/sys`, propagates either socket-option error and never silently falls
 back to a different source port.
 

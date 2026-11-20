@@ -13,11 +13,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/store"
+	"github.com/eddiexyang/graphnet/internal/store"
 	"golang.org/x/crypto/scrypt"
 )
 
-const cookieName = "graphwan_session"
+const cookieName = "graphnet_session"
 
 type passwordRecord struct {
 	Salt []byte `json:"salt"`

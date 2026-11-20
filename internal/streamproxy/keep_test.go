@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
+	"github.com/eddiexyang/graphnet/internal/packetbuf"
 )
 
 // An end holds at most its send buffer: writers wait while it is full and go

@@ -5,9 +5,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/cluster"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/update"
+	"github.com/eddiexyang/graphnet/internal/cluster"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/update"
 )
 
 func (s *Server) serverSoftware(w http.ResponseWriter, r *http.Request) {
@@ -49,7 +49,7 @@ func (s *Server) updateServer(w http.ResponseWriter, r *http.Request) {
 	}
 	target, online := statuses[id]
 	if !online || target.Update == nil || !target.Update.Managed {
-		fail(w, 409, "server must be online and managed by graphwan server service")
+		fail(w, 409, "server must be online and managed by graphnet server service")
 		return
 	}
 	if target.Update.Phase == "downloading" || target.Update.Phase == "installing" {

@@ -34,7 +34,7 @@ func PeerServerTLS(identity ed25519.PrivateKey) (*tls.Config, error) {
 		if err != nil {
 			return nil, err
 		}
-		template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "GraphWAN Agent"}, NotBefore: now.Add(-5 * time.Minute), NotAfter: now.Add(7 * 24 * time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}, BasicConstraintsValid: true}
+		template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "GraphNet Agent"}, NotBefore: now.Add(-5 * time.Minute), NotAfter: now.Add(7 * 24 * time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}, BasicConstraintsValid: true}
 		der, err := x509.CreateCertificate(rand.Reader, template, template, identity.Public(), identity)
 		if err != nil {
 			return nil, err
@@ -50,7 +50,7 @@ func PeerServerTLS(identity ed25519.PrivateKey) (*tls.Config, error) {
 	if _, err := get(nil); err != nil {
 		return nil, err
 	}
-	return &tls.Config{MinVersion: tls.VersionTLS13, NextProtos: []string{"http/1.1"}, GetCertificate: get, SessionTicketsDisabled: true}, nil
+	return &tls.Config{MinVersion: tls.VersionTLS13, GetCertificate: get, SessionTicketsDisabled: true}, nil
 }
 
 // PeerClientTLS accepts either a direct Agent identity pin or ordinary Web PKI
@@ -58,7 +58,7 @@ func PeerServerTLS(identity ed25519.PrivateKey) (*tls.Config, error) {
 // that proxy. No certificate is accepted merely because TLS encryption succeeded.
 func PeerClientTLS(host string, identity ed25519.PublicKey, roots *x509.CertPool) *tls.Config {
 	pin := append(ed25519.PublicKey{}, identity...)
-	return &tls.Config{MinVersion: tls.VersionTLS13, ServerName: host, NextProtos: []string{"http/1.1"},
+	return &tls.Config{MinVersion: tls.VersionTLS13, ServerName: host,
 		InsecureSkipVerify: true, // Verification is performed in full by VerifyConnection.
 		VerifyConnection: func(state tls.ConnectionState) error {
 			if len(state.PeerCertificates) == 0 {

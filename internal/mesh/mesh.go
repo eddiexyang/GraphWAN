@@ -8,22 +8,18 @@ import (
 	"crypto/tls"
 	"errors"
 	"net"
-	"net/http"
 	"net/netip"
-	"net/url"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/link"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
-	"github.com/eWloYW8/GraphWAN/internal/peer"
-	"github.com/eWloYW8/GraphWAN/internal/secure"
-	"github.com/eWloYW8/GraphWAN/internal/transport"
-	"github.com/eWloYW8/GraphWAN/internal/wgaccess"
-	"google.golang.org/grpc"
+	"github.com/eddiexyang/graphnet/internal/link"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/packetbuf"
+	"github.com/eddiexyang/graphnet/internal/peer"
+	"github.com/eddiexyang/graphnet/internal/secure"
+	"github.com/eddiexyang/graphnet/internal/transport"
 )
 
 // Receive transfers a packet to the callback. The optional batch callback to
@@ -49,11 +45,10 @@ type Mesh struct {
 	streamHandler  StreamHandler
 	noResume       bool
 	linkState      atomic.Pointer[LinkStateHandler]
-	compact        link.CompactHeader
+	compact        link.Compactor
 	extensionMu    sync.Mutex
 	extensionNext  time.Time
 	extensionSlots chan struct{}
-	wireguard      *wgaccess.Hub
 	dns            *endpointDNS
 	identity       ed25519.PrivateKey
 	ctx            context.Context
@@ -63,12 +58,6 @@ type Mesh struct {
 	punches        map[punchKey]*transport.PunchMux
 	punchDials     map[punchKey]*punchDial
 	punchNotify    chan struct{}
-	webListener    *connIngress
-	webServer      *http.Server
-	grpcListener   *connIngress
-	grpcServer     *grpc.Server
-	grpcSlots      chan struct{}
-	grpcAdmissions map[grpcConnectionKey]*grpcAdmission
 	tls            *tls.Config
 	sniffSlots     chan struct{}
 	pending        map[net.Conn]bool
@@ -94,26 +83,22 @@ func New(parent context.Context, identity ed25519.PrivateKey, host string, port 
 	if err != nil {
 		return nil, err
 	}
-	listener, udp, quicHub, err := listenTransports(parent, identity, host, port, transport.ListenTCP)
+	listener, udp, quic, err := listenTransports(parent, identity, host, port, transport.ListenTCP)
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(parent)
-	m := &Mesh{grpcSlots: make(chan struct{}, 512), sniffSlots: make(chan struct{}, 64), pending: map[net.Conn]bool{}, identity: bytes.Clone(identity), ctx: ctx, cancel: cancel, listener: listener, udp: udp, receive: receive, groups: map[key]*group{}, slots: make(chan struct{}, 8), punchSlots: make(chan struct{}, 16), acceptSlots: make(chan struct{}, 64), punchNotify: make(chan struct{})}
+	m := &Mesh{sniffSlots: make(chan struct{}, 64), pending: map[net.Conn]bool{}, identity: bytes.Clone(identity), ctx: ctx, cancel: cancel, listener: listener, udp: udp, receive: receive, groups: map[key]*group{}, slots: make(chan struct{}, 8), punchSlots: make(chan struct{}, 16), acceptSlots: make(chan struct{}, 64), punchNotify: make(chan struct{})}
 	if len(batches) > 0 {
 		m.receiveBatch = batches[0]
 	}
 	m.extensionSlots = make(chan struct{}, 4)
 	m.dns = newEndpointDNS()
-	m.grpcAdmissions = map[grpcConnectionKey]*grpcAdmission{}
-	m.quic = quicHub
 	m.tcp = listener
+	m.quic = quic
 	m.punches = map[punchKey]*transport.PunchMux{}
 	m.punchDials = map[punchKey]*punchDial{}
 	m.tls = tlsConfig
-	m.tls.NextProtos = []string{"h2", "http/1.1"}
-	m.startHTTP()
-	m.startGRPC()
 	m.wg.Add(3)
 	go m.acceptTCP()
 	go m.acceptUDP()
@@ -149,15 +134,8 @@ func (m *Mesh) Close() error {
 	}
 	m.mu.Unlock()
 	m.listener.Close()
-	m.webListener.Close()
-	m.webServer.Close()
-	m.grpcListener.Close()
-	m.grpcServer.Stop()
 	for _, conn := range pending {
 		conn.Close()
-	}
-	if m.wireguard != nil {
-		m.wireguard.Close()
 	}
 	m.udp.Close()
 	for _, session := range punches {
@@ -176,11 +154,6 @@ func (m *Mesh) Close() error {
 func (m *Mesh) Apply(snapshot model.Snapshot) error {
 	if err := snapshot.Validate(snapshot.AgentID); err != nil {
 		return err
-	}
-	if m.wireguard != nil {
-		if err := m.wireguard.Apply(snapshot); err != nil {
-			return err
-		}
 	}
 	m.mu.Lock()
 	if m.closed {
@@ -211,9 +184,6 @@ func (m *Mesh) Apply(snapshot model.Snapshot) error {
 	var retiredLinks []*link.Link
 	for _, network := range snapshot.Networks {
 		for _, p := range network.Peers {
-			if p.Node.WireGuard != nil {
-				continue
-			}
 			k := key{network.ID, p.Node.ID}
 			cfg := &policy{network: network.ID, self: network.Self.ID, cipher: network.Cipher, peer: p, endpoints: snapshot.Endpoints, detection: model.FailureDetectionTime(network.FailureDetection)}
 			if existing := old[k]; existing != nil && compatible(existing.policy.Load(), cfg) {
@@ -259,11 +229,6 @@ func compatible(a, b *policy) bool {
 }
 
 func (m *Mesh) Send(ctx context.Context, network, remote model.ID, frame []byte) error {
-	if m.wireguard != nil {
-		if found, err := m.wireguard.SendFrame(network, remote, frame); found {
-			return err
-		}
-	}
 	m.mu.Lock()
 	g := m.groups[key{network, remote}]
 	m.mu.Unlock()
@@ -275,16 +240,6 @@ func (m *Mesh) Send(ctx context.Context, network, remote model.ID, frame []byte)
 
 // SendOwnedBatch consumes frames on both successful enqueue and policy errors.
 func (m *Mesh) SendOwnedBatch(ctx context.Context, network, remote model.ID, frames []*packetbuf.Buffer) error {
-	if m.wireguard != nil && len(frames) > 0 {
-		if found, err := m.wireguard.SendFrame(network, remote, frames[0].Data); found {
-			for _, f := range frames[1:] {
-				_, e := m.wireguard.SendFrame(network, remote, f.Data)
-				err = errors.Join(err, e)
-			}
-			packetbuf.ReleaseAll(frames)
-			return err
-		}
-	}
 	m.mu.Lock()
 	g := m.groups[key{network, remote}]
 	m.mu.Unlock()
@@ -302,9 +257,6 @@ func (m *Mesh) Report() []model.LinkStatus {
 	}
 	m.mu.Unlock()
 	result := []model.LinkStatus{}
-	if m.wireguard != nil {
-		result = append(result, m.wireguard.Report()...)
-	}
 	for _, g := range groups {
 		links := g.edge.Report()
 		streams := uint32(g.mux.streamCount())
@@ -454,9 +406,8 @@ func (m *Mesh) accept(conn transport.Conn, kind model.Transport) {
 		resume := introduction.TCPResume && m.resumeEnabled()
 		windows := introduction.Windows && streams && m.resumeEnabled()
 		linkState := introduction.LinkState && m.linkStateEnabled()
-		compact := introduction.CompactData && m.compactHeader() != nil
 		sizeProbe := introduction.SizeProbe && streamTransport(kind)
-		selected.register(channel, *candidate, introduction.PathExchange, linkCaps{streams: streams, resume: resume, windows: windows, streamHello: true, linkState: linkState, linkStateHello: true, compact: compact, compactHello: true, sizeProbe: sizeProbe, sizeProbeHello: true, accepted: true, peerHeartbeat: time.Duration(introduction.Heartbeat) * time.Millisecond})
+		selected.register(channel, *candidate, introduction.PathExchange, linkCaps{streams: streams, resume: resume, windows: windows, streamHello: true, linkState: linkState, linkStateHello: true, sizeProbe: sizeProbe, sizeProbeHello: true, accepted: true, peerHeartbeat: time.Duration(introduction.Heartbeat) * time.Millisecond})
 	}()
 }
 func addressFamily(address net.Addr) int {
@@ -538,7 +489,6 @@ func (g *group) close() {
 type linkCaps struct {
 	streams, streamHello, linkState, linkStateHello bool
 	resume, windows                                 bool
-	compact, compactHello                           bool
 	sizeProbe, sizeProbeHello                       bool
 	accepted                                        bool
 	// peerHeartbeat is the dialer's heartbeat, as its introduction stated.
@@ -592,9 +542,7 @@ func (g *group) register(channel *peer.Channel, candidate link.Candidate, pathEx
 	if caps.linkState {
 		options.LinkState, options.LinkStateHello = g, caps.linkStateHello
 	}
-	if caps.compact {
-		options.Compact, options.CompactHello = g.mesh.compactHeader(), caps.compactHello
-	}
+	options.Compact = g.mesh.compactor()
 	options.SizeProbe, options.SizeProbeHello = caps.sizeProbe, caps.sizeProbeHello
 	options.Resume = caps.resume
 	options.Windows = caps.windows
@@ -683,21 +631,5 @@ func candidateIngress(candidate link.Candidate, conn transport.Conn) bool {
 			return false
 		}
 	}
-	if path, ok := conn.(interface{ EndpointPath() string }); ok {
-		parsed, err := url.Parse(candidate.Endpoint.URL)
-		if err != nil || candidate.Endpoint.Source != model.Manual {
-			return false
-		}
-		if candidate.Endpoint.Transport == model.GRPC {
-			return transport.GRPCMethod(parsed) == path.EndpointPath()
-		}
-		return transport.WebSocketPath(parsed) == path.EndpointPath()
-	}
 	return candidate.Family == addressFamily(conn.RemoteAddr())
-}
-
-// EnableWireGuard is called once before this Mesh is published to the dataplane.
-func (m *Mesh) EnableWireGuard(receive func(model.ID, []byte)) {
-	m.wireguard = wgaccess.New(m.ctx, m.identity, m.Port(), m.udp.SendWireGuard, receive)
-	m.udp.SetWireGuardReceiver(m.wireguard.Receive)
 }

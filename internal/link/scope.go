@@ -7,7 +7,7 @@ import (
 	"net/netip"
 	"net/url"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 // Address is the remote address in its owner's scope. Target is reserved for

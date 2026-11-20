@@ -4,7 +4,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 // PublishedExpiry keeps a stable mapping's advertised lease until half of its

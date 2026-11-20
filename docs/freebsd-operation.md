@@ -6,8 +6,8 @@ runtime as Linux.
 
 ## Run
 
-Build `go build -o graphwan ./cmd/graphwan` on FreeBSD, or cross-build on another
-system with `CGO_ENABLED=0 GOOS=freebsd GOARCH=amd64 go build -o graphwan ./cmd/graphwan`.
+Build `go build -o graphnet ./cmd/graphnet` on FreeBSD, or cross-build on another
+system with `CGO_ENABLED=0 GOOS=freebsd GOARCH=amd64 go build -o graphnet ./cmd/graphnet`.
 Core cross-builds pass for FreeBSD amd64, arm64, 386 and arm; only amd64
 has native execution evidence. Use the architecture of the target host.
 The Go 1.26.8 `386` discovery binary and a minimal Go hello program both exit with
@@ -19,9 +19,9 @@ The controller CLI and enrollment flow
 are the same as in the [README](../README.md). Run the Agent as root:
 
 ```sh
-export GRAPHWAN_ENROLLMENT_TOKEN='<one-time-token>'
-./graphwan agent --server https://controller.example.com:8443 \
-  --ca ./ca.pem --name freebsd-node --data-dir /var/db/graphwan-agent
+export GRAPHNET_ENROLLMENT_TOKEN='<one-time-token>'
+./graphnet agent --server https://controller.example.com:8443 \
+  --ca ./ca.pem --name freebsd-node --data-dir /var/db/graphnet-agent
 ```
 
 Enrollment needs the token only on the first run. Protect the data directory and
@@ -52,7 +52,7 @@ and [driver implementation](https://github.com/freebsd/freebsd-src/blob/releng/1
 Exclusive cloning, interface-index lookup, opening the descriptor and enabling
 `TUNSTRANSIENT` are separate operations. An interruption before the last step can
 leave an unconfigured clone even on a kernel that supports transient TUNs. If the
-initial lookup fails, GraphWAN reports the allocated name and preserves the
+initial lookup fails, GraphNet reports the allocated name and preserves the
 interface: deleting by name alone cannot establish ownership after a failed
 lookup. Later setup failures use the verified index or the owned transient
 descriptor. An administrator may remove an orphan only after confirming it is

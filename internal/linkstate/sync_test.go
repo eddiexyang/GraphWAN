@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/packet"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/packet"
+	"github.com/eddiexyang/graphnet/internal/testutil"
 )
 
 func TestSyncRepairsLostChangeBeforeFullRefresh(t *testing.T) {
@@ -129,7 +129,7 @@ func TestStableThirteenNodeTrafficBudget(t *testing.T) {
 		seed := make([]byte, 32)
 		seed[0] = byte(i + 1)
 		s.Agents = append(s.Agents, model.Agent{ID: testutil.ID(100 + i), Name: fmt.Sprint("agent", i), PublicKey: ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey), ListenPort: model.DefaultPort})
-		n.Nodes = append(n.Nodes, model.Node{ID: testutil.ID(200 + i), AgentID: testutil.ID(100 + i), Name: fmt.Sprint("node", i), Address: netip.MustParseAddr(fmt.Sprintf("10.50.0.%d", i+1))})
+		n.Nodes = append(n.Nodes, model.Node{ID: testutil.ID(200 + i), AgentID: testutil.ID(100 + i), Name: fmt.Sprint("node", i), Address: netip.MustParseAddr(fmt.Sprintf("10.50.0.%d", i+1)), Index: uint16(i + 1)})
 		for step := 1; step <= 3; step++ {
 			a, b := i, (i+step)%13
 			if i == 1 && step == 3 {

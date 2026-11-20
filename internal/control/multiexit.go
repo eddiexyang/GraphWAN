@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 // multiExitReady admits a prefix advertised by several Nodes only once every

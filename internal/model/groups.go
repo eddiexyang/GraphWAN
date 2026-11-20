@@ -172,7 +172,7 @@ func GroupEdgeID(group, a, b ID) ID {
 	if a > b {
 		a, b = b, a
 	}
-	sum := sha256.Sum256([]byte("graphwan/full-mesh/" + string(group) + "/" + string(a) + "/" + string(b)))
+	sum := sha256.Sum256([]byte("graphnet/full-mesh/" + string(group) + "/" + string(a) + "/" + string(b)))
 	return ID(hex.EncodeToString(sum[:16]))
 }
 
@@ -214,8 +214,7 @@ func (n Network) validateGroups(addID func(ID) error) error {
 			return fmt.Errorf("full mesh topology exceeds %d edges", MaxEdges)
 		}
 		for _, id := range g.Members {
-			node, ok := nodes[id]
-			if !ok || node.WireGuard != nil {
+			if _, ok := nodes[id]; !ok {
 				return fmt.Errorf("full mesh members must be regular nodes in this network")
 			}
 			if used[id] {
@@ -254,8 +253,7 @@ func (n Network) validateGroups(addID func(ID) error) error {
 			key = pairKey(link.SourceGroup, link.Group)
 			size *= int64(len(source.Members))
 		} else {
-			node, ok := nodes[link.Node]
-			if !ok || node.WireGuard != nil || slices.Contains(g.Members, link.Node) {
+			if _, ok := nodes[link.Node]; !ok || slices.Contains(g.Members, link.Node) {
 				return fmt.Errorf("group link requires a regular node outside its target group")
 			}
 			key = [2]ID{link.Node, link.Group}

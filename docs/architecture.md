@@ -1,6 +1,6 @@
-# GraphWAN architecture
+# GraphNet architecture
 
-GraphWAN is a centrally configured, peer-forwarded overlay. The controller never
+GraphNet is a centrally configured, peer-forwarded overlay. The controller never
 forwards user packets. `proposal.md` is the accepted product scope; this document
 records concrete implementation decisions, not a reduction of that scope.
 
@@ -22,8 +22,7 @@ seconds. Explicit preferences and required session replacement bypass this margi
 Only the selected Link sends user traffic; heartbeats
 and negotiation may use standby Links. A Session is the active Link of an Edge.
 
-Automatic endpoints use TCP/UDP only. Manual endpoints can use TCP, UDP, QUIC,
-WS, WSS and gRPC, including DNS names and URL paths. Observed NAT endpoints
+Endpoints use TCP or UDP. Manual endpoints can also use DNS names. Observed NAT endpoints
 include the mapped port and expire; they are not arbitrary public-IP guesses.
 Discovery excludes virtual interfaces. Candidate generation is bounded and
 retries with backoff; an unsuccessful candidate does not block other candidates.
@@ -44,7 +43,7 @@ applied revisions are distinct. The last durable snapshot is usable after an
 agent restart while the controller is absent. Controller disconnection does not
 close TUNs, peer Links or timers. Existing endpoints permit autonomous reconnect;
 changed NAT mappings can require renewed rendezvous. No system can guarantee
-hole punching through every NAT without relays, and GraphWAN has no relay mode.
+hole punching through every NAT without relays, and GraphNet has no relay mode.
 
 Route changes carry a revision/epoch. A bounded overlay hop limit contains loops
 during asynchronous updates. Packet forwarding must reject unknown networks,
@@ -61,12 +60,11 @@ and client authentication. Peer connections authenticate the identities permitte
 by the compiled Edge configuration. Network-wide cipher selection does not mean
 network-wide shared private keys. Transport-independent authenticated encryption
 uses ephemeral session secrets, direction-specific keys, unique nonces and replay
-protection. Between Nodes with Agent keys, TCP session bytes and the payload of
+protection. Between Nodes, TCP session bytes and the payload of
 other packets are also sealed end to end by sessions between the two Agents, so
 relays neither read nor change them, and no byte is encrypted twice; their IP
-and UDP/ICMP headers stay readable for routing. TCP carried as packets, and
-traffic of WireGuard leaves, which have no Agent key, are sealed per hop only,
-and their intermediate Nodes are trusted to see hop-decrypted packets.
+and UDP/ICMP headers stay readable for routing. TCP carried as packets is sealed
+per hop only, and its intermediate Nodes are trusted to see hop-decrypted packets.
 
 Browser authentication uses a salted password hash and bounded sessions with
 HttpOnly cookies. State-changing requests require same-origin/CSRF protection.
@@ -87,7 +85,7 @@ Telemetry and desired state use separate models and storage lifetimes.
 
 Stream transports frame complete overlay packets. UDP preserves datagram
 boundaries. Queues, frame sizes, dial concurrency and reconnect frequency are
-bounded. MTU defaults to 1280 and remains an explicit network setting. Platform
+bounded. MTU defaults to 1422, which fills a 1500-byte underlay, and remains an explicit network setting. Platform
 TUN adapters own interface addresses/routes and clean up only their own resources.
 
 ## Verification
@@ -99,5 +97,5 @@ Release; see [release CI and local checks](continuous-integration.md).
 
 Standards consulted: [ICE (RFC 8445)](https://www.rfc-editor.org/rfc/rfc8445),
 [STUN (RFC 8489)](https://www.rfc-editor.org/rfc/rfc8489), and
-[Go TLS documentation](https://pkg.go.dev/crypto/tls). GraphWAN uses discovery and
+[Go TLS documentation](https://pkg.go.dev/crypto/tls). GraphNet uses discovery and
 connectivity checks without a TURN data relay; it does not claim full ICE support.

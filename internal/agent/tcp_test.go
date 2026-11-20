@@ -3,11 +3,9 @@ package agent
 import (
 	"bytes"
 	"context"
-	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -18,13 +16,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/forwarding"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/packet"
-	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
-	"github.com/eWloYW8/GraphWAN/internal/routing"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
-	"github.com/eWloYW8/GraphWAN/internal/tunnel"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/packet"
+	"github.com/eddiexyang/graphnet/internal/packetbuf"
+	"github.com/eddiexyang/graphnet/internal/routing"
+	"github.com/eddiexyang/graphnet/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/tunnel"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
@@ -38,7 +35,7 @@ import (
 )
 
 // kernelTUN simulates application TCP through the actual Agent TUN API. The
-// application and GraphWAN have independent TCP sequence/congestion state.
+// application and GraphNet have independent TCP sequence/congestion state.
 type kernelTUN struct {
 	config   tunnel.Config
 	stack    *stack.Stack
@@ -360,9 +357,6 @@ func graphAgents(t *testing.T, carrier model.Transport, options streamOptions, c
 			current := agent.state.Load()
 			for _, network := range current.snapshot.Networks {
 				for _, peer := range network.Peers {
-					if peer.Node.WireGuard != nil {
-						continue
-					}
 					found := false
 					for _, status := range agent.Report() {
 						if status.EdgeID == peer.Edge.ID && status.Healthy {
@@ -395,7 +389,7 @@ func graphAgents(t *testing.T, carrier model.Transport, options streamOptions, c
 }
 
 func TestTCPStreamsAcrossGraph(t *testing.T) {
-	for _, carrier := range []model.Transport{model.TCP, model.QUIC, model.WS, model.WSS, model.GRPC} {
+	for _, carrier := range []model.Transport{model.TCP, model.QUIC} {
 		t.Run(string(carrier), func(t *testing.T) {
 			agents, devices, state := streamAgents(t, carrier)
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -484,10 +478,10 @@ func assertNoTCPOverTCP(t *testing.T, agents []*DataPlane) {
 	}
 }
 
-// streamCarrier reports transports whose Links carry streams; QUIC Links
-// carry datagrams, and UDP is unreliable.
+// streamCarrier reports transports whose Links carry streams, TCP and QUIC;
+// UDP is unreliable.
 func streamCarrier(carrier model.Transport) bool {
-	return carrier == model.TCP || carrier == model.WS || carrier == model.WSS || carrier == model.GRPC
+	return carrier == model.TCP || carrier == model.QUIC
 }
 
 // Edges without stream support forward TCP as packets, end to end.
@@ -597,7 +591,7 @@ func transferApplication(t *testing.T, source, destination *kernelTUN, target ne
 }
 
 func TestTCPStreamsOnOneWayReachableEdge(t *testing.T) {
-	for _, carrier := range []model.Transport{model.TCP, model.QUIC, model.GRPC} {
+	for _, carrier := range []model.Transport{model.TCP, model.QUIC} {
 		t.Run(string(carrier), func(t *testing.T) {
 			agents, devices, state := streamAgents(t, carrier, func(s *model.State) { s.Agents[2].Endpoints = nil })
 			transferApplication(t, devices[0], devices[2], state.Networks[0].Nodes[2].Address)
@@ -636,78 +630,6 @@ func TestTCPIPv6AndConfigurationRefresh(t *testing.T) {
 		t.Fatal("display/config refresh replaced TCP state")
 	}
 	transferApplication(t, devices[0], devices[2], state.Networks[0].Nodes[2].Address)
-}
-
-func TestTCPWireGuardAccessBoundary(t *testing.T) {
-	for _, sourceLeaf := range []bool{false, true} {
-		t.Run(fmt.Sprintf("source_leaf_%v", sourceLeaf), func(t *testing.T) {
-			gatewayIndex := 2
-			if sourceLeaf {
-				gatewayIndex = 0
-			}
-			leafID := testutil.ID(80)
-			leafAddress := netip.MustParseAddr("10.42.0.10")
-			// The simulated leaf bypasses the WireGuard hub and never completes a
-			// handshake, so link-state would rightly report its edge down: the
-			// Agents forward on the compiled routes instead.
-			agents, devices, state := streamAgentsWith(t, model.TCP, streamOptions{withoutLinkState: true}, func(s *model.State) {
-				key, err := ecdh.X25519().GenerateKey(rand.Reader)
-				if err != nil {
-					t.Fatal(err)
-				}
-				n := &s.Networks[0]
-				n.Nodes = append(n.Nodes, model.Node{ID: leafID, Name: "WG access", Address: leafAddress, WireGuard: &model.WireGuardNode{PublicKey: base64.StdEncoding.EncodeToString(key.PublicKey().Bytes())}})
-				n.Edges = append(n.Edges, model.Edge{ID: testutil.ID(81), A: n.Nodes[gatewayIndex].ID, B: leafID, Weight: 1, Enabled: true, Transports: []model.Transport{model.WireGuard}, Methods: model.ConnectionMethods{IPv4Direct: true}})
-			})
-			leaf, err := newKernelTUN(tunnel.Config{Address: netip.PrefixFrom(leafAddress, 24), MTU: model.DefaultMTU})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer leaf.Close()
-			gateway := agents[gatewayIndex]
-			snapshot, err := routing.Compile(state, state.Agents[gatewayIndex].ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			// Hub cryptography has its own integration tests. Here, join its
-			// authenticated plaintext boundary to the simulated leaf's TCP stack.
-			router, err := forwarding.New(snapshot, func(ctx context.Context, network, remote model.ID, frame []byte) error {
-				if remote != leafID {
-					return gateway.state.Load().mesh.Send(ctx, network, remote, frame)
-				}
-				p, err := packet.ParseView(frame)
-				if err != nil {
-					return err
-				}
-				_, err = leaf.Write(p.Payload)
-				return err
-			}, gateway.deliver)
-			if err != nil {
-				t.Fatal(err)
-			}
-			next := *gateway.state.Load()
-			next.router = router
-			gateway.state.Store(&next)
-			go func() {
-				raw := make([]byte, model.MaxMTU+1)
-				for {
-					n, err := leaf.Read(raw)
-					if err != nil {
-						return
-					}
-					gateway.receiveWireGuard(state.Networks[0].ID, raw[:n])
-				}
-			}()
-			if sourceLeaf {
-				transferApplication(t, leaf, devices[2], state.Networks[0].Nodes[2].Address)
-			} else {
-				transferApplication(t, devices[0], leaf, leafAddress)
-			}
-			if devices[1].writes.Load() != 0 || devices[gatewayIndex].writes.Load() != 0 {
-				t.Fatal("WireGuard stream leaked into transit TUN")
-			}
-		})
-	}
 }
 
 // Without any path a connection waits, as IP does, instead of being reset.

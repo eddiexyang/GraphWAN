@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 type Receipt struct {
@@ -195,7 +195,7 @@ func (m *Manager) perform(ctx context.Context, req model.UpdateRequest, client *
 		return errors.New("update request expired; request a new update")
 	}
 	// Staging beside the executable makes replacement a same-filesystem rename.
-	f, err := os.CreateTemp(filepath.Dir(m.receipt.Executable), ".graphwan-download-*")
+	f, err := os.CreateTemp(filepath.Dir(m.receipt.Executable), ".graphnet-download-*")
 	if err != nil {
 		return err
 	}

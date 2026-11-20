@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/packet"
-	"github.com/eWloYW8/GraphWAN/internal/secure"
-	"github.com/eWloYW8/GraphWAN/internal/streamproxy"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/packet"
+	"github.com/eddiexyang/graphnet/internal/secure"
+	"github.com/eddiexyang/graphnet/internal/streamproxy"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
@@ -344,8 +344,8 @@ func tamperingProxy(listener net.Listener, target string, tamper <-chan struct{}
 				}
 				select {
 				case <-tamper:
-					// [sealed kind 6][nonce][header and tag][records]
-					if len(message) > 1+secure.Overhead+19+streamproxy.RecordOverhead && message[0] == 6 {
+					// [sealed kind 0x46][nonce][header and tag][records]
+					if len(message) > 1+secure.Overhead+19+streamproxy.RecordOverhead && message[0] == 0x46 {
 						once.Do(func() { message[len(message)-1] ^= 0xff })
 					}
 				default:
@@ -398,10 +398,10 @@ func TestSealedPacketsExpireInTransit(t *testing.T) {
 	}
 }
 
-// Datagrams as large as the network's MTU travel sealed over UDP and QUIC
+// Datagrams as large as the network's MTU travel sealed over UDP, TCP and QUIC
 // Links.
 func TestSealedPacketsOfFullSize(t *testing.T) {
-	for _, carrier := range []model.Transport{model.UDP, model.QUIC} {
+	for _, carrier := range []model.Transport{model.UDP, model.TCP, model.QUIC} {
 		t.Run(string(carrier), func(t *testing.T) {
 			agents, devices, state := graphAgents(t, carrier, streamOptions{}, 3, 2)
 			network, nodes := state.Networks[0].ID, state.Networks[0].Nodes

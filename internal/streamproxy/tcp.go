@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
+	"github.com/eddiexyang/graphnet/internal/packetbuf"
 
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -29,8 +29,8 @@ const ConnectTimeout = 10 * time.Second
 // smaller packet-count queue can drop a local burst before socket backpressure.
 const accessPacketQueue = 2048
 
-// Engine owns only access-side TCP. output emits packets to the local TUN or
-// authenticated WireGuard leaf; open returns the graph's application byte stream.
+// Engine owns only access-side TCP. output emits packets to the local TUN;
+// open returns the graph's application byte stream.
 type Engine struct {
 	stack       *stack.Stack
 	link        *channel.Endpoint
@@ -274,8 +274,7 @@ func (e *Engine) InjectOwned(p *stack.PacketBuffer) {
 }
 func (e *Engine) SetMTU(mtu int) { e.link.SetMTU(uint32(mtu)) }
 
-// Dial preserves the access TCP tuple, including for subnet and WireGuard
-// destinations. Endpoint cleanup covers cancellation, bind and connect failures.
+// Dial preserves the access TCP tuple, including for subnet destinations. Endpoint cleanup covers cancellation, bind and connect failures.
 func (e *Engine) Dial(ctx context.Context, from, to netip.AddrPort) (Conn, error) {
 	protocol := ipv4.ProtocolNumber
 	if to.Addr().Is6() {

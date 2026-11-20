@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 // createAgent registers an Agent by its Ed25519 public key, as an alternative

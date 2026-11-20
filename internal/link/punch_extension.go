@@ -8,7 +8,7 @@ import (
 	"slices"
 	"strconv"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 // Bound the search to neighboring ports of fresh, observed IPv4 mappings.

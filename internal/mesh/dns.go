@@ -3,7 +3,7 @@ package mesh
 import (
 	"context"
 	"errors"
-	"github.com/eWloYW8/GraphWAN/internal/sockets"
+	"github.com/eddiexyang/graphnet/internal/sockets"
 	"net"
 	"net/netip"
 	"net/url"
@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/link"
+	"github.com/eddiexyang/graphnet/internal/link"
 )
 
 type dnsEntry struct {

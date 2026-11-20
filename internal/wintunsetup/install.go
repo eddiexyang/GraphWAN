@@ -158,7 +158,7 @@ func installArchive(directory, arch string, raw []byte, expectedHash string) (bo
 }
 
 func publish(directory, name string, contents []byte, replace bool) error {
-	f, err := os.CreateTemp(directory, ".graphwan-wintun-*")
+	f, err := os.CreateTemp(directory, ".graphnet-wintun-*")
 	if err != nil {
 		return err
 	}

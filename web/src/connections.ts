@@ -25,18 +25,14 @@ export function connectionViews(network: Network, edge: Edge, links: Report[]) {
   return [...sessions]
     .map(([id, reports]) => {
       const first = reports.a ?? reports.b!
-      const wireguard = first.transport === 'wireguard'
-      const active = wireguard ? first.active : !!(reports.a?.active && reports.b?.active)
-      const healthy = wireguard ? first.healthy : !!(reports.a?.healthy && reports.b?.healthy)
+      const active = !!(reports.a?.active && reports.b?.active)
+      const healthy = !!(reports.a?.healthy && reports.b?.healthy)
       return {
         id,
         candidate: first.candidate_id,
         transport: first.transport,
-        state: wireguard
-          ? healthy
-            ? 'Active'
-            : 'Waiting'
-          : !reports.a || !reports.b
+        state:
+          !reports.a || !reports.b
             ? 'Awaiting peer'
             : active && healthy
               ? 'Active'

@@ -47,22 +47,6 @@ export function activePath(
       !s.runtime_error
     const left = endpoint(a),
       right = endpoint(b)
-    if (
-      network.nodes.find((n) => n.id === a)?.wireguard ||
-      network.nodes.find((n) => n.id === b)?.wireguard
-    ) {
-      const gateway = network.nodes.find((n) => n.id === a)?.wireguard ? right : left
-      return (
-        healthy(gateway) &&
-        !!gateway?.links?.some(
-          (l) =>
-            l.network_id === network.id &&
-            l.edge_id === edgeID &&
-            l.transport === 'wireguard' &&
-            l.healthy,
-        )
-      )
-    }
     return (
       healthy(left) &&
       healthy(right) &&
@@ -101,8 +85,7 @@ export function activePath(
     excluded.has(destination)
   )
     return { ...result, state: 'Unavailable', reason: 'Endpoint is unavailable.' }
-  if (useLive && !network.nodes.find((n) => n.id === source)?.wireguard)
-    return installedPath(network, source, destination, statuses, live)
+  if (useLive) return installedPath(network, source, destination, statuses, live)
   let current = source
   while (current !== destination) {
     const best = new Map<string, { cost: number; first: string }>([
@@ -154,7 +137,6 @@ export function activePath(
     return { ...result, reason: 'Unsaved routing changes; showing the configured draft path.' }
   for (const id of result.nodes) {
     const node = network.nodes.find((n) => n.id === id)!
-    if (node.wireguard) continue
     const status = statuses.find((s) => s.agent_id === node.agent_id)
     if (!status?.connected)
       return { ...result, state: 'Unavailable', reason: `${node.name} is offline.` }
@@ -216,13 +198,6 @@ function installedPath(
     }
     partial = path
     const s = status(node)
-    if (network.nodes.find((n) => n.id === node)?.wireguard) {
-      problem = {
-        state: 'Unknown',
-        reason: `${name(node)} is a WireGuard node and routes nothing.`,
-      }
-      return
-    }
     if (!s?.connected) {
       problem = { state: 'Unavailable', reason: `${name(node)} is offline.` }
       return

@@ -50,7 +50,7 @@ func ParseAgentInvitation(raw string) (AgentInvitation, error) {
 	return i, i.Validate()
 }
 func (i AgentInvitation) Validate() error {
-	if i.Kind != "graphwan-agent" || i.Version != 1 || len(i.Token) != 43 || i.ExpiresAt.IsZero() {
+	if i.Kind != "graphnet-agent" || i.Version != 1 || len(i.Token) != 43 || i.ExpiresAt.IsZero() {
 		return errors.New("invalid or unsupported agent invitation")
 	}
 	if _, err := base64.RawURLEncoding.DecodeString(i.Token); err != nil {

@@ -7,7 +7,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 // Limit discovery without allowing a large container/link-local inventory to

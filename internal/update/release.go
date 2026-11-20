@@ -1,4 +1,4 @@
-// Package update retrieves and verifies official GraphWAN release binaries.
+// Package update retrieves and verifies official GraphNet release binaries.
 package update
 
 import (
@@ -17,10 +17,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
-const LatestURL = "https://api.github.com/repos/eWloYW8/GraphWAN/releases/latest"
+const LatestURL = "https://api.github.com/repos/eddiexyang/graphnet/releases/latest"
 
 func GitHubClient() *http.Client {
 	return &http.Client{Timeout: 20 * time.Minute, CheckRedirect: func(r *http.Request, via []*http.Request) error {
@@ -67,7 +67,7 @@ func (s *Releases) Latest(ctx context.Context, goos, arch string) (model.Release
 			return model.ReleaseAsset{}, err
 		}
 		req.Header.Set("Accept", "application/vnd.github+json")
-		req.Header.Set("User-Agent", "GraphWAN-updater")
+		req.Header.Set("User-Agent", "GraphNet-updater")
 		resp, err := s.Client.Do(req)
 		if err != nil {
 			return model.ReleaseAsset{}, err
@@ -90,7 +90,7 @@ func (s *Releases) Latest(ctx context.Context, goos, arch string) (model.Release
 	if goos == "windows" {
 		suffix = ".exe"
 	}
-	name := "graphwan-" + s.metadata.Tag + "-" + goos + "-" + arch + suffix
+	name := "graphnet-" + s.metadata.Tag + "-" + goos + "-" + arch + suffix
 	for _, asset := range s.metadata.Assets {
 		if asset.Name == name {
 			a := model.ReleaseAsset{Version: s.metadata.Tag, OS: goos, Arch: arch, Name: name, URL: asset.URL, Size: asset.Size, SHA256: strings.TrimPrefix(asset.Digest, "sha256:")}
@@ -128,7 +128,7 @@ func Fetch(ctx context.Context, client *http.Client, url, path string, a model.R
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", "GraphWAN-updater")
+	req.Header.Set("User-Agent", "GraphNet-updater")
 	resp, err := client.Do(req)
 	if err != nil {
 		return err

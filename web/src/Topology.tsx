@@ -42,8 +42,6 @@ import { FloatingEdge, FloatingConnection, LineConnection } from './FloatingEdge
 import { planAnchors, groupFrameDimensions } from './edgeGeometry'
 import { planRoutes, planLabels, type LineStyle } from './edgeRouting'
 import { activePath } from './activePath'
-import WireGuardNode from './WireGuardNode'
-import { wireGuardNodeState } from './wireguard'
 import { ResourceDetails } from './Resources'
 import { Badge, Field, NumberInput, useConfirm } from './components'
 import { connectionViews, endpointParts } from './connections'
@@ -62,6 +60,7 @@ import {
   bytes,
   rate,
   shortID,
+  transports,
 } from './model'
 export type Selection =
   { type: 'node' | 'edge'; id: string } | { type: 'path'; id: string; target: string } | null
@@ -97,7 +96,6 @@ type GraphNode = FlowNode<
     state: string
     connecting: boolean
     path: boolean
-    wireguard: boolean
     summary?: string
   },
   'agent' | 'meshGroup'
@@ -123,7 +121,7 @@ function AgentNode({ data, isConnectable }: NodeProps<GraphNode>) {
       />
       <div className="node-content">
         <div className="node-icon">
-          {data.wireguard ? <Cable size={18} /> : <Server size={18} />}
+          <Server size={18} />
         </div>
         <div>
           <strong>{data.name}</strong>
@@ -276,7 +274,7 @@ export default function Topology({
   }, [scope, scopeGroup, scopeLink])
   const [showSpeeds, setShowSpeeds] = useState(() => {
     try {
-      return localStorage.getItem('graphwan:show-speeds') !== 'false'
+      return localStorage.getItem('graphnet:show-speeds') !== 'false'
     } catch {
       return true
     }
@@ -284,14 +282,14 @@ export default function Topology({
   const chooseShowSpeeds = (show: boolean) => {
     setShowSpeeds(show)
     try {
-      localStorage.setItem('graphwan:show-speeds', String(show))
+      localStorage.setItem('graphnet:show-speeds', String(show))
     } catch {
       /* Browsing without storage remains supported. */
     }
   }
   const [showWeights, setShowWeights] = useState(() => {
     try {
-      return localStorage.getItem('graphwan:show-weights') === 'true'
+      return localStorage.getItem('graphnet:show-weights') === 'true'
     } catch {
       return false
     }
@@ -299,14 +297,14 @@ export default function Topology({
   const chooseShowWeights = (show: boolean) => {
     setShowWeights(show)
     try {
-      localStorage.setItem('graphwan:show-weights', String(show))
+      localStorage.setItem('graphnet:show-weights', String(show))
     } catch {
       /* Browsing without storage remains supported. */
     }
   }
   const [viewStyle, setViewStyle] = useState<LineStyle | 'globe'>(() => {
     try {
-      const saved = localStorage.getItem('graphwan:line-style')
+      const saved = localStorage.getItem('graphnet:line-style')
       return saved === 'globe' || saved === 'bezier' ? saved : 'line'
     } catch {
       return 'line'
@@ -320,7 +318,7 @@ export default function Topology({
     }
     setViewStyle(style)
     try {
-      localStorage.setItem('graphwan:line-style', style)
+      localStorage.setItem('graphnet:line-style', style)
     } catch {
       /* Browsing without storage remains supported. */
     }
@@ -341,7 +339,7 @@ export default function Topology({
     const group = groups[0]
     if (group) {
       const node = source === group.id ? target : source
-      if (!group.members.includes(node) && network.nodes.some((n) => n.id === node && !n.wireguard))
+      if (!group.members.includes(node) && network.nodes.some((n) => n.id === node))
         setGroupEditor({ kind: 'link', node, group: group.id })
       return
     }
@@ -375,7 +373,7 @@ export default function Topology({
         (g) =>
           (g.id === source || g.id === target) &&
           !g.members.includes(g.id === source ? target : source) &&
-          network.nodes.some((n) => n.id === (g.id === source ? target : source) && !n.wireguard),
+          network.nodes.some((n) => n.id === (g.id === source ? target : source)),
       ) ||
       !!createEdge({ ...network, group_links: [] }, source, target))
 
@@ -417,16 +415,13 @@ export default function Topology({
           data: {
             connecting,
             path: path?.nodes.includes(n.id) ?? false,
-            wireguard: !!n.wireguard,
             name: n.name,
             address: n.address,
-            state: n.wireguard
-              ? wireGuardNodeState(network, n, state, statuses, live)
-              : nodeState(
-                  state.agents.find((a) => a.id === n.agent_id),
-                  status.get(n.agent_id),
-                  live,
-                ),
+            state: nodeState(
+              state.agents.find((a) => a.id === n.agent_id),
+              status.get(n.agent_id),
+              live,
+            ),
           },
           ariaLabel: `${n.name}, ${n.address}`,
         })),
@@ -470,7 +465,6 @@ export default function Topology({
               address: '',
               state: '',
               connecting,
-              wireguard: false,
               path: internalEdges(g).some((e) => path?.edges.includes(e.id)),
             },
           },
@@ -1079,18 +1073,6 @@ export default function Topology({
               Reverse direction
             </button>
           </>
-        ) : node?.wireguard ? (
-          <WireGuardNode
-            key={node.id}
-            node={node}
-            network={network}
-            state={state}
-            statuses={statuses}
-            editing={editing}
-            live={live}
-            change={change}
-            removed={() => select(null)}
-          />
         ) : node ? (
           <>
             <div className="inspector-intro">
@@ -1436,80 +1418,78 @@ export default function Topology({
                   onInvalid={(bad) => markInvalid(`edge:${edge.id}:weight`, bad)}
                 />
               </Field>
-              {!edge.transports.includes('wireguard') && (
-                <>
-                  <h4>Allowed transports</h4>
-                  <div className="checks">
-                    {(['udp', 'tcp', 'quic', 'ws', 'wss', 'grpc'] as const).map((t) => (
-                      <label className="check" key={t}>
-                        <input
-                          type="checkbox"
-                          checked={edge.transports.includes(t)}
-                          onChange={(e) =>
-                            updateEdge({
-                              transports: e.target.checked
-                                ? [...edge.transports, t]
-                                : edge.transports.filter((v) => v !== t),
-                            })
-                          }
-                        />
-                        {t.toUpperCase()}
-                      </label>
-                    ))}
-                  </div>
-                  <h4>Connection methods</h4>
-                  {(
-                    [
-                      ['ipv4_direct', 'IPv4 direct'],
-                      ['ipv6_direct', 'IPv6 direct'],
-                      ['hole_punch', 'NAT hole punching'],
-                      ['hole_punch_extension', 'NAT hole punching extension'],
-                    ] as const
-                  ).map(([key, label]) => (
-                    <label className="check" key={key}>
+              <>
+                <h4>Allowed transports</h4>
+                <div className="checks">
+                  {transports.map((t) => (
+                    <label className="check" key={t}>
                       <input
                         type="checkbox"
-                        checked={!!edge.methods[key]}
-                        disabled={key === 'hole_punch_extension' && !edge.methods.hole_punch}
+                        checked={edge.transports.includes(t)}
                         onChange={(e) =>
                           updateEdge({
-                            methods: {
-                              ...edge.methods,
-                              [key]: e.target.checked,
-                              ...(key === 'hole_punch' && !e.target.checked
-                                ? { hole_punch_extension: false }
-                                : {}),
-                            },
+                            transports: e.target.checked
+                              ? [...edge.transports, t]
+                              : edge.transports.filter((v) => v !== t),
                           })
                         }
                       />
-                      {label}
+                      {t.toUpperCase()}
                     </label>
                   ))}
-                  <Field label="Preferred path">
-                    <select
-                      value={edge.preferred_candidate ?? ''}
-                      onChange={(e) => updateEdge({ preferred_candidate: e.target.value })}
-                    >
-                      <option value="">Automatic · Lowest RTT</option>
-                      {[...new Map(connections.map((c) => [c.candidate, c])).values()].map((c) => (
-                        <option key={c.candidate} value={c.candidate}>
-                          {c.transport.toUpperCase()} · {c.ends[0].address ?? 'Unknown'} ↔{' '}
-                          {c.ends[1].address ?? 'Unknown'}
+                </div>
+                <h4>Connection methods</h4>
+                {(
+                  [
+                    ['ipv4_direct', 'IPv4 direct'],
+                    ['ipv6_direct', 'IPv6 direct'],
+                    ['hole_punch', 'NAT hole punching'],
+                    ['hole_punch_extension', 'NAT hole punching extension'],
+                  ] as const
+                ).map(([key, label]) => (
+                  <label className="check" key={key}>
+                    <input
+                      type="checkbox"
+                      checked={!!edge.methods[key]}
+                      disabled={key === 'hole_punch_extension' && !edge.methods.hole_punch}
+                      onChange={(e) =>
+                        updateEdge({
+                          methods: {
+                            ...edge.methods,
+                            [key]: e.target.checked,
+                            ...(key === 'hole_punch' && !e.target.checked
+                              ? { hole_punch_extension: false }
+                              : {}),
+                          },
+                        })
+                      }
+                    />
+                    {label}
+                  </label>
+                ))}
+                <Field label="Preferred path">
+                  <select
+                    value={edge.preferred_candidate ?? ''}
+                    onChange={(e) => updateEdge({ preferred_candidate: e.target.value })}
+                  >
+                    <option value="">Automatic · Lowest RTT</option>
+                    {[...new Map(connections.map((c) => [c.candidate, c])).values()].map((c) => (
+                      <option key={c.candidate} value={c.candidate}>
+                        {c.transport.toUpperCase()} · {c.ends[0].address ?? 'Unknown'} ↔{' '}
+                        {c.ends[1].address ?? 'Unknown'}
+                      </option>
+                    ))}
+                    {edge.preferred_candidate &&
+                      !edgeView(network, edge, statuses, rates, live).links.some(
+                        (l) => l.candidate_id === edge.preferred_candidate,
+                      ) && (
+                        <option value={edge.preferred_candidate}>
+                          Saved path · {shortID(edge.preferred_candidate)}
                         </option>
-                      ))}
-                      {edge.preferred_candidate &&
-                        !edgeView(network, edge, statuses, rates, live).links.some(
-                          (l) => l.candidate_id === edge.preferred_candidate,
-                        ) && (
-                          <option value={edge.preferred_candidate}>
-                            Saved path · {shortID(edge.preferred_candidate)}
-                          </option>
-                        )}
-                    </select>
-                  </Field>
-                </>
-              )}
+                      )}
+                  </select>
+                </Field>
+              </>
             </fieldset>
             <h4>Connections · {connections.length}</h4>
             {connections.map((c) => (
@@ -1534,13 +1514,8 @@ export default function Topology({
                       </div>
                       {end.report ? (
                         <div className="link-metrics">
-                          <span>
-                            {latencyLabel(end.report)}
-                            {end.report.transport === 'wireguard' ? ' · ICMP' : ' RTT'}
-                          </span>
-                          {end.report.transport !== 'wireguard' && (
-                            <span>{(end.report.loss * 100).toFixed(1)}% loss</span>
-                          )}
+                          <span>{latencyLabel(end.report)} RTT</span>
+                          <span>{(end.report.loss * 100).toFixed(1)}% loss</span>
                           <span>↓ {bytes(end.report.rx_bytes)}</span>
                           <span>↑ {bytes(end.report.tx_bytes)}</span>
                         </div>
@@ -1560,16 +1535,11 @@ export default function Topology({
                   change({
                     ...network,
                     edges: network.edges.filter((e) => e.id !== edge.id),
-                    nodes: network.nodes.filter(
-                      (n) => !(n.wireguard && (n.id === edge.a || n.id === edge.b)),
-                    ),
                   })
                   select(null)
                 }}
               >
-                {edge.transports.includes('wireguard')
-                  ? 'Remove edge and WireGuard node'
-                  : 'Remove edge'}
+                Remove edge
               </button>
             )}
           </>

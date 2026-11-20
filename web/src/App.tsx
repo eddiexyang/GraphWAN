@@ -29,9 +29,9 @@ import {
   rebase,
   ratesForSnapshot,
   createEdge,
+  nextAddress,
   nodeState,
 } from './model'
-import { generateClientKey, nextAddress, forgetWireGuardKeys } from './wireguard'
 import Topology, { type Selection } from './Topology'
 import Agents, { Enrollment } from './Agents'
 import Servers from './Servers'
@@ -46,7 +46,7 @@ function Login({ ready }: { ready: (csrf: string) => void }) {
           <span className="brand-icon">
             <NetworkIcon size={25} />
           </span>
-          GraphWAN
+          GraphNet
         </a>
         <div>
           <div className="eyebrow">YOUR NETWORK. YOUR TOPOLOGY.</div>
@@ -92,7 +92,7 @@ function Login({ ready }: { ready: (csrf: string) => void }) {
         >
           <div className="eyebrow">CONTROLLER ACCESS</div>
           <h2>Welcome back</h2>
-          <p className="muted">Sign in to manage your GraphWAN networks.</p>
+          <p className="muted">Sign in to manage your GraphNet networks.</p>
           {error && <ErrorBox>{error}</ErrorBox>}
           <Field label="Administrator password">
             <input
@@ -288,7 +288,7 @@ export default function App() {
   if (csrf === undefined)
     return (
       <div className="loading" role="status">
-        Connecting to GraphWAN…
+        Connecting to GraphNet…
       </div>
     )
   if (csrf === null)
@@ -336,7 +336,6 @@ export default function App() {
             return
           try {
             await request('/logout', { method: 'POST', csrf })
-            forgetWireGuardKeys()
             clearSession()
           } catch (e) {
             setError(errorText(e))
@@ -361,7 +360,7 @@ export default function App() {
           <span className="brand-icon">
             <NetworkIcon size={23} />
           </span>
-          GraphWAN
+          GraphNet
         </a>
         <div className="sidebar-caption">WORKSPACE</div>
         <nav>
@@ -640,7 +639,7 @@ export default function App() {
         </main>
         <footer className="app-footer">
           <span>
-            GraphWAN ·{' '}
+            GraphNet ·{' '}
             <a href="/THIRD_PARTY_LICENSES.txt" target="_blank" rel="noreferrer">
               Licenses
             </a>
@@ -695,7 +694,7 @@ function CreateNetwork({
 }) {
   const [name, setName] = useState('')
   const [cidr, setCIDR] = useState('10.42.0.0/24')
-  const [mtu, setMTU] = useState(1280)
+  const [mtu, setMTU] = useState(1422)
   const [mtuInvalid, setMtuInvalid] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -772,17 +771,9 @@ function AddNode({
   const available = state.agents.filter(
     (a) => !a.revoked && !network.nodes.some((n) => n.agent_id === a.id),
   )
-  const gateways = network.nodes.filter(
-    (n) => !n.wireguard && !state.agents.find((a) => a.id === n.agent_id)?.revoked,
-  )
-  const [kind, setKind] = useState('agent')
   const [agent, setAgent] = useState(available[0]?.id ?? '')
-  const [gateway, setGateway] = useState(gateways[0]?.id ?? '')
   const [name, setName] = useState(available[0]?.name ?? '')
   const [address, setAddress] = useState(nextAddress(network))
-  const [keyMode, setKeyMode] = useState('generate')
-  const [publicKey, setPublicKey] = useState('')
-  const [endpoint, setEndpoint] = useState('')
   const [error, setError] = useState('')
   return (
     <Modal title="Add node" close={close}>
@@ -791,101 +782,38 @@ function AddNode({
           e.preventDefault()
           setError('')
           try {
-            const id = newID()
             const node = {
-              id,
-              agent_id: kind === 'wireguard' ? '' : agent,
+              id: newID(),
+              agent_id: agent,
               name,
               address,
               position: {
                 x: (network.nodes.length % 3) * 280,
                 y: Math.floor(network.nodes.length / 3) * 150,
               },
-              ...(kind === 'wireguard'
-                ? {
-                    wireguard: {
-                      public_key: keyMode === 'generate' ? generateClientKey(id) : publicKey.trim(),
-                      endpoint: endpoint.trim(),
-                    },
-                  }
-                : {}),
             }
-            let updated: Network = { ...network, nodes: [...network.nodes, node] }
-            if (kind === 'wireguard') {
-              const edge = createEdge(updated, id, gateway)
-              if (!edge) throw new Error('Choose a regular Agent access node.')
-              updated = { ...updated, edges: [...updated.edges, edge] }
-            }
-            save(updated)
+            save({ ...network, nodes: [...network.nodes, node] })
           } catch (e) {
             setError(errorText(e))
           }
         }}
       >
-        <Field label="Node type">
+        <Field label="Agent">
           <select
-            value={kind}
+            required
+            value={agent}
             onChange={(e) => {
-              setKind(e.target.value)
-              setName(
-                e.target.value === 'wireguard'
-                  ? 'WireGuard client'
-                  : (available.find((a) => a.id === agent)?.name ?? ''),
-              )
+              setAgent(e.target.value)
+              setName(available.find((a) => a.id === e.target.value)?.name ?? '')
             }}
           >
-            <option value="agent">GraphWAN Agent</option>
-            <option value="wireguard">WireGuard</option>
+            {available.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
+            ))}
           </select>
         </Field>
-        {kind === 'agent' ? (
-          <Field label="Agent">
-            <select
-              required
-              value={agent}
-              onChange={(e) => {
-                setAgent(e.target.value)
-                setName(available.find((a) => a.id === e.target.value)?.name ?? '')
-              }}
-            >
-              {available.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name}
-                </option>
-              ))}
-            </select>
-          </Field>
-        ) : (
-          <>
-            <Field label="Access node">
-              <select required value={gateway} onChange={(e) => setGateway(e.target.value)}>
-                {gateways.map((n) => (
-                  <option key={n.id} value={n.id}>
-                    {n.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Client key">
-              <select value={keyMode} onChange={(e) => setKeyMode(e.target.value)}>
-                <option value="generate">Generate in this browser</option>
-                <option value="manual">Provide public key</option>
-              </select>
-            </Field>
-            {keyMode === 'manual' && (
-              <Field label="Client public key">
-                <input required value={publicKey} onChange={(e) => setPublicKey(e.target.value)} />
-              </Field>
-            )}
-            <Field label="Endpoint override">
-              <input
-                placeholder="Automatic, or vpn.example.com:24752"
-                value={endpoint}
-                onChange={(e) => setEndpoint(e.target.value)}
-              />
-            </Field>
-          </>
-        )}
         <Field label="Node name">
           <input required maxLength={128} value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
@@ -893,7 +821,7 @@ function AddNode({
           <input required value={address} onChange={(e) => setAddress(e.target.value)} />
         </Field>
         {error && <ErrorBox>{error}</ErrorBox>}
-        <button className="primary wide" disabled={kind === 'agent' ? !agent : !gateway}>
+        <button className="primary wide" disabled={!agent}>
           Add to draft
         </button>
       </form>

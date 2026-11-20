@@ -14,13 +14,13 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/eWloYW8/GraphWAN/internal/cluster"
-	"github.com/eWloYW8/GraphWAN/internal/geoip"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/pki"
-	"github.com/eWloYW8/GraphWAN/internal/store"
-	"github.com/eWloYW8/GraphWAN/internal/update"
-	"github.com/eWloYW8/GraphWAN/internal/webui"
+	"github.com/eddiexyang/graphnet/internal/cluster"
+	"github.com/eddiexyang/graphnet/internal/geoip"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/pki"
+	"github.com/eddiexyang/graphnet/internal/store"
+	"github.com/eddiexyang/graphnet/internal/update"
+	"github.com/eddiexyang/graphnet/internal/webui"
 )
 
 const maxBody = 8 << 20
@@ -392,22 +392,7 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request) {
 					nodes = append(nodes, node)
 				}
 			}
-			for _, node := range nodes {
-				if node.WireGuard == nil {
-					continue
-				}
-				for _, edge := range n.Edges {
-					if edge.A == node.ID && removed[edge.B] || edge.B == node.ID && removed[edge.A] {
-						removed[node.ID] = true
-					}
-				}
-			}
-			n.Nodes = nodes[:0]
-			for _, node := range nodes {
-				if !removed[node.ID] {
-					n.Nodes = append(n.Nodes, node)
-				}
-			}
+			n.Nodes = nodes
 			edges := []model.Edge{}
 			for _, edge := range n.Edges {
 				if !removed[edge.A] && !removed[edge.B] {

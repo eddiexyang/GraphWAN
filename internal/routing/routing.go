@@ -4,11 +4,10 @@ package routing
 import (
 	"cmp"
 	"container/heap"
-	"encoding/base64"
 	"fmt"
 	"slices"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 type arc struct {
@@ -207,7 +206,7 @@ func Compile(state model.State, agentID model.ID) (model.Snapshot, error) {
 				if node.AgentID != "" {
 					key = append(key, agents[node.AgentID].PublicKey...)
 				}
-				config.Directory = append(config.Directory, model.Destination{NodeID: node.ID, Address: node.Address, AdvertisedSubnets: append([]model.AdvertisedSubnet(nil), node.AdvertisedSubnets...), Client: node.Client, PublicKey: key})
+				config.Directory = append(config.Directory, model.Destination{NodeID: node.ID, Address: node.Address, AdvertisedSubnets: append([]model.AdvertisedSubnet(nil), node.AdvertisedSubnets...), Client: node.Client, PublicKey: key, Index: node.Index})
 			}
 		}
 		for _, edge := range network.EffectiveEdges() {
@@ -225,9 +224,6 @@ func Compile(state model.State, agentID model.ID) (model.Snapshot, error) {
 			}
 			node := nodes[peerID]
 			agent := agents[node.AgentID]
-			if node.WireGuard != nil {
-				agent.PublicKey, _ = base64.StdEncoding.DecodeString(node.WireGuard.PublicKey)
-			}
 			edge.Transports = append([]model.Transport{}, edge.Transports...)
 			config.Peers = append(config.Peers, model.Peer{Node: node, PublicKey: append([]byte{}, agent.PublicKey...), Endpoints: append([]model.Endpoint{}, agent.Endpoints...), Edge: edge})
 		}

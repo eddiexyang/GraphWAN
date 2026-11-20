@@ -9,7 +9,7 @@ ownership boundary is documented below.
 Build with Go 1.26 or newer on OpenBSD, or cross-build using the pinned toolchain:
 
 ```sh
-CGO_ENABLED=0 GOOS=openbsd GOARCH=amd64 go build -o graphwan ./cmd/graphwan
+CGO_ENABLED=0 GOOS=openbsd GOARCH=amd64 go build -o graphnet ./cmd/graphnet
 ```
 
 Production binaries cross-build for OpenBSD amd64, 386,
@@ -19,15 +19,15 @@ The controller's setup and enrollment flow are the same as in the
 `/dev/tun0` character device, `/sbin/ifconfig` and `/sbin/route`:
 
 ```sh
-export GRAPHWAN_ENROLLMENT_TOKEN='<one-time-token>'
-./graphwan agent --server https://controller.example.com:8443 \
-  --ca ./ca.pem --name openbsd-node --data-dir /var/db/graphwan-agent
+export GRAPHNET_ENROLLMENT_TOKEN='<one-time-token>'
+./graphnet agent --server https://controller.example.com:8443 \
+  --ca ./ca.pem --name openbsd-node --data-dir /var/db/graphnet-agent
 ```
 
 Use routing table/domain 0. Creating interfaces and reading routes in a different
 routing domain are not implemented; the adapter rejects a nonzero process
 routing table before changing host state. Wildcard peer listeners bind separate
-IPv4 and IPv6 sockets on the same port; native UDP, STUN and QUIC share the data
+IPv4 and IPv6 sockets on the same port; native UDP and STUN share the data
 socket for each family. This avoids relying on IPv4-mapped IPv6 socket support.
 
 ## Device ownership and configuration
@@ -69,7 +69,7 @@ Normal close and failed creation destroy only the interface whose name and index
 still match the allocation. An externally destroyed interface or a same-name
 replacement is not adopted or removed. Commands have bounded runtime and output.
 Other privileged administrators can still race configuration operations;
-GraphWAN does not lock the kernel's interface/routing configuration globally.
+GraphNet does not lock the kernel's interface/routing configuration globally.
 
 ## Physical-interface discovery
 
@@ -88,7 +88,7 @@ advertised only as TCP/UDP endpoints; down and loopback interfaces are excluded.
 Before applying any cached configuration, the native Agent factory recovers
 orphaned marked interfaces, even if no Networks remain in its new configuration.
 Opening a TUN also runs recovery. Each device holds an exclusive advisory lock
-on a root-owned, mode-0600 record under `/var/run/graphwan-tun` (mode 0700).
+on a root-owned, mode-0600 record under `/var/run/graphnet-tun` (mode 0700).
 The record's filename is a random 128-bit token and has no mutable payload;
 its file and parent directory are synced before kernel creation. A separate
 registry lock serializes publication and recovery with bounded waiting.
@@ -97,12 +97,12 @@ The interface description contains the token and the original kernel interface
 index. Recovery requires an unlocked record and an exact marker/index match.
 A living Agent keeps its record locked; a same-name replacement with a different
 index, an unmarked interface or an altered description is preserved. Changing
-the description revokes GraphWAN ownership and prevents further reconfiguration
+the description revokes GraphNet ownership and prevents further reconfiguration
 or automatic destruction. Do not edit it during normal operation.
 
 Normal close destroys the owned interface and removes its record. Failed cleanup
 retains the record for retry. Recovery also removes the token-derived private
-`/dev/graphwan-TOKEN/tun` node/directory if interrupted during opening; it never
+`/dev/graphnet-TOKEN/tun` node/directory if interrupted during opening; it never
 changes public `/dev/tunN` nodes. Registry opens reject symlinks, hard-linked or
 non-private records and non-root ownership. The empty registry and `.lock` file
 remain for reuse; do not delete records or the registry lock while Agents run.
@@ -113,23 +113,23 @@ these checks do not lock out concurrent root changes to the kernel.
 
 - **Interruption before ownership marking:** interfaces created through
   `SIOCIFCREATE` survive descriptor close ([tun(4)](https://man.openbsd.org/tun.4)).
-  GraphWAN recovers marked
+  GraphNet recovers marked
   interfaces after SIGKILL, but interface creation and description assignment
   are separate kernel operations. A kill between those operations can leave an
-  unmarked, unconfigured TUN. It has no GraphWAN address or subnet route, so it
+  unmarked, unconfigured TUN. It has no GraphNet address or subnet route, so it
   does not block cached-network restart, but its ownership cannot be proven.
   It is deliberately left untouched. An ordinary index-lookup failure now also
   leaves the interface untouched and reports its name; it never falls back to
   an unchecked name-only destroy. A marker-write failure can clean up using the
   known name/index, and all later failure paths require the matching marker too.
-  Older GraphWAN versions also created
+  Older GraphNet versions also created
   unmarked TUNs. After independently confirming ownership and stopping the Agent,
   use `ifconfig tunN destroy` for the specific residual interface. Never delete
   other applications' TUNs.
 - Direct device opening is not a substitute for exclusive creation. Although
   OpenBSD destroys interfaces that a device open created, opening an existing
   idle unit can adopt that interface. The driver's `tun_dev_open` path does not
-  provide an exclusive-create flag for this distinction. GraphWAN retains
+  provide an exclusive-create flag for this distinction. GraphNet retains
   `SIOCIFCREATE` to refuse existing interfaces, followed by ownership marking.
   Source review used [OpenBSD if_tun.c](https://github.com/openbsd/src/blob/master/sys/net/if_tun.c)
   revision 1.258, including `tun_create`, `tun_dev_open` and `tun_dev_close`.

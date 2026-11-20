@@ -5,7 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
-	"github.com/eWloYW8/GraphWAN/internal/sockets"
+	"github.com/eddiexyang/graphnet/internal/sockets"
 	"net"
 	"net/netip"
 	"net/url"
@@ -13,9 +13,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/link"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/transport"
+	"github.com/eddiexyang/graphnet/internal/link"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/transport"
 )
 
 type punchKey struct {
@@ -317,7 +317,7 @@ func (m *Mesh) punchStream(ctx context.Context, remote netip.AddrPort, identity 
 		err = nil
 	} else if err == nil {
 		var session *transport.PunchMux
-		session, err = transport.NewPunchMux(ctx, conn, m.identity.Public().(ed25519.PublicKey), m.tls, func(pub ed25519.PublicKey) bool { return pub.Equal(identity) && m.allowsTCPPunch(pub) })
+		session, err = transport.NewPunchMux(ctx, conn, m.identity.Public().(ed25519.PublicKey), m.tls, func(pub ed25519.PublicKey) bool { return pub.Equal(identity) && m.allowsTCPPunch(pub) }, false)
 		if err == nil {
 			if !m.installPunch(session) {
 				session.Close()

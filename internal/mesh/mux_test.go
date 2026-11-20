@@ -15,11 +15,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/link"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
-	"github.com/eWloYW8/GraphWAN/internal/streamproxy"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/link"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/packetbuf"
+	"github.com/eddiexyang/graphnet/internal/streamproxy"
+	"github.com/eddiexyang/graphnet/internal/testutil"
 )
 
 var memChannelID atomic.Uint64
@@ -85,7 +85,7 @@ type muxPair struct {
 	accepted chan *muxStream
 }
 
-func newMuxPair(t *testing.T) *muxPair {
+func newMuxPair(t testing.TB) *muxPair {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -99,7 +99,7 @@ var linkOptions = link.Options{Heartbeat: 20 * time.Millisecond, Timeout: 400 * 
 
 // connect creates one Link on each side. The acceptor (b) announces streams
 // unless it does not support them.
-func (p *muxPair) connect(t *testing.T, acceptorStreams bool) (*link.Link, *link.Link, *memChannel) {
+func (p *muxPair) connect(t testing.TB, acceptorStreams bool) (*link.Link, *link.Link, *memChannel) {
 	t.Helper()
 	ca, cb := memChannelPair()
 	info := func(peer int) link.Info {

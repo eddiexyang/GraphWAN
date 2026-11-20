@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/transport"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/transport"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -224,7 +224,7 @@ func (s *Server) acceptGRPC(_ any, stream grpc.ServerStream) error {
 	if !s.acquire() {
 		return status.Error(codes.ResourceExhausted, "too many pending tunnels")
 	}
-	if err := stream.SendHeader(metadata.Pairs("graphwan-protocol", GRPCProtocol)); err != nil {
+	if err := stream.SendHeader(metadata.Pairs("graphnet-protocol", GRPCProtocol)); err != nil {
 		<-s.pending
 		return err
 	}

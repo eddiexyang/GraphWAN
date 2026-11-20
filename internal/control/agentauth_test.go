@@ -14,9 +14,9 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/store"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/store"
+	"github.com/eddiexyang/graphnet/internal/testutil"
 )
 
 func TestSignedChallengeAuthenticatesPlaintextAgent(t *testing.T) {

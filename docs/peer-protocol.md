@@ -22,7 +22,7 @@ transcript. The default ChaCha20-Poly1305 handshake remains wire-compatible.
 | `chacha20-poly1305` | `ChaChaPoly` | 32 | 4 zero bytes + little-endian uint64 |
 | `xchacha20-poly1305` | `XChaChaPoly` | 32 | 16 zero bytes + little-endian uint64 |
 
-`AES128GCM` and `XChaChaPoly` are GraphWAN CipherFunc extensions, not cipher
+`AES128GCM` and `XChaChaPoly` are GraphNet CipherFunc extensions, not cipher
 names defined by the base Noise specification. Their distinct names separate
 handshake transcripts and key derivation. Implementations use Go's `crypto/aes`,
 `crypto/cipher`, and `golang.org/x/crypto/chacha20poly1305`; the extended nonce
@@ -46,15 +46,17 @@ Wire handshake messages start with one kind byte:
 
 | Kind | Contents |
 | --- | --- |
-| 1 / Hello | version byte, Network/Edge/initiator/responder IDs (16 bytes each), transport byte, Noise message 1 |
-| 2 / Reply | Noise message 2 |
-| 3 / Finish | Noise message 3 |
-| 4 / Ready | session-encrypted one-byte confirmation (`0`) |
-| 5 / Data | session-encrypted application message |
+| 0x41 / Hello | version byte, Network/Edge/initiator/responder IDs (16 bytes each), transport byte, Noise message 1 |
+| 0x42 / Reply | Noise message 2 |
+| 0x43 / Finish | Noise message 3 |
+| 0x44 / Ready | session-encrypted one-byte confirmation (`0`) |
+| 0x45 / Data | session-encrypted application message |
+| 0x46 / Sealed | a stream frame of a session sealed end to end; see [Sessions](#sessions) |
+| 0x80–0xFF / Masked | a packet sealed end to end; see [Packets](#packets) |
 
-Transport codes are UDP=0, TCP=1, QUIC=2, WS=3, WSS=4, gRPC=5. The current
-transport implementations cover all six codes: TCP streams, native UDP, QUIC
-datagrams, WS/WSS binary messages and gRPC bidirectional streams.
+Kinds start at 0x41 so that no datagram is mistaken for STUN, whose first byte
+is 0 or 1. Transport codes are UDP=0 (native UDP datagrams), TCP=1 (TCP streams)
+and QUIC=2 (one QUIC stream).
 
 The initiator requires an authenticated Ready before exposing its channel. The
 whole handshake has a 10-second deadline. UDP retransmits the same serialized
@@ -89,7 +91,7 @@ introduction would otherwise exceed 256 bytes.
 
 ## Encrypted messages
 
-The wire ciphertext is an 8-byte big-endian sequence followed by the configured AEAD
+The wire ciphertext is a 4-byte big-endian sequence followed by the configured AEAD
 ciphertext and its 16-byte authentication tag. The transcript binding and sequence
 are authenticated associated data. Sequence values start at one and are never
 reused, including after a failed transport send. The table above defines nonce
@@ -113,7 +115,7 @@ TCP punch connections use a separate physical-session preface: bytes `H G W 01`
 followed by the Agent's 32-byte Ed25519 public identity. Both sides send the same
 format. This cleartext hint must match an adjacent peer with TCP punching enabled;
 it is authenticated by a subsequent mutually pinned TLS 1.3 exchange with ALPN
-`graphwan.punch.v1`. The lexicographically smaller public key acts as TLS client,
+`graphnet.punch.v1`. The lexicographically smaller public key acts as TLS client,
 independently of which socket was dialed or accepted. Both certificates must prove
 the announced identity, have valid lifetimes and signing/role usage, and contain
 no unhandled critical extensions. No CA/proxy fallback is allowed here. Each side
@@ -147,9 +149,10 @@ stream does not close unrelated streams. Disabling the last TCP punch Edge to an
 identity closes its physical sessions. See [NAT operation](nat-operation.md) for
 source-port reuse and platform limits.
 
-UDP datagrams use four magic/version bytes (`GWD`, `1`), a random 16-byte
-connection token and one complete message. A data socket multiplexes independent
-connections by remote address and token. This token is a demultiplexing hint,
+A UDP datagram is one complete message followed by the sender's random 4-byte
+connection token. A data socket multiplexes independent connections by remote
+address and token, and passes a datagram that names no connection to QUIC when
+it looks like QUIC; see [QUIC operation](quic-operation.md). This token is a demultiplexing hint,
 not authentication. Handshakes still verify graph policy and peer identities.
 The socket allows at most 512 pending unauthenticated peers, 64 pending accepts,
 and 64 queued messages per peer. Both address families share these limits.
@@ -164,46 +167,16 @@ on this data socket. STUN mappings are exchanged through controller snapshots;
 UDP punching uses the same retransmitted peer handshake and identity checks.
 See [NAT operation](nat-operation.md) for limits, expiry and verified coverage.
 
-QUIC shares this UDP socket while preserving native UDP wire compatibility. It
-uses QUIC v1 / TLS 1.3 / ALPN `graphwan.quic.v1`, then the same Noise admission.
-Peer messages use unreliable RFC 9221 DATAGRAM frames, with a versioned 13-byte
-fragment header and 1024-byte fragment payloads. Missing fragments cause message
-loss; they do not add data retransmission. Fragment assembly is bounded by size,
-count and expiry. See [QUIC operation](quic-operation.md) for the exact fragment
-format, connection-ID namespace, socket dispatch and MTU constraints.
-
-WS/WSS use one nonempty binary message per peer message, bounded to 16 KiB.
-Text messages are rejected and compression is disabled. They negotiate
-`graphwan.ws.v1` / `graphwan.wss.v1`, then run the same Noise handshake above.
-Only explicit manual endpoint paths accept upgrades. TLS verifies either the
-configured Agent identity or a trusted proxy certificate and hostname; the inner
-handshake always verifies the Agent. See [WS/WSS operation](websocket-operation.md)
-for listener sharing, reverse proxy setup and address-family policy.
-
-gRPC uses the `graphwan.v1.Peer/Connect` bidirectional protobuf service. The
-manual URL path prefixes this service method. A `google.protobuf.BytesValue`
-carries each peer message, with a 16 KiB value limit and a 16,388-byte encoded
-message limit. TLS admission follows the same Agent-pin-or-proxy-PKI policy as
-WSS. The client requires `h2` ALPN and the `graphwan-protocol: graphwan-peer-v1`
-response before starting Noise. See [the schema](../api/peer.proto) and
-[gRPC operation](grpc-operation.md) for paths, proxying and resource limits.
-
 ## Overlay forwarding
 
-The 80-byte `GW` v1 header contains payload length, hop limit, Network/Source/
-Destination IDs, routing epoch, flow hash and sequence field. The peer session
-layer supplies cryptographic replay protection. The complete overlay header and
-IP packet are encrypted together on each hop.
-
-Links between current Agents omit that header. The dialer offers
-`compact_data` in its link introduction and the acceptor confirms in band, as for
-streams and link-state advertisements. A compact data frame is the message kind,
-the overlay hop limit and the IP packet: 2 bytes instead of 81. The Network is
-the Link's own; the receiver rebuilds Source and Destination as the owners of the
-inner addresses, the only IDs admission accepts, and applies the same checks.
-Epoch, flow hash and sequence are not read on receive and are not carried. The
-acceptor sends compact frames at once; the dialer only after the confirmation, so
-older peers never see them. Telemetry counts each compact frame at its full size.
+Inside an Agent a packet carries an 80-byte header: payload length, hop limit,
+Network/Source/Destination IDs, routing epoch, flow hash and sequence field.
+Links never send it. A data frame is the message kind, the overlay hop limit
+and the IP packet: 2 bytes. The Network is the Link's own; the receiver rebuilds
+Source and Destination as the owners of the inner addresses, the only IDs
+admission accepts, and applies the same checks. A packet sealed end to end
+travels masked instead; see [Packets](#packets). Telemetry counts each frame
+at its full size.
 
 TUN-originated packets must use that Node's configured virtual source address.
 Peer-originated packets must arrive from an authenticated, configured neighbor;
@@ -216,9 +189,8 @@ at their destination are delivered unchanged to the TUN callback.
 Transit also decrements the inner IPv4 TTL (updating its header checksum) or
 IPv6 Hop Limit. An exhausted inner hop limit drops the packet and sends ICMP
 Time Exceeded from the transit Node's virtual address through the normal return
-route. TCP/UDP/ICMP traceroute therefore shows intermediate GraphWAN Nodes. Native
-source injection and destination delivery do not consume a hop; WireGuard leaf
-ingress consumes one at its attaching Agent when forwarding onward. External
+route. TCP/UDP/ICMP traceroute therefore shows intermediate GraphNet Nodes. Native
+source injection and destination delivery do not consume a hop. External
 subnet delivery leaves the gateway host's IP forwarding hop to its OS.
 Error replies quote the original packet, fit within 576 bytes for IPv4 or 1280
 bytes for IPv6, and suppress errors to ICMP errors and noninitial fragments.
@@ -230,11 +202,10 @@ TCP headers, sequence numbers, options and payload traverse the same packet
 path. Peer tunnels are admitted and selected during convergence; new application
 TCP tuples reuse those tunnels without a new peer handshake or candidate probe.
 
-Between Nodes with Agent keys, the payload of packets other than TCP and the
+Between Nodes, the payload of packets other than TCP and the
 bytes of TCP sessions are sealed end to end, so relays carry them without
 reading or changing them; see [End-to-end sealing](#end-to-end-sealing). Other
-traffic is sealed per hop only: TCP carried as packets, and traffic from or to
-WireGuard leaves, which have no Agent key. Its relays are trusted hop
+traffic is sealed per hop only: TCP carried as packets. Its relays are trusted hop
 forwarders and see plaintext; source and address checks enforce admission but
 do not attest its origin against a compromised transit Node. Configuration replacement swaps
 an immutable routing table; packets already in flight may belong to an older
@@ -243,18 +214,18 @@ epoch and are bounded by hop limits during convergence.
 ### Packet bounds and backpressure
 
 The configured Network MTU applies to the **inner IP packet**, at both TUN and
-peer ingress, before either local delivery or transit. It defaults to 1280 and
-can be set from 1280 through 9000. The overlay adds an 80-byte header; peer crypto
-and transport framing add their own overhead. This setting does not estimate or
+peer ingress, before either local delivery or transit. It defaults to 1422, which
+fills a 1500-byte underlay with an IPv6 and UDP header, and can be set from 1280
+through 9000. A sealed packet adds 30 bytes on a UDP Link: the masked kind and
+hop limit, two Node indexes, the 21-byte trailer and the connection token. This setting does not estimate or
 automatically track path MTU. Stream transports segment their byte stream, native
-UDP relies on the host IP stack's fragmentation behavior, and QUIC splits peer
-messages into its bounded application fragments. Networks that discard outer
+UDP relies on the host IP stack's fragmentation behavior. Networks that discard outer
 fragments can require a smaller configured MTU or another transport.
 
 Packet parsing checks the wire version, the flag byte (6: 0, or 1 for a sealed
 packet), the reserved byte 7, nonzero IDs and hop limit, declared payload
 length and maximum frame length. A sealed packet's payload is its IP packet
-and a 24-byte trailer, and the MTU bounds the IP packet. Inner-IP inspection
+and a 21-byte trailer, and the MTU bounds the IP packet. Inner-IP inspection
 checks the version, base header size and exact IP length; the forwarding layer
 also enforces configured Node/address admission. Upper-layer checksums and full
 IPv6 extension-header semantics remain the receiving host stack's responsibility.
@@ -311,7 +282,7 @@ the Link socket's receive buffer (`SO_RCVBUF`, which the kernel tunes) past
 what was consumed: the buffer is split equally between the streams that
 consumed bytes in the last second, and a stream whose reader stopped keeps
 the credit it had and gets no more. Credit given is never taken back. On a
-Link without a kernel TCP socket, such as QUIC, the window stays 32 MiB.
+Link without a kernel TCP socket, the window stays 32 MiB.
 Windowed streams acknowledge with frame type 4, whose body is `received`,
 `limit`, `consumed`, and for a session relay `delivered`: the window varies,
 so the sender no longer infers what was consumed from the limit.
@@ -319,7 +290,7 @@ so the sender no longer infers what was consumed from the limit.
 ### Resumable TCP sessions
 
 Between current Agents, an access TCP connection whose path crosses only
-TCP-backed Links (TCP, WS, WSS, gRPC) is a session. Only its ingress, which
+TCP Links is a session. Only its ingress, which
 terminates the client's TCP, and its egress, which connects to the server,
 hold the original tuple and the session's state. The bytes travel on a chain
 of streams along the current routes; relays copy them and keep no session
@@ -388,7 +359,7 @@ not carry sessions, the connection uses a plain stream, as before.
 Every Agent keeps an end-to-end session toward every other Node of its
 directory with an Agent key, as the initiator, and accepts the sessions those
 Nodes open toward it. A session is a Noise XX handshake between the two Agent
-keys, with the prologue `GraphWAN/e2e/v1` and the Network and Node IDs, so no
+keys, with the prologue `GraphNet/e2e/v1` and the Network and Node IDs, so no
 Link handshake can complete one. Its messages are UDP datagrams from and to
 port 18264 of the two Nodes' overlay addresses, routed like any packet and
 taken before the TUN: `[kind][8-byte session ID][Noise message]`, kind 1 hello
@@ -417,12 +388,11 @@ bytes, so a resend after a reroute repeats the same ciphertext. The egress
 refuses a request from a keyed Node that is not sealed, or sealed by another
 Node, and answers a session ID it does not hold with status 6: the ingress
 drops its session, waits for a new one and asks once more. A record that
-fails to open resets the connection. Connections to WireGuard leaves are
-sealed per hop only.
+fails to open resets the connection.
 
 On a Link a stream frame of such a session is message kind 21 rather than 12,
-and the peer channel seals only its 19-byte header: channel message kind 6 is
-`[6][sequence][header ciphertext][tag][records]`. Each byte is thus encrypted
+and the peer channel seals only its 19-byte header: channel message kind 0x46 is
+`[0x46][sequence][header ciphertext][tag][records]`. Each byte is thus encrypted
 once by its end and never by a hop. A relay passes each received frame on in
 the buffer it arrived in, with the next hop's header written over its own,
 and the egress opens a record that arrived whole in one frame where it
@@ -435,8 +405,10 @@ handshake's own datagrams, with its session toward that Node; the Node drops
 a packet from a keyed Node that should be sealed and is not, or does not open.
 The IP header and, unless the packet is a later fragment, the 8-byte header of
 UDP, ICMP or ICMPv6 stay readable, so hops can route, admit and hash it, and a
-24-byte trailer follows the IP packet: the 4-byte sequence, the first 4 bytes
-of the session ID and the 16-byte tag. The sequence is the packet's nonce, and
+21-byte trailer follows the IP packet: the 4-byte sequence, the first byte of
+the session ID and the 16-byte tag. A receiver tries each kept session whose
+first byte matches, and a new session's first byte differs from the one it
+replaces. The sequence is the packet's nonce, and
 a 1024-packet window takes reordering and refuses repeats. The seal
 authenticates the readable headers except the hop limit, the IPv4 header
 checksum and ECN, which hops change, and the UDP, ICMP or ICMPv6 checksum: the
@@ -444,16 +416,20 @@ destination computes the IPv4 header checksum and, unless the packet is a
 fragment, the L4 checksum again after opening it. The overlay header's flag
 marks the frame.
 A packet toward a keyed Node with no session yet is dropped; the receiver of a
-packet sealed by a session it does not hold sends kind 5, with the 4 bytes as
+packet sealed by a session it does not hold sends kind 5, with the byte as
 the session ID, at most every 200 ms, and the sender replaces the session.
 
-A Link frame of a sealed packet travels in an envelope `[23][k][message]`,
-where the message is a data message or a compact sealed one, kind 22:
-`[22][hop limit][source Node][destination Node][IP packet][trailer]`. A
-compact sealed frame keeps its Nodes, which the seal depends on, so no hop
-chooses another gateway for it. The peer channel seals only the first `k`
-bytes of the envelope, its kind, the message's header and the readable
-headers: channel message kind 7 is `[7][k][sequence][ciphertext][tag][rest]`.
+A Link frame of a sealed packet is masked and not encrypted again:
+`[0x80 | hop limit][source index][destination index][IP packet][trailer]`.
+It keeps its Nodes, which the seal depends on, so no hop chooses another
+gateway for it, as the 2-byte indexes the controller assigns each Node of a
+Network and never reuses until they wrap. The peer channel hides the indexes
+and up to 68 bytes of readable headers with header protection: it XORs them
+with ChaCha20 keyed by a key it derives from its session key with HKDF-SHA256,
+under a nonce taken from the packet's end-to-end tag. Each hop removes the
+mask, takes a hop and masks again for the next Link. No hop authenticates a
+masked packet: one that does not parse is dropped and counted, never taken
+for its Link's failure, and only its destination's seal accepts it.
 
 ## Link control inside the authenticated channel
 
@@ -461,8 +437,7 @@ After Ready, the dialer sends a type-0 plaintext message containing a JSON
 `candidate` identifier. The responder reconstructs allowed candidates from its
 own advertised endpoints, the configured Edge methods/transports, and the remote
 Node identity. The identifier and actual socket address family must match for
-TCP/UDP/QUIC. For WS/WSS and gRPC, the HTTP/RPC path must match the identified manual
-endpoint (gRPC appends the service method to its URL prefix). The dialer enforces IPv4/IPv6 on its socket; the responder cannot infer
+TCP/UDP. The dialer enforces IPv4/IPv6 on its socket; the responder cannot infer
 that family from a reverse proxy's backend connection. This metadata is encrypted
 by the established peer session.
 
@@ -520,7 +495,7 @@ session, and unspecified/multicast addresses and zero ports are rejected.
 
 Each end now knows both IPs as observed by its peer, including NAT mappings and
 the actual source of a connection from a wildcard UDP listener. Within one Edge,
-sessions are duplicates only if both observed endpoint IPs and the GraphWAN
+sessions are duplicates only if both observed endpoint IPs and the GraphNet
 transport match. Ports, dialing direction and direct/punch method do not
 distinguish duplicates. IPv4-mapped addresses are normalized; IPv6 zones remain
 part of scoped address identity. Different IPs or transports remain independent

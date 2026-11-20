@@ -16,14 +16,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/agent"
-	"github.com/eWloYW8/GraphWAN/internal/control"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/pki"
-	"github.com/eWloYW8/GraphWAN/internal/routing"
-	"github.com/eWloYW8/GraphWAN/internal/store"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
-	"github.com/eWloYW8/GraphWAN/internal/tunnel"
+	"github.com/eddiexyang/graphnet/internal/agent"
+	"github.com/eddiexyang/graphnet/internal/control"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/pki"
+	"github.com/eddiexyang/graphnet/internal/routing"
+	"github.com/eddiexyang/graphnet/internal/store"
+	"github.com/eddiexyang/graphnet/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/tunnel"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )
 
@@ -107,7 +107,7 @@ func startClientNetwork(t *testing.T, ctx context.Context, clientKey ed25519.Pri
 		t.Fatal(err)
 	}
 	listener := httptest.NewUnstartedServer(server)
-	if listener.TLS, err = cn.ca.ServerTLS([]string{"controller.graphwan.test"}); err != nil {
+	if listener.TLS, err = cn.ca.ServerTLS([]string{"controller.graphnet.test"}); err != nil {
 		t.Fatal(err)
 	}
 	listener.StartTLS()
@@ -171,7 +171,7 @@ func TestClientReachesServicesThroughTheNetwork(t *testing.T) {
 
 	var controls, lookups atomic.Int64
 	c, err := Start(ctx, Config{
-		Server:     "https://controller.graphwan.test:" + port,
+		Server:     "https://controller.graphnet.test:" + port,
 		CA:         ca.PEM,
 		PrivateKey: clientKey,
 		Control: func(string, string, syscall.RawConn) error {
@@ -180,7 +180,7 @@ func TestClientReachesServicesThroughTheNetwork(t *testing.T) {
 		},
 		Lookup: func(_ context.Context, _, host string) ([]netip.Addr, error) {
 			lookups.Add(1)
-			if host != "controller.graphwan.test" {
+			if host != "controller.graphnet.test" {
 				return nil, fmt.Errorf("unexpected lookup %s", host)
 			}
 			return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
@@ -198,7 +198,7 @@ func TestClientReachesServicesThroughTheNetwork(t *testing.T) {
 
 	cn.serveEcho(t, 1, 7) // B, two hops from D
 	cn.serveEcho(t, 2, 7) // C, a direct neighbor
-	payload := bytes.Repeat([]byte("through the GraphWAN client\n"), 4096)
+	payload := bytes.Repeat([]byte("through the GraphNet client\n"), 4096)
 	for _, target := range []int{1, 2} {
 		dialCtx, stop := context.WithTimeout(ctx, 20*time.Second)
 		conn, err := c.DialTCP(dialCtx, netip.AddrPortFrom(n.Nodes[target].Address, 7))
@@ -270,7 +270,7 @@ func TestClientConnectionFollowsRouteChange(t *testing.T) {
 	defer cancel()
 	cn := startClientNetwork(t, ctx, clientKey, clientKey.Public().(ed25519.PublicKey))
 	c, err := Start(ctx, Config{
-		Server:     "https://controller.graphwan.test:" + cn.port,
+		Server:     "https://controller.graphnet.test:" + cn.port,
 		CA:         cn.ca.PEM,
 		PrivateKey: clientKey,
 		Lookup: func(context.Context, string, string) ([]netip.Addr, error) {

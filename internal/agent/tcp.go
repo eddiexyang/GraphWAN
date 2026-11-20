@@ -12,12 +12,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/forwarding"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/packet"
-	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
-	"github.com/eWloYW8/GraphWAN/internal/streamproxy"
-	"github.com/eWloYW8/GraphWAN/internal/tunnel"
+	"github.com/eddiexyang/graphnet/internal/forwarding"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/packet"
+	"github.com/eddiexyang/graphnet/internal/packetbuf"
+	"github.com/eddiexyang/graphnet/internal/streamproxy"
+	"github.com/eddiexyang/graphnet/internal/tunnel"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
@@ -155,19 +155,8 @@ func (r *DataPlane) forwardTCP(state *runtimeState, network model.ID, raw []byte
 }
 
 // Endpoint refreshes, MTU changes and live route changes preserve access TCP
-// state. Changes to address ownership or access identities invalidate it.
+// state. Changes to address ownership invalidate it.
 func tcpFingerprint(cfg model.NetworkConfig) string {
-	type accessPeer struct {
-		Node model.ID
-		Edge model.ID
-		Key  []byte
-	}
-	var peers []accessPeer
-	for _, p := range cfg.Peers {
-		if p.Node.WireGuard != nil {
-			peers = append(peers, accessPeer{p.Node.ID, p.Edge.ID, p.PublicKey})
-		}
-	}
 	directory := append([]model.Destination(nil), cfg.Directory...)
 	for i := range directory {
 		directory[i].AdvertisedSubnets = withoutMetrics(directory[i].AdvertisedSubnets)
@@ -181,12 +170,11 @@ func tcpFingerprint(cfg model.NetworkConfig) string {
 		CIDR      netip.Prefix
 		Cipher    model.CipherSuite
 		Directory []model.Destination
-		Access    []accessPeer
 	}{struct {
 		ID      model.ID
 		Address netip.Addr
 		Subnets []model.AdvertisedSubnet
-	}{cfg.Self.ID, cfg.Self.Address, withoutMetrics(cfg.Self.AdvertisedSubnets)}, cfg.CIDR, cfg.Cipher, directory, peers})
+	}{cfg.Self.ID, cfg.Self.Address, withoutMetrics(cfg.Self.AdvertisedSubnets)}, cfg.CIDR, cfg.Cipher, directory})
 	return string(raw)
 }
 
@@ -296,13 +284,10 @@ func (r *DataPlane) newTCP(network model.ID, fingerprint string, mtu int, offloa
 	return tcp, nil
 }
 
-func (r *DataPlane) accessPacket(state *runtimeState, ctx context.Context, network model.ID, raw []byte, wireguard bool) error {
-	if packet.IsTCP(raw) && state.router.TCPIngress(network, raw, wireguard) == nil && r.captureTCP(state, network, raw, "") {
+func (r *DataPlane) accessPacket(state *runtimeState, ctx context.Context, network model.ID, raw []byte) error {
+	if packet.IsTCP(raw) && state.router.TCPIngress(network, raw) == nil && r.captureTCP(state, network, raw, "") {
 		state.tcp[network].engine.Inject(raw)
 		return nil
-	}
-	if wireguard {
-		return state.router.FromWireGuard(ctx, network, raw)
 	}
 	return state.router.FromTunnel(ctx, network, raw)
 }

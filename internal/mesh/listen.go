@@ -6,7 +6,7 @@ import (
 	"net"
 	"strconv"
 
-	"github.com/eWloYW8/GraphWAN/internal/transport"
+	"github.com/eddiexyang/graphnet/internal/transport"
 )
 
 // TCP and UDP have separate ephemeral-port allocators. A randomly selected TCP
@@ -21,8 +21,14 @@ func listenTransports(ctx context.Context, identity ed25519.PrivateKey, host str
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		udp, quic, err := transport.ListenUDPQUIC(ctx, tcp.Addr().String(), identity)
+		udp, err := transport.ListenUDP(ctx, tcp.Addr().String())
 		if err == nil {
+			quic, err := udp.EnableQUIC(identity)
+			if err != nil {
+				udp.Close()
+				tcp.Close()
+				return nil, nil, nil, err
+			}
 			return tcp, udp, quic, nil
 		}
 		tcp.Close()

@@ -1,23 +1,23 @@
 # Administrative CLI
 
-The same `graphwan` binary runs the controller, Agent and administrative commands.
+The same `graphnet` binary runs the controller, Agent and administrative commands.
 Administrative commands use the controller's authenticated management API and do
 not require local root privileges or direct access to its database.
 
-Set `GRAPHWAN_ADMIN_PASSWORD` to the existing controller password. It is read from
+Set `GRAPHNET_ADMIN_PASSWORD` to the existing controller password. It is read from
 the environment, never from a command-line flag. Each invocation logs in, keeps
 its session cookie and CSRF token in memory, and attempts logout before exiting.
 No session file is written. If logout cannot reach the controller, the session
 expires under the normal 12-hour server policy.
 
 ```sh
-export GRAPHWAN_ADMIN_PASSWORD='<your-existing-controller-password>'
-graphwan network create --server https://127.0.0.1:8443 --ca ./graphwan-data/ca.pem \
+export GRAPHNET_ADMIN_PASSWORD='<your-existing-controller-password>'
+graphnet network create --server https://127.0.0.1:8443 --ca ./graphnet-data/ca.pem \
   --name lab --cidr 10.80.0.0/24
-graphwan network list --server https://127.0.0.1:8443 --ca ./graphwan-data/ca.pem
-graphwan node list --server https://127.0.0.1:8443 --ca ./graphwan-data/ca.pem \
+graphnet network list --server https://127.0.0.1:8443 --ca ./graphnet-data/ca.pem
+graphnet node list --server https://127.0.0.1:8443 --ca ./graphnet-data/ca.pem \
   --network '<network-id>'
-graphwan edge add --server https://127.0.0.1:8443 --ca ./graphwan-data/ca.pem \
+graphnet edge add --server https://127.0.0.1:8443 --ca ./graphnet-data/ca.pem \
   --network '<network-id>' --a '<first-node-id>' --b '<second-node-id>' \
   --weight 10 --transports udp,tcp --ipv4-direct=true --ipv6-direct=true --hole-punch=true
 ```
@@ -32,14 +32,14 @@ remain available through the UI/API.
 
 | Command | Options and JSON result |
 | --- | --- |
-| `network create` | Required `--name`, `--cidr`; optional `--mtu` (1280–9000, default 1280), `--cipher` (`aes-128-gcm`, `aes-256-gcm`, `chacha20-poly1305` [default], or `xchacha20-poly1305`). Returns `{revision, network}` with a new ID and empty Nodes/Edges. |
+| `network create` | Required `--name`, `--cidr`; optional `--mtu` (1280–9000, default 1422), `--cipher` (`aes-128-gcm`, `aes-256-gcm`, `chacha20-poly1305` [default], or `xchacha20-poly1305`). Returns `{revision, network}` with a new ID and empty Nodes/Edges. |
 | `network list` | Returns `{revision, networks}` with complete desired Network configurations and their IDs. |
 | `node list` | Optional `--network`; returns `{revision, nodes}`. Each Node includes `network_id`, `network_name`, `id`, `agent_id`, `name`, `address` and `position`. Without a filter, lists all memberships. An unknown Network is an error. |
 | `edge add` | Required `--network`, `--a`, `--b`; optional `--weight` (1–4294967295, default 1), `--transports` (default `udp,tcp`), `--enabled` (true), `--ipv4-direct` (true), `--ipv6-direct` (true), `--hole-punch` (true), `--preferred-candidate` (empty). Returns `{revision, edge}`. |
 
-All flags follow the two command words. Use, for example, `graphwan edge add
+All flags follow the two command words. Use, for example, `graphnet edge add
 --help` for help. Boolean flags use `--flag=false` to disable. Transport values
-are `udp,tcp,quic,ws,wss,grpc`; duplicates and unknown values are rejected. At
+are `udp,tcp`; duplicates and unknown values are rejected. At
 least one connection method and one transport are required, even for a disabled
 Edge. An existing Node pair cannot receive a second Edge. CIDRs must be canonical
 IPv4 or IPv6 subnets; they are not silently masked.

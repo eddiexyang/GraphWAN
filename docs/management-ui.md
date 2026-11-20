@@ -1,4 +1,4 @@
-# GraphWAN management UI
+# GraphNet management UI
 
 The controller serves its embedded management application at `/`. Sign in with
 its administrator password. The UI and API share the controller's HTTPS origin;
@@ -11,8 +11,8 @@ no CDN, external font or separate frontend service is required.
 2. On the machine, trust the controller's exported CA file and run the Agent with
    that token as described in [Linux operation](linux-operation.md). Refresh is
    automatic when the new registration reaches the controller.
-3. Create a Network with a canonical CIDR and MTU. Start with 1280 unless the
-   underlay supports your chosen larger encapsulated packet size.
+3. Create a Network with a canonical CIDR and MTU. The default 1422 fills a
+   1500-byte underlay; choose less on paths with a smaller MTU.
 4. Open the network and choose **Edit**. **Add node** selects an enrolled Agent,
    a Node name and a fixed host IP inside that CIDR. Revoked Agents and existing
    members are excluded from the add list.
@@ -31,15 +31,12 @@ no CDN, external font or separate frontend service is required.
 
 Network settings include name, subnet, MTU and cipher. Node settings include
 name, Agent membership and virtual IP. Agent **Manage** changes the machine name,
-listen port, revocation and manual endpoints, including protocol-specific URL
-paths. **Exclude container IPs** is enabled for newly enrolled Agents and can be
+listen port, revocation and manual endpoints. **Exclude container IPs** is enabled for newly enrolled Agents and can be
 disabled in **Manage**. It controls the [Linux container interface
 filter](endpoint-resolution.md#automatic-interface-discovery). Discovered endpoints are read-only. Deleting an Agent removes its network
 memberships; deleting a Network removes all its memberships and Edges.
 
-TCP, UDP, QUIC, WS, WSS and gRPC data transports run in the Agent. WS/WSS require
-[manual endpoints](websocket-operation.md); gRPC uses [manual service prefixes](grpc-operation.md).
-[QUIC also requires a manual endpoint](quic-operation.md). Agent settings include
+TCP and UDP data transports run in the Agent. Agent settings include
 [STUN servers for TCP/UDP hole punching](nat-operation.md). Use `host:port` for UDP
 and `tcp://host:port` for TCP; the two protocols can have different NAT mappings.
 See [NAT operation](nat-operation.md) for traversal behavior and limits.
@@ -121,7 +118,7 @@ points. pnpm's committed lockfile fixes dependency versions.
 pnpm --dir web install --frozen-lockfile
 pnpm --dir web run format:check
 pnpm --dir web build
-go build -o bin/graphwan ./cmd/graphwan
+go build -o bin/graphnet ./cmd/graphnet
 ```
 
 `internal/webui/dist` is generated, committed and embedded with `go:embed`. Always
@@ -149,10 +146,10 @@ available without write quorum.
 
 ## Full mesh groups and group links
 
-In a Network's **Edit** mode, choose **Add group**, select at least two regular
+In a Network's **Edit** mode, choose **Add group**, select at least two
 nodes, and choose a shared routing weight, transports and connection methods.
 Internal connections default to weight 1 and use the Network's encryption suite. A node belongs to
-at most one group; WireGuard leaf nodes cannot join groups.
+at most one group.
 
 The main canvas hides internal edges behind a dashed, shaded group boundary.
 Click the boundary or shaded area to open the group; **← Network** returns to the

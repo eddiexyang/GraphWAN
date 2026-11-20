@@ -9,11 +9,11 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/eWloYW8/GraphWAN/internal/forwarding"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/packet"
-	"github.com/eWloYW8/GraphWAN/internal/routing"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/forwarding"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/packet"
+	"github.com/eddiexyang/graphnet/internal/routing"
+	"github.com/eddiexyang/graphnet/internal/testutil"
 )
 
 func TestTCPStreamAdmissionAndRoutes(t *testing.T) {
@@ -128,11 +128,8 @@ func TestTCPGSOAdmissionPreservesMTUAndOwnership(t *testing.T) {
 	if err := r.TCPIngressGSO(n.ID, raw, n.MTU+1); !errors.Is(err, forwarding.ErrMTU) {
 		t.Fatal("oversized segment admitted", err)
 	}
-	if err := r.TCPIngress(n.ID, raw, false); !errors.Is(err, forwarding.ErrMTU) {
+	if err := r.TCPIngress(n.ID, raw); !errors.Is(err, forwarding.ErrMTU) {
 		t.Fatal("ordinary ingress bypassed MTU", err)
-	}
-	if err := r.TCPIngress(n.ID, raw, true); !errors.Is(err, forwarding.ErrMTU) {
-		t.Fatal("WireGuard ingress bypassed MTU", err)
 	}
 	raw[15] = 3
 	if err := r.TCPIngressGSO(n.ID, raw, n.MTU); !errors.Is(err, forwarding.ErrSource) {

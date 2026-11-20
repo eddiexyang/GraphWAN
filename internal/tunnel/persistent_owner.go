@@ -7,7 +7,7 @@ import (
 )
 
 func tunOwnershipMarker(token string, index int) string {
-	return fmt.Sprintf("graphwan:%s:%d", token, index)
+	return fmt.Sprintf("graphnet:%s:%d", token, index)
 }
 
 // createdTunIndex runs only after an exclusive SIOCIFCREATE succeeded. A failed

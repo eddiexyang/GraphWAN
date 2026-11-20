@@ -5,8 +5,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/testutil"
 )
 
 // A client node originates and receives its own traffic but never carries

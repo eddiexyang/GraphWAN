@@ -5,7 +5,7 @@ package agent
 import (
 	"net/netip"
 
-	"github.com/eWloYW8/GraphWAN/internal/forwarding"
+	"github.com/eddiexyang/graphnet/internal/forwarding"
 )
 
 func checkSNATRoute(state *runtimeState, dst netip.Addr) error {

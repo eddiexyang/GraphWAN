@@ -14,10 +14,10 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
-	"github.com/eWloYW8/GraphWAN/internal/discovery"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/routing"
-	"github.com/eWloYW8/GraphWAN/internal/store"
+	"github.com/eddiexyang/graphnet/internal/discovery"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/routing"
+	"github.com/eddiexyang/graphnet/internal/store"
 )
 
 func (s *Server) notify() {
@@ -343,16 +343,6 @@ func validateReport(snapshot model.Snapshot, report model.AgentReport) error {
 		edge, ok := edges[key]
 		if !ok || !slices.Contains(edge.Transports, link.Transport) || len(link.LinkID) == 0 || len(link.LinkID) > 128 || len(link.CandidateID) > 256 || len(link.Remote) > 2048 || len(link.Local) > 2048 || len(link.ObservedLocal) > 2048 || links[link.LinkID] {
 			return errors.New("invalid link identity")
-		}
-		if link.Transport == model.WireGuard {
-			if link.RTTValid && (link.RTTMeasuredAt.IsZero() || link.RTTMillis >= 3000) {
-				return errors.New("invalid WireGuard RTT sample")
-			}
-			if err := model.ValidateWireGuardKey(link.WireGuardPublicKey); err != nil {
-				return err
-			}
-		} else if link.WireGuardPublicKey != "" || !link.LastHandshake.IsZero() {
-			return errors.New("unexpected WireGuard metadata")
 		}
 		links[link.LinkID] = true
 		if math.IsNaN(link.RTTMillis) || math.IsInf(link.RTTMillis, 0) || link.RTTMillis < 0 || math.IsNaN(link.Loss) || link.Loss < 0 || link.Loss > 1 {

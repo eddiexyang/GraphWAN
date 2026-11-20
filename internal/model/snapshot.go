@@ -50,8 +50,10 @@ type Destination struct {
 	NodeID  ID         `json:"node_id"`
 	Address netip.Addr `json:"address"`
 	// PublicKey is the Node's Agent identity, which end-to-end sessions
-	// authenticate; empty for WireGuard leaves and from older controllers.
+	// authenticate.
 	PublicKey []byte `json:"public_key,omitempty"`
+	// Index names the Node on the wire; see Node.Index.
+	Index uint16 `json:"index"`
 }
 
 type Peer struct {

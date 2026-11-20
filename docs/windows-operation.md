@@ -15,22 +15,22 @@ do not require or download Wintun.
 To prepare the DLL explicitly, run in an elevated PowerShell:
 
 ```powershell
-.\graphwan.exe agent install-wintun
+.\graphnet.exe agent install-wintun
 ```
 
 For an offline installation, supply the official ZIP:
 
 ```powershell
-.\graphwan.exe agent install-wintun --archive 'C:\Downloads\wintun-0.14.1.zip'
+.\graphnet.exe agent install-wintun --archive 'C:\Downloads\wintun-0.14.1.zip'
 ```
 
-GraphWAN selects the DLL matching its own executable architecture (amd64, arm64
+GraphNet selects the DLL matching its own executable architecture (amd64, arm64
 or 386), including when the executable runs under emulation. There is no Python
 dependency. To build from source, use Go 1.26 or newer:
 
 ```powershell
-go build -o bin/graphwan.exe ./cmd/graphwan
-.\bin\graphwan.exe agent install-wintun
+go build -o bin/graphnet.exe ./cmd/graphnet
+.\bin\graphnet.exe agent install-wintun
 ```
 
 Downloads use the official HTTPS URL for Wintun 0.14.1, with a 60-second timeout,
@@ -63,9 +63,9 @@ Use an elevated administrator PowerShell session and the normal controller
 enrollment workflow from the [README](../README.md):
 
 ```powershell
-$env:GRAPHWAN_ENROLLMENT_TOKEN = '<one-time-token>'
-.\bin\graphwan.exe agent --server https://controller.example.com:8443 `
-  --ca .\ca.pem --name windows-node --data-dir "$env:LOCALAPPDATA\GraphWAN\agent"
+$env:GRAPHNET_ENROLLMENT_TOKEN = '<one-time-token>'
+.\bin\graphnet.exe agent --server https://controller.example.com:8443 `
+  --ca .\ca.pem --name windows-node --data-dir "$env:LOCALAPPDATA\GraphNet\agent"
 ```
 
 The token is needed for initial enrollment. Keep the data directory, identity and
@@ -80,10 +80,10 @@ a Windows service. No external service wrapper is needed.
 ## Ownership and configuration
 
 Each Network creates a new Wintun adapter with an automatically generated name
-and GUID. GraphWAN never opens an existing adapter by name. Because Wintun can
-rename an existing adapter to satisfy an alias collision, GraphWAN first checks
+and GUID. GraphNet never opens an existing adapter by name. Because Wintun can
+rename an existing adapter to satisfy an alias collision, GraphNet first checks
 all interface aliases case-insensitively and holds a cross-process named mutex
-through creation. This coordinates GraphWAN processes; another privileged
+through creation. This coordinates GraphNet processes; another privileged
 application creating the same alias does not participate in that mutex. Default
 names include 48 random bits.
 
@@ -111,8 +111,7 @@ the session and closes the adapter. It does not uninstall the shared Wintun driv
 Windows UDP listeners enable native `IP_PKTINFO` and `IPV6_PKTINFO` as appropriate
 for their socket family. Dual-stack sockets enable both. Setup errors fail
 listener creation and close its socket; the documented IPv4-disabled exception is
-accepted only after a socket probe confirms that IPv4 is unavailable. Standalone
-UDP and the shared UDP/QUIC listener use the same setup.
+accepted only after a socket probe confirms that IPv4 is unavailable.
 
 The first received datagram's packet-info object supplies the local source
 address and interface index for replies. The implementation selects only the

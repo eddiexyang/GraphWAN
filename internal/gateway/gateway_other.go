@@ -5,7 +5,7 @@ package gateway
 import (
 	"context"
 	"errors"
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 func applyPlatform(_ context.Context, _ model.ID, entries []Entry) error {

@@ -10,7 +10,7 @@ An Agent requires root, `/dev/tun0`, writable `/dev` and `/var/run`, and the bas
 `/sbin/ifconfig` and `/sbin/route` utilities. Build with the pinned Go toolchain:
 
 ```sh
-CGO_ENABLED=0 GOOS=netbsd GOARCH=amd64 go build -o graphwan ./cmd/graphwan
+CGO_ENABLED=0 GOOS=netbsd GOARCH=amd64 go build -o graphnet ./cmd/graphnet
 ```
 
 The controller setup and enrollment flow are described in the [README](../README.md).
@@ -19,7 +19,7 @@ NetBSD amd64, 386, arm and arm64 build successfully; only amd64 has native evide
 **Set Network MTU to 1280–1500 on NetBSD.** The
 [NetBSD 11 TUN driver](https://github.com/NetBSD/src/blob/netbsd-11/sys/net/if_tun.c)
 limits both the interface MTU and injected packets to 1500. Larger configured
-values are rejected before changing kernel state; GraphWAN does not silently
+values are rejected before changing kernel state; GraphNet does not silently
 clamp the controller's desired MTU. Other supported adapters retain their wider
 MTU range.
 
@@ -30,7 +30,7 @@ interfaces are never adopted. A root-private temporary character device uses the
 major number from `/dev/tun0`; the Agent removes its private device path after
 opening it. Existing public device nodes are unchanged. The
 [TUN multi-family ABI](https://man.netbsd.org/tun.4) carries a four-byte,
-network-order address-family header; GraphWAN exposes ordinary IP packets.
+network-order address-family header; GraphNet exposes ordinary IP packets.
 The adapter explicitly enables driver nonblocking mode with `FIONBIO` in addition
 to `O_NONBLOCK`; otherwise a concurrent reader can block in the kernel and prevent
 Agent shutdown even though the descriptor is registered with Go's poller.
@@ -43,9 +43,9 @@ explicit subnet routes are transactional; foreign equal-prefix routes cause
 rollback. Route commands use `-link -iface` so interface names are never resolved
 as hostnames.
 
-NetBSD leaves cloned TUN interfaces behind when the descriptor closes. GraphWAN
+NetBSD leaves cloned TUN interfaces behind when the descriptor closes. GraphNet
 uses the same root-private, flock-held immutable token registry as OpenBSD at
-`/var/run/graphwan-tun`. Before creating interfaces, and when the Agent starts
+`/var/run/graphnet-tun`. Before creating interfaces, and when the Agent starts
 with no Networks, recovery removes orphaned interfaces only when their kernel
 description matches an unlocked record's token and interface index. Normal
 shutdown closes the descriptor and removes the owned interface and record.
@@ -56,9 +56,9 @@ symlinks in ownership records are rejected.
 There are two NetBSD-specific ownership boundaries:
 
 - NetBSD immediately reuses free interface indices. A privileged administrator
-  who destroys an interface and copies its complete GraphWAN marker onto a
+  who destroys an interface and copies its complete GraphNet marker onto a
   same-name, same-index replacement makes that replacement indistinguishable
-  to recovery. Do not copy GraphWAN ownership descriptions to unrelated devices.
+  to recovery. Do not copy GraphNet ownership descriptions to unrelated devices.
 - The kernel can recycle an externally destroyed, still-open TUN's storage when
   the same unit is recreated. Closing the old descriptor can then bring the
   replacement down. Stop the Agent before replacing its TUN externally; a
@@ -79,7 +79,7 @@ closing a descriptor does not destroy a normally cloned interface. Switching to
 a name-existence check followed by `open` would remove the exclusive-create
 protection without solving ownership recovery. The adapter retains `SIOCIFCREATE`
 and the marker registry. Privileged concurrent interface/route edits are not
-serialized with GraphWAN's transactions. This review and cross-compilation do not
+serialized with GraphNet's transactions. This review and cross-compilation do not
 claim new native execution or automatic recovery of unmarked interfaces.
 
 ## Physical-interface discovery

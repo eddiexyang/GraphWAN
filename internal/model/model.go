@@ -7,30 +7,32 @@ import (
 )
 
 const (
-	SchemaVersion = 1
+	// SchemaVersion 2 masks sealed packets and names Nodes by index; it
+	// carries only UDP and TCP.
+	SchemaVersion = 2
 	DefaultPort   = 24752
-	DefaultMTU    = 1280
-	MaxMTU        = 9000
-	MaxNodes      = 10000
-	MaxEdges      = 100000
-	MaxEndpoints  = 64
+	// DefaultMTU fills a 1500-byte underlay: an IPv6 and UDP header, 48
+	// bytes, and a packet sealed end to end, 30 more; see link.maskedHeader.
+	DefaultMTU = 1500 - 48 - 30
+	// MinMTU is IPv6's minimum.
+	MinMTU       = 1280
+	MaxMTU       = 9000
+	MaxNodes     = 10000
+	MaxEdges     = 100000
+	MaxEndpoints = 64
 )
 
 type Transport string
 
 const (
-	WireGuard Transport = "wireguard"
-	UDP       Transport = "udp"
-	TCP       Transport = "tcp"
-	QUIC      Transport = "quic"
-	WS        Transport = "ws"
-	WSS       Transport = "wss"
-	GRPC      Transport = "grpc"
+	UDP  Transport = "udp"
+	TCP  Transport = "tcp"
+	QUIC Transport = "quic"
 )
 
 func (t Transport) Valid() bool {
 	switch t {
-	case UDP, TCP, QUIC, WS, WSS, GRPC, WireGuard:
+	case UDP, TCP, QUIC:
 		return true
 	}
 	return false
@@ -47,7 +49,7 @@ const (
 type Endpoint struct {
 	ID        ID        `json:"id"`
 	Transport Transport `json:"transport"`
-	// URL includes scheme, host, explicit port and (for WS/WSS/gRPC) optional path.
+	// URL includes scheme, host and explicit port.
 	URL    string         `json:"url"`
 	Source EndpointSource `json:"source"`
 	// Observed mappings are ephemeral, including their externally mapped port.
@@ -87,13 +89,7 @@ type AdvertisedSubnet struct {
 	Metric uint32 `json:"metric,omitempty"`
 }
 
-type WireGuardNode struct {
-	PublicKey string `json:"public_key"`
-	Endpoint  string `json:"endpoint,omitempty"`
-}
-
 type Node struct {
-	WireGuard *WireGuardNode `json:"wireguard,omitempty"`
 	// Client marks an Agent node that only originates and receives its own
 	// traffic, such as an outbound embedded in a proxy client. Routes never
 	// pass through it, and it advertises no subnets.
@@ -104,6 +100,9 @@ type Node struct {
 	Name              string             `json:"name"`
 	Address           netip.Addr         `json:"address"`
 	Position          Position           `json:"position"`
+	// Index names the Node on the wire within its network; see
+	// Network.AssignIndexes.
+	Index uint16 `json:"index"`
 }
 
 type ConnectionMethods struct {
@@ -189,6 +188,9 @@ type Network struct {
 	Cipher     CipherSuite     `json:"cipher"`
 	Nodes      []Node          `json:"nodes"`
 	Edges      []Edge          `json:"edges"`
+	// LastIndex is the Node index assigned last; indexes are not reused
+	// until they wrap.
+	LastIndex uint16 `json:"last_index,omitempty"`
 	// EqualCostPaths applies to next hops and to advertisers of one prefix.
 	EqualCostPaths EqualCostPaths `json:"equal_cost_paths,omitempty"`
 	// FailureDetection is the Link health timeout in milliseconds, 0 for the
@@ -256,10 +258,6 @@ func (s State) Clone() State {
 }
 
 func (n Node) Clone() Node {
-	if n.WireGuard != nil {
-		copy := *n.WireGuard
-		n.WireGuard = &copy
-	}
 	n.AdvertisedSubnets = append([]AdvertisedSubnet(nil), n.AdvertisedSubnets...)
 	return n
 }

@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 func applyPlatform(ctx context.Context, id model.ID, entries []Entry) error {
-	anchor := "com.apple/graphwan_" + string(id)
+	anchor := "com.apple/graphnet_" + string(id)
 	if !automatic(entries) {
 		// Flush only our child anchor, never the host's root rules or shared states.
 		if _, err := command(ctx, "pfctl", "", "-a", anchor, "-sr"); err != nil {

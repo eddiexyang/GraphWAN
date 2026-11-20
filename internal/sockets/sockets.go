@@ -1,10 +1,10 @@
 // Package sockets carries per-instance socket hooks through contexts. A host
-// that embeds GraphWAN, for example a proxy client with its own TUN, applies
-// the same socket options and DNS to GraphWAN's sockets as to its own
+// that embeds GraphNet, for example a proxy client with its own TUN, applies
+// the same socket options and DNS to GraphNet's sockets as to its own
 // outbound connections, so they never loop back into that TUN.
 //
 // Hooks travel in the context because every dial, listen and lookup already
-// derives from the context the embedding host starts GraphWAN with. Without
+// derives from the context the embedding host starts GraphNet with. Without
 // hooks, behavior is unchanged.
 package sockets
 
@@ -16,9 +16,9 @@ import (
 	"syscall"
 )
 
-// Hooks are applied to every socket GraphWAN creates and every name it resolves.
+// Hooks are applied to every socket GraphNet creates and every name it resolves.
 type Hooks struct {
-	// Control runs after GraphWAN's own socket options, before bind/connect.
+	// Control runs after GraphNet's own socket options, before bind/connect.
 	Control func(network, address string, c syscall.RawConn) error
 	// Lookup resolves host for network "ip", "ip4" or "ip6".
 	Lookup func(ctx context.Context, network, host string) ([]netip.Addr, error)
@@ -37,7 +37,7 @@ func From(ctx context.Context) Hooks {
 	return hooks
 }
 
-// Control chains own, GraphWAN's socket options, with the hook of ctx.
+// Control chains own, GraphNet's socket options, with the hook of ctx.
 func Control(ctx context.Context, own func(network, address string, c syscall.RawConn) error) func(network, address string, c syscall.RawConn) error {
 	hook := From(ctx).Control
 	if hook == nil {

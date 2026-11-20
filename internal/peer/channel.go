@@ -12,23 +12,23 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
-	"github.com/eWloYW8/GraphWAN/internal/secure"
-	"github.com/eWloYW8/GraphWAN/internal/transport"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/packet"
+	"github.com/eddiexyang/graphnet/internal/packetbuf"
+	"github.com/eddiexyang/graphnet/internal/secure"
+	"github.com/eddiexyang/graphnet/internal/transport"
 )
 
+// Message kinds are at least 0x41, so that no datagram transport mistakes
+// them for STUN; see Masked for 0x80 and above.
 const (
-	helloKind  = 1
-	replyKind  = 2
-	finishKind = 3
-	readyKind  = 4
-	dataKind   = 5
+	helloKind  = 0x41
+	replyKind  = 0x42
+	finishKind = 0x43
+	readyKind  = 0x44
+	dataKind   = 0x45
 	// [sealedKind][nonce][header ciphertext][tag][payload]: see SealedPayload.
-	sealedKind = 6
-	// [prefixKind][k][nonce][ciphertext of k bytes][tag][payload]: see
-	// SealedPrefix.
-	prefixKind         = 7
+	sealedKind         = 0x46
 	helloHeader        = 67
 	handshakeTimeout   = 10 * time.Second
 	retransmitInterval = 250 * time.Millisecond
@@ -47,19 +47,30 @@ const (
 // header and its tag.
 const sealedOpen = secure.Overhead + SealedHeader
 
-// A payload that starts with SealedPrefix and a length k, at least 2, is k
-// bytes the channel seals, these two included, and then bytes already sealed
-// end to end, which travel as they are: a Link's frame of a packet sealed end
-// to end, whose readable headers the channel seals.
-const SealedPrefix = 23
+// A payload whose first byte is Masked or above is a packet already sealed
+// end to end, which travels without the channel's encryption: the byte
+// itself, readable, then MaskedRegion bytes hidden by header protection, then
+// the rest as it is. Its last secure.MaskSample bytes, the end-to-end tag,
+// select the mask. Nothing authenticates it per hop; its destination does.
+const (
+	Masked       = 0x80
+	MaxHopLimit  = 0x7f
+	MaskedRegion = 2 + 2 + packet.MaxReadable
+	// minMasked holds the first byte, a minimal IP header and the mask
+	// sample.
+	minMasked = 1 + 20 + secure.MaskSample
+)
+
+// maskedSpan returns the end of a masked payload's hidden bytes.
+func maskedSpan(payload []byte) int {
+	return min(1+MaskedRegion, len(payload)-secure.MaskSample)
+}
 
 // prefix returns how many leading bytes of payload the channel seals.
 func prefix(payload []byte) int {
 	switch {
 	case payload[0] == SealedPayload && len(payload) > SealedHeader:
 		return SealedHeader
-	case payload[0] == SealedPrefix && len(payload) > 2 && int(payload[1]) >= 2 && int(payload[1]) < len(payload):
-		return int(payload[1])
 	}
 	return len(payload)
 }
@@ -69,7 +80,7 @@ type Hello struct {
 	Transport                           model.Transport
 }
 
-var transports = []model.Transport{model.UDP, model.TCP, model.QUIC, model.WS, model.WSS, model.GRPC}
+var transports = []model.Transport{model.UDP, model.TCP, model.QUIC}
 
 func (h Hello) marshal(noise []byte) ([]byte, error) {
 	out := make([]byte, helloHeader, helloHeader+len(noise))
@@ -349,50 +360,66 @@ func (c *Channel) SendBatch(ctx context.Context, payloads [][]byte) error {
 	}
 	needed := 0
 	for _, payload := range payloads {
-		if len(payload) == 0 || len(payload) > secure.MaxPlaintext {
+		if len(payload) == 0 || len(payload) > secure.MaxPlaintext || payload[0] >= Masked && len(payload) < minMasked {
 			return errors.New("invalid peer message size")
 		}
-		needed += headroom + 2 + secure.Overhead + prefix(payload)
+		if payload[0] >= Masked {
+			needed += headroom + maskedSpan(payload)
+		} else {
+			needed += headroom + 1 + secure.Overhead + prefix(payload)
+		}
 	}
 	if cap(c.sendBuffer) < needed {
 		c.sendBuffer = make([]byte, needed)
 	}
 	c.sendBuffer = c.sendBuffer[:needed]
-	var messages, sealed, tails [128][]byte
+	var messages, sealed, tails, toSeal [128][]byte
 	var starts [129]int
-	offset, split := 0, false
+	var sealing [128]int
+	offset, split, count := 0, false, 0
 	for i, payload := range payloads {
+		starts[i] = offset
+		if payload[0] >= Masked {
+			k := maskedSpan(payload)
+			if headroom != 0 {
+				binary.BigEndian.PutUint32(c.sendBuffer[offset:], uint32(len(payload)))
+				offset += headroom
+			}
+			head := c.sendBuffer[offset : offset+k]
+			copy(head, payload[:k])
+			c.session.MaskSend(head[1:], payload[len(payload)-secure.MaskSample:])
+			messages[i], tails[i] = head, payload[k:]
+			split = split || k < len(payload)
+			offset += k
+			continue
+		}
 		kind, k := byte(dataKind), prefix(payload)
-		switch {
-		case k == len(payload):
-		case payload[0] == SealedPayload:
+		if k < len(payload) {
 			kind = sealedKind
-		default:
-			kind = prefixKind
 		}
 		head := 1 + secure.Overhead + k
-		if kind == prefixKind {
-			head++
-		}
-		starts[i] = offset
 		end := offset + headroom + head
 		if headroom != 0 {
 			binary.BigEndian.PutUint32(c.sendBuffer[offset:], uint32(head+len(payload)-k))
 			offset += headroom
 		}
-		c.sendBuffer[offset], sealed[i], tails[i] = kind, payload[:k], payload[k:]
+		c.sendBuffer[offset], tails[i] = kind, payload[k:]
 		split = split || k < len(payload)
 		messages[i] = c.sendBuffer[offset : offset+1 : end]
-		if kind == prefixKind {
-			c.sendBuffer[offset+1] = byte(k)
-			messages[i] = c.sendBuffer[offset : offset+2 : end]
-		}
+		sealing[count], toSeal[count] = i, messages[i]
+		sealed[count] = payload[:k]
+		count++
 		offset = end
 	}
 	starts[len(payloads)] = offset
 	c.sendBuffer = c.sendBuffer[:offset]
-	if err := c.session.SealBatchAppend(messages[:len(payloads)], sealed[:len(payloads)]); err != nil {
-		return err
+	if count > 0 {
+		if err := c.session.SealBatchAppend(toSeal[:count], sealed[:count]); err != nil {
+			return err
+		}
+		for j, i := range sealing[:count] {
+			messages[i] = toSeal[j]
+		}
 	}
 	if headroom != 0 {
 		if !split {
@@ -540,9 +567,6 @@ func encrypted(raw []byte) bool {
 		return true
 	case len(raw) > 1+sealedOpen && raw[0] == sealedKind:
 		return true
-	case len(raw) > 2 && raw[0] == prefixKind:
-		k := int(raw[1])
-		return k >= 2 && len(raw) > 2+secure.Overhead+k
 	}
 	return false
 }
@@ -552,8 +576,6 @@ func openPart(raw []byte) []byte {
 	switch raw[0] {
 	case sealedKind:
 		return raw[1 : 1+sealedOpen]
-	case prefixKind:
-		return raw[2 : 2+secure.Overhead+int(raw[1])]
 	}
 	return raw[1:]
 }
@@ -566,8 +588,6 @@ func opened(raw, plaintext []byte) []byte {
 	switch raw[0] {
 	case sealedKind:
 		start = 1 + secure.Overhead
-	case prefixKind:
-		start = 2 + secure.Overhead
 	default:
 		return plaintext
 	}
@@ -576,6 +596,9 @@ func opened(raw, plaintext []byte) []byte {
 }
 
 func (c *Channel) decode(ctx context.Context, raw []byte) ([]byte, error) {
+	if raw[0] >= Masked {
+		return c.unmask(raw), nil
+	}
 	if encrypted(raw) {
 		plaintext, err := c.session.OpenInPlace(openPart(raw))
 		if err != nil {
@@ -674,4 +697,14 @@ func (c *Channel) ReceiveOwnedBatch(ctx context.Context) ([]*packetbuf.Buffer, e
 			return buffers[:count], nil
 		}
 	}
+}
+
+// unmask reveals a masked message in place, or returns nil for one too short
+// to be a packet or without a hop left.
+func (c *Channel) unmask(raw []byte) []byte {
+	if len(raw) < minMasked || raw[0]&^Masked == 0 {
+		return nil
+	}
+	c.session.MaskReceive(raw[1:maskedSpan(raw)], raw[len(raw)-secure.MaskSample:])
+	return raw
 }

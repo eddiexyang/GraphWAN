@@ -2,7 +2,7 @@ package transport
 
 import (
 	"context"
-	"github.com/eWloYW8/GraphWAN/internal/sockets"
+	"github.com/eddiexyang/graphnet/internal/sockets"
 	"net"
 )
 

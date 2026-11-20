@@ -28,10 +28,10 @@ func (a ReleaseAsset) Validate() error {
 	if a.OS == "windows" {
 		suffix = ".exe"
 	}
-	name := "graphwan-" + a.Version + "-" + a.OS + "-" + a.Arch + suffix
+	name := "graphnet-" + a.Version + "-" + a.OS + "-" + a.Arch + suffix
 	digest, err := hex.DecodeString(a.SHA256)
 	u, urlErr := url.Parse(a.URL)
-	validURL := urlErr == nil && u.Scheme == "https" && u.Host == "github.com" && u.User == nil && u.RawQuery == "" && u.Fragment == "" && u.Opaque == "" && u.Path == "/eWloYW8/GraphWAN/releases/download/"+a.Version+"/"+name
+	validURL := urlErr == nil && u.Scheme == "https" && u.Host == "github.com" && u.User == nil && u.RawQuery == "" && u.Fragment == "" && u.Opaque == "" && u.Path == "/eddiexyang/graphnet/releases/download/"+a.Version+"/"+name
 	if len(a.Version) > 80 || !releaseVersion.MatchString(a.Version) || !releasePlatform.MatchString(a.OS) || !releasePlatform.MatchString(a.Arch) || a.Name != name || !validURL || err != nil || len(digest) != 32 || a.SHA256 != strings.ToLower(a.SHA256) || a.Size <= 0 || a.Size > 512<<20 {
 		return errors.New("invalid release asset or missing SHA-256 digest")
 	}

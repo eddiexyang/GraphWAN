@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -31,7 +31,7 @@ func TestLocationCacheAndRateLimit(t *testing.T) {
 	var limited atomic.Bool
 	s.client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls.Add(1)
-		if r.URL.String() != "https://api.ip.sb/geoip/"+ip.String() || !strings.HasPrefix(r.UserAgent(), "GraphWAN-") {
+		if r.URL.String() != "https://api.ip.sb/geoip/"+ip.String() || !strings.HasPrefix(r.UserAgent(), "GraphNet-") {
 			t.Errorf("unexpected request: %s %s", r.URL, r.UserAgent())
 		}
 		if limited.Load() {

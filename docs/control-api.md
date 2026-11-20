@@ -41,16 +41,6 @@ IDs are 32 lowercase hexadecimal characters. Nodes have `id`, `agent_id`, `name`
 `address`, and `position: {x,y}`. Missing Node/Edge IDs are generated, but when
 creating both Nodes and referencing Edges in one request, assign Node IDs first.
 An Agent can be a member of many networks, once each, without overlapping CIDRs.
-WireGuard Nodes instead use `agent_id: ""` and
-`wireguard: {public_key: "<base64 X25519 key>", endpoint: "vpn.example.com:24752"}`.
-`endpoint` is an optional client configuration override. Exactly one Edge to a
-regular Node is required, with `transports: ["wireguard"]`; the Edge may be disabled.
-Client public keys are unique across the configuration. Client private keys are
-never part of this API. WireGuard Nodes cannot advertise subnets. Deleting an
-Agent also removes its attached WireGuard leaf nodes. See [WireGuard access](wireguard.md).
-WireGuard Link telemetry includes `wireguard_public_key` (the access Agent's key)
-and `last_handshake`, as well as endpoint and byte counters. One access Agent
-report is sufficient for this attachment; no client control connection is needed.
 
 Nodes also accept an optional `advertised_subnets` array, for example:
 
@@ -71,7 +61,7 @@ support. Automatic mode failures appear in Agent configuration telemetry.
 
 Edges have `id`, `a`, `b`, positive `weight`, `enabled`, `transports`,
 `methods: {ipv4_direct, ipv6_direct, hole_punch}`, and optional
-`preferred_candidate`. Transports are `udp`, `tcp`, `quic`, `ws`, `wss`, `grpc`.
+`preferred_candidate`. Transports are `udp` and `tcp`.
 Supported cipher suites are `aes-128-gcm`, `aes-256-gcm`,
 `chacha20-poly1305` (default), and `xchacha20-poly1305`. A cipher change
 replaces the affected peer sessions; peers must support the configured suite.
@@ -84,12 +74,10 @@ that workload's performance. Names are 1–128 bytes without control characters.
 Network MTU is 1280–9000; platform adapters may impose a lower native ceiling,
 as documented for NetBSD.
 
-Manual endpoints have `id`, `transport`, `url` and `source: "manual"`. URLs require
-an explicit port. WS/WSS/gRPC may include a path. Automatic endpoints cannot be
+Manual endpoints have `id`, `transport`, `url` and `source: "manual"`. URLs are
+`scheme://host:port` with an explicit port and no path. Automatic endpoints cannot be
 edited by a browser. `PATCH` replaces the complete manual endpoint list while
-retaining agent-discovered entries. WS/WSS paths are literal upgrade paths;
-gRPC paths are prefixes for `/graphwan.v1.Peer/Connect`. GraphWAN gRPC endpoints
-always dial TLS. See [the gRPC endpoint guide](grpc-operation.md).
+retaining agent-discovered entries.
 
 ## Enrollment
 
@@ -98,14 +86,14 @@ An authenticated administrator calls `POST /enrollment-tokens` with
 `token` and `expires_at`. Only a hash of the token is stored.
 
 The response also includes an `invitation`: Base64url-encoded JSON with
-`kind: "graphwan-agent"`, `version: 1`, `token`, `expires_at` and `directory`.
+`kind: "graphnet-agent"`, `version: 1`, `token`, `expires_at` and `directory`.
 The directory contains the cluster ID, CA public certificate and Server endpoints
 with their transport types. No CA private key is included. Supply it to
-`graphwan agent enroll --invitation-file PATH` (or `-` for stdin), or set
-`GRAPHWAN_AGENT_INVITATION`. The command verifies the invited CA and Server TLS
+`graphnet agent enroll --invitation-file PATH` (or `-` for stdin), or set
+`GRAPHNET_AGENT_INVITATION`. The command verifies the invited CA and Server TLS
 identity before sending the token, tries advertised endpoints, pins the returned
 cluster identity, and persists registration without starting the data plane.
-Run `graphwan agent run` with the same `--data-dir` afterwards.
+Run `graphnet agent run` with the same `--data-dir` afterwards.
 
 An Agent generates its own Ed25519 key and DER CSR, then calls `POST /enroll`
 with `Authorization: Bearer <token>` and `{ "name": "...", "csr": "<base64 DER>" }`.
@@ -124,13 +112,13 @@ returned in a response is not a substitute for authenticating the server.
 ### Registration by public key
 
 Instead of enrolling, an operator can register an Agent by its public key with
-`POST /agents`. `graphwan agent key --data-dir PATH` creates the Agent identity
+`POST /agents`. `graphnet agent key --data-dir PATH` creates the Agent identity
 if needed and prints its public key. Public keys are unique among Agents.
 
 Start that Agent with `--server` and `--ca` and no enrollment token. It calls
 `GET /agent/registration`, signing a challenge from `GET /agent/challenge` with
-its key: `X-GraphWAN-Agent-Key` carries the base64url public key and
-`X-GraphWAN-Signature` signs `graphwan agent key challenge v1\n<key>\n<challenge>`.
+its key: `X-GraphNet-Agent-Key` carries the base64url public key and
+`X-GraphNet-Signature` signs `graphnet agent key challenge v1\n<key>\n<challenge>`.
 The response contains `agent_id`, `ca_certificate` and the controller directory,
 as enrollment would, but no certificate. The Agent then signs every request with
 its ID, as behind a TLS-terminating gateway. The controller accepts a signed
@@ -138,11 +126,11 @@ challenge on direct TLS connections that present no client certificate.
 Revocation applies as for enrolled Agents.
 
 The private key can instead be kept in configuration, as the Agent's identity:
-`graphwan agent genkey` prints a new one, and `GRAPHWAN_PRIVATE_KEY` gives it to
-`graphwan agent` and `graphwan agent key`. The data directory then only caches
+`graphnet agent genkey` prints a new one, and `GRAPHNET_PRIVATE_KEY` gives it to
+`graphnet agent` and `graphnet agent key`. The data directory then only caches
 state for that key; when the key changes, the Agent clears it and registers again
 by the new key, and an enrollment token is ignored. Moving an Agent to another
-machine means moving its key. `graphwan agent key --export-private` prints the
+machine means moving its key. `graphnet agent key --export-private` prints the
 key of an identity the data directory created, to move it into configuration.
 
 ## Agent connection
@@ -150,7 +138,7 @@ key of an identity the data directory created, to move it into configuration.
 ### Control transport carriers
 
 On first enrollment, the Agent selects its controller carrier with `--server-transport` or
-`GRAPHWAN_SERVER_TRANSPORT`; an explicit flag overrides the environment.
+`GRAPHNET_SERVER_TRANSPORT`; an explicit flag overrides the environment.
 The default is `tcp`. The controller automatically accepts all four carriers
 on its one configured TCP listen port (8443 by default):
 
@@ -164,7 +152,7 @@ on its one configured TCP listen port (8443 by default):
 For example:
 
 ```sh
-graphwan agent --server https://controller.example.com:8443 \
+graphnet agent --server https://controller.example.com:8443 \
   --server-transport grpc --ca ./ca.pem --data-dir ./agent-data
 ```
 
@@ -179,20 +167,19 @@ automatic transport downgrade. WSS verifies the outer server certificate using
 the same trusted roots and hostname, independently of inner TLS verification.
 
 The outer WebSocket endpoint is `/api/v1/agent/tunnel`, with required subprotocol
-`graphwan.control.v1`. Binary message payloads are concatenated into a TLS byte
+`graphnet.control.v1`. Binary message payloads are concatenated into a TLS byte
 stream; each message contains 1–32,768 bytes. Text messages, empty/oversized
 messages, URL queries and browser Origin headers are rejected. Compression is
 disabled. WebSocket message boundaries have no meaning to the inner TLS protocol.
 
 Outer gRPC uses plaintext HTTP/2 (h2c) with the bidirectional method
-`/graphwan.control.v1.Tunnel/Connect`, defined in
+`/graphnet.control.v1.Tunnel/Connect`, defined in
 [control_tunnel.proto](../api/control_tunnel.proto). Each `BytesValue` contains
 1–32,768 TLS bytes; encoded protobuf messages are capped at 32,772 bytes.
 Compression is not enabled. The response metadata must include
-`graphwan-protocol: graphwan-control-v1`. This only acknowledges the carrier;
+`graphnet-protocol: graphnet-control-v1`. This only acknowledges the carrier;
 it never authenticates an Agent. A separate HTTP/2 connection carries each
-underlying control connection. This schema differs from the Agent-to-Agent gRPC
-peer protocol, whose values contain complete peer messages rather than TLS bytes.
+underlying control connection.
 
 The public listener classifies direct TLS and plaintext HTTP. Plaintext HTTP
 exposes only the outer tunnels, never the panel, enrollment or management APIs.
@@ -219,8 +206,8 @@ The controller sends `ControlMessage` JSON envelopes:
 - `{"type":"config","snapshot":{...}}`: initial and updated compiled snapshot.
 - `{"type":"heartbeat"}`: liveness message every 15 seconds when unchanged.
 
-New Agent/controller pairs negotiate `graphwan.control.delta.v1`, falling back
-to `graphwan.control.routes.v1` with older peers. Every connection starts with a
+New Agent/controller pairs negotiate `graphnet.control.delta.v1`, falling back
+to `graphnet.control.routes.v1` with older peers. Every connection starts with a
 full snapshot. Subsequent endpoint-only revisions use
 `{"type":"config_delta","delta":{"base_revision":N,"revision":N+1,...}}`.
 Leases contain only endpoint ID and expiry; address additions/removals carry
@@ -243,11 +230,7 @@ revision/liveness through the normal report validation path. Errors and changes
 to links, routing or traffic still produce full reports. Small acknowledgements
 do not postpone the periodic full report. One final unchanged sample clears displayed
 traffic rates when transfers stop. CPU, memory, RTT and loss samples alone do not
-trigger extra reports for ordinary links. WireGuard ICMP sample validity and
-measurement timestamps trigger updates: `rtt_valid` marks an available sample,
-`rtt_measured_at` is its timestamp, and `rtt_ms` is the tunnel round-trip time.
-Missing replies or samples older than 40 seconds are displayed as unknown,
-independently of handshake health. A 45-second receive timeout detects a silent connection:
+trigger extra reports. A 45-second receive timeout detects a silent connection:
 
 - `{"type":"ack","report":{"version":"...","applied_revision":N,"links":[],"config_error":"..."}}`
 - `{"type":"endpoints","endpoints":[...]}`: full discovered endpoint set.
@@ -386,7 +369,7 @@ cannot invoke replication RPCs. These routes share the existing HTTPS/carrier
 port; no separate Raft listener is needed. Plaintext development mode has no
 cluster management or Agent control.
 
-Upgraded Servers negotiate the WebSocket subprotocol `graphwan.cluster.v1` on
+Upgraded Servers negotiate the WebSocket subprotocol `graphnet.cluster.v1` on
 `/cluster/raft`. The authenticated byte stream carries yamux streams, and both
 ends can open streams on that same physical connection. A stream starts with
 one type byte: `1` carries the existing Raft network-transport framing; `2`
@@ -487,7 +470,7 @@ overrides naming the deleted node.
 
 `edges` contains only explicit edges. Derived edge IDs in snapshots and telemetry
 are the first 16 bytes of SHA-256, lowercase hex, of the UTF-8 string
-`graphwan/full-mesh/<owner-id>/<smaller-node-id>/<larger-node-id>`. Owner is the
+`graphnet/full-mesh/<owner-id>/<smaller-node-id>/<larger-node-id>`. Owner is the
 group ID for internal edges and the group-link ID for aggregate children. Member
 ordering does not change IDs. Snapshots still contain normal edges and per-child
 live routes; down children are not reintroduced by expansion.

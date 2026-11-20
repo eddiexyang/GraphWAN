@@ -63,10 +63,10 @@ def main():
             goos, goarch = target.split("/")
             directory = args.output / f"{goos}-{goarch}"
             directory.mkdir(parents=True, exist_ok=True)
-            binary = directory / ("graphwan.exe" if goos == "windows" else "graphwan")
+            binary = directory / ("graphnet.exe" if goos == "windows" else "graphnet")
             env = {**build_env, "GOOS": goos, "GOARCH": goarch}
             print(f"Building {target}", flush=True)
-            subprocess.run(["go", "build", "-trimpath", "-buildvcs=false", "-ldflags", f"-s -w -X main.version={version}", "-o", str(binary.resolve()), "./cmd/graphwan"], cwd=ROOT, env=env, check=True)
+            subprocess.run(["go", "build", "-trimpath", "-buildvcs=false", "-ldflags", f"-s -w -X main.version={version}", "-o", str(binary.resolve()), "./cmd/graphnet"], cwd=ROOT, env=env, check=True)
             records.append({"target": target, "path": binary.relative_to(args.output).as_posix(), "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "bytes": binary.stat().st_size})
         manifest = {"revision": revision, "worktree_dirty": dirty, "version": version, "go": subprocess.check_output(["go", "version"], cwd=ROOT, env=build_env, text=True).strip(), "cgo": False, "architecture_baselines": BASELINES, "go_environment": BUILD_ENV, "builds": records}
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

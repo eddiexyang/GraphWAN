@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 const (
@@ -182,7 +182,7 @@ func (s *Service) lookup(ip netip.Addr) (*Location, time.Duration, error) {
 	if err != nil {
 		return nil, retryDelay, err
 	}
-	req.Header.Set("User-Agent", "GraphWAN-GeoIP/1.0 (+https://github.com/eWloYW8/GraphWAN)")
+	req.Header.Set("User-Agent", "GraphNet-GeoIP/1.0 (+https://github.com/eddiexyang/graphnet)")
 	req.Header.Set("Accept", "application/json")
 	response, err := s.client.Do(req)
 	if err != nil {

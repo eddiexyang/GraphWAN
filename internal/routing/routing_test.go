@@ -6,9 +6,9 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/routing"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/routing"
+	"github.com/eddiexyang/graphnet/internal/testutil"
 )
 
 func TestWeightedMultiHop(t *testing.T) {
@@ -28,7 +28,7 @@ func TestWeightedMultiHop(t *testing.T) {
 	// The source configuration must not be aliased by compiled snapshots.
 	n.Peers[0].PublicKey[0] ^= 255
 	n.Peers[0].Endpoints[0].URL = "changed"
-	n.Peers[0].Edge.Transports[0] = model.WSS
+	n.Peers[0].Edge.Transports[0] = "changed"
 	if err := s.Validate(); err != nil {
 		t.Fatalf("compiler mutated state: %v", err)
 	}

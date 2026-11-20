@@ -3,13 +3,13 @@ package link
 import (
 	"context"
 	"errors"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/packetbuf"
 	"testing"
 )
 
 func TestTCPBacklogOwnershipAndDrain(t *testing.T) {
-	for _, kind := range []model.Transport{model.TCP, model.WS, model.WSS, model.GRPC, model.UDP, model.QUIC} {
+	for _, kind := range []model.Transport{model.TCP, model.QUIC, model.UDP} {
 		t.Run(string(kind), func(t *testing.T) {
 			l := &Link{ctx: context.Background(), info: Info{Transport: kind}, dataReady: make(chan struct{}, 1)}
 			l.dataGeneration.Store(1)

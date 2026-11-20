@@ -11,38 +11,43 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/packetbuf"
+	"github.com/eddiexyang/graphnet/internal/packetbuf"
 )
 
 const (
-	udpHeaderSize = 20
-	maxPendingUDP = 512
-	udpQueueSize  = 256
+	// udpTokenSize trails each GraphNet datagram: the sender's random token,
+	// which with its address names one message connection.
+	udpTokenSize = 4
+	// A GraphNet datagram's first byte, its peer message kind, is at least
+	// udpFirstKind, so STUN, whose first byte is 0 or 1, cannot be mistaken
+	// for one.
+	udpFirstKind = 0x40
+	// udpReceiveBuffer absorbs receive bursts while readers hand batches on.
+	udpReceiveBuffer = 7 << 20
+	maxPendingUDP    = 512
+	udpQueueSize     = 256
 )
-
-var udpMagic = [4]byte{'G', 'W', 'D', 1}
 
 type udpKey struct {
 	remote netip.AddrPort
-	token  [16]byte
+	token  [udpTokenSize]byte
 }
 
 // UDP multiplexes independent message connections over one data socket per address
 // family. The same socket is used for STUN and hole punching; a NAT mapping must
 // never be discovered on a different socket than the one carrying peer traffic.
 type UDP struct {
-	wireguard    WireGuardReceiver
 	sockets      []*net.UDPConn
 	batchSockets map[*net.UDPConn]*udpBatchSocket
 	mu           sync.Mutex
 	writeMu      sync.Mutex
 	peers        map[udpKey]*Datagram
+	quic         *QUICHub
 	pending      int // Only peers that have not passed the configured Noise handshake.
 	accept       chan *Datagram
 	done         chan struct{}
 	closeOnce    sync.Once
 	wg           sync.WaitGroup
-	closeQUIC    func() error
 	stunMu       sync.Mutex
 	stunPending  map[[12]byte]*stunTransaction
 }
@@ -59,20 +64,22 @@ type Datagram struct {
 	authenticated atomic.Bool
 }
 
-func ListenUDP(address string) (*UDP, error) {
-	sockets, err := listenUDPSockets(context.Background(), address)
+// ListenUDP shares each address family's data socket between native UDP,
+// and STUN. The sockets use the hooks of ctx.
+func ListenUDP(ctx context.Context, address string) (*UDP, error) {
+	sockets, err := listenUDPSockets(ctx, address)
 	if err != nil {
 		return nil, err
 	}
-	return newUDP(sockets, true)
+	return newUDP(sockets)
 }
 
 // NewUDP takes ownership of socket, including cleanup if setup fails.
-func NewUDP(socket *net.UDPConn) (*UDP, error) { return newUDP([]*net.UDPConn{socket}, true) }
+func NewUDP(socket *net.UDPConn) (*UDP, error) { return newUDP([]*net.UDPConn{socket}) }
 
-func newUDP(sockets []*net.UDPConn, read bool) (*UDP, error) {
+func newUDP(sockets []*net.UDPConn) (*UDP, error) {
 	for _, socket := range sockets {
-		// BSD defaults may be smaller than one permitted GraphWAN message.
+		// BSD defaults may be smaller than one permitted GraphNet message.
 		var err error
 		switch runtime.GOOS {
 		case "darwin", "dragonfly", "freebsd", "netbsd", "openbsd":
@@ -93,12 +100,9 @@ func newUDP(sockets []*net.UDPConn, read bool) (*UDP, error) {
 	for _, socket := range sockets {
 		hub.batchSockets[socket] = newUDPBatchSocket(socket)
 	}
-	hub.wg.Add(1)
-	if read {
-		hub.wg.Add(len(sockets))
-		for _, socket := range sockets {
-			go hub.readLoop(socket)
-		}
+	hub.wg.Add(1 + len(sockets))
+	for _, socket := range sockets {
+		go hub.readLoop(socket)
 	}
 	go hub.expireLoop()
 	return hub, nil
@@ -106,8 +110,11 @@ func newUDP(sockets []*net.UDPConn, read bool) (*UDP, error) {
 func (h *UDP) LocalAddr() net.Addr { return h.sockets[0].LocalAddr() }
 func (h *UDP) Close() error {
 	h.stop()
-	if h.closeQUIC != nil {
-		h.closeQUIC()
+	h.mu.Lock()
+	q := h.quic
+	h.mu.Unlock()
+	if q != nil {
+		q.close()
 	}
 	h.wg.Wait()
 	return nil
@@ -140,7 +147,9 @@ func (h *UDP) Dial(remote netip.AddrPort) (*Datagram, error) {
 		return nil, errors.New("invalid UDP peer address")
 	}
 	key := udpKey{remote: remote}
-	rand.Read(key.token[:])
+	for key.token == [udpTokenSize]byte{} {
+		rand.Read(key.token[:])
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	select {
@@ -198,14 +207,14 @@ func (h *UDP) readLoop(socket *net.UDPConn) {
 			packets[count] = p
 			count++
 		}
-		h.receivePackets(packets[:count])
+		h.receivePackets(socket, packets[:count])
 	}
 }
 
 // receivePackets publishes each consecutive run for a peer together, preserving
 // socket/GRO batches through the decryption queue. The lock also serializes
 // acceptance and close, so no storage can arrive after the last close drain.
-func (h *UDP) receivePackets(packets []udpPacket) {
+func (h *UDP) receivePackets(socket *net.UDPConn, packets []udpPacket) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	select {
@@ -213,6 +222,7 @@ func (h *UDP) receivePackets(packets []udpPacket) {
 		return
 	default:
 	}
+	now := time.Now()
 	var pending [packetbuf.BatchSize]*packetbuf.Buffer
 	var previous *Datagram
 	count := 0
@@ -227,14 +237,24 @@ func (h *UDP) receivePackets(packets []udpPacket) {
 	for _, p := range packets {
 		raw, remote := p.raw, p.remote
 		n := len(raw)
-		if n <= udpHeaderSize || n > MaxMessage+udpHeaderSize || [4]byte(raw[:4]) != udpMagic {
+		if n <= udpTokenSize || n > MaxMessage+udpTokenSize || raw[0] < udpFirstKind {
 			continue
 		}
-		key := udpKey{remote: netip.AddrPortFrom(remote.Addr().Unmap(), remote.Port()), token: [16]byte(raw[4:20])}
-		if key.token == [16]byte{} {
-			continue
-		}
+		key := udpKey{remote: netip.AddrPortFrom(remote.Addr().Unmap(), remote.Port()), token: [udpTokenSize]byte(raw[n-udpTokenSize:])}
 		peer := h.peers[key]
+		if peer == nil && h.quic != nil {
+			if raw[0] == quicKnockKind && n == quicKnockSize {
+				h.quic.knock(raw, key.remote, now)
+				continue
+			}
+			if h.quic.admit(raw, key.remote, now) {
+				h.quic.sockets[socket].pass(raw, remote)
+				continue
+			}
+		}
+		if key.token == [udpTokenSize]byte{} {
+			continue
+		}
 		if peer == nil {
 			if h.pending >= maxPendingUDP {
 				continue
@@ -253,8 +273,8 @@ func (h *UDP) receivePackets(packets []udpPacket) {
 			flush()
 			previous = peer
 		}
-		payload := packetbuf.Get(n - udpHeaderSize)
-		copy(payload.Data, raw[udpHeaderSize:])
+		payload := packetbuf.Get(n - udpTokenSize)
+		copy(payload.Data, raw[:n-udpTokenSize])
 		pending[count] = payload
 		count++
 	}
@@ -318,7 +338,7 @@ func (d *Datagram) Close() error {
 	return nil
 }
 func (d *Datagram) Send(ctx context.Context, payload []byte) error {
-	if len(payload) == 0 || len(payload) > MaxMessage {
+	if len(payload) == 0 || len(payload) > MaxMessage || payload[0] < udpFirstKind {
 		return errors.New("invalid UDP message size")
 	}
 	select {
@@ -326,10 +346,8 @@ func (d *Datagram) Send(ctx context.Context, payload []byte) error {
 		return net.ErrClosed
 	default:
 	}
-	raw := make([]byte, udpHeaderSize+len(payload))
-	copy(raw, udpMagic[:])
-	copy(raw[4:20], d.key.token[:])
-	copy(raw[20:], payload)
+	raw := make([]byte, 0, len(payload)+udpTokenSize)
+	raw = append(append(raw, payload...), d.key.token[:]...)
 	return d.hub.writeDatagramControl(ctx, raw, d.key.remote, d.replyControl)
 }
 
@@ -389,7 +407,7 @@ func (d *Datagram) ReceiveOwnedBatch(ctx context.Context) ([]*packetbuf.Buffer, 
 func (d *Datagram) Unreliable() bool { return true }
 
 // A single externally supplied socket may support both families. With separate
-// wildcard sockets, select the family before sending native, STUN or QUIC data.
+// wildcard sockets, select the family before sending native or STUN data.
 func (h *UDP) socketFor(remote netip.Addr) *net.UDPConn {
 	for _, socket := range h.sockets {
 		if socket.LocalAddr().(*net.UDPAddr).AddrPort().Addr().Unmap().Is4() == remote.Unmap().Is4() {

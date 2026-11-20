@@ -47,7 +47,7 @@ def install(archive, arch, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arch", required=True, choices=ARCHITECTURES)
-    parser.add_argument("--output", required=True, type=Path, help="directory containing graphwan.exe")
+    parser.add_argument("--output", required=True, type=Path, help="directory containing graphnet.exe")
     parser.add_argument("--archive", type=Path, help="use a local official ZIP, with the same checksum check")
     args = parser.parse_args()
     try:

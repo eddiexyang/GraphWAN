@@ -1,8 +1,8 @@
 package control
 
 import (
-	"github.com/eWloYW8/GraphWAN/internal/cluster"
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/cluster"
+	"github.com/eddiexyang/graphnet/internal/model"
 	"testing"
 	"time"
 )

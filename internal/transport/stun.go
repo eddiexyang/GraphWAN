@@ -76,7 +76,7 @@ func (h *UDP) STUNBinding(ctx context.Context, server netip.AddrPort) (netip.Add
 
 // The socket reader only delivers replies for an outstanding random transaction
 // AND its resolved server address. Malformed and unsolicited replies allocate no
-// peer and send no response. STUN cannot consume QUIC or native UDP messages.
+// peer and send no response. STUN cannot consume native UDP messages.
 func (h *UDP) receiveSTUN(raw []byte, remote netip.AddrPort) bool {
 	if len(raw) < 20 || raw[0]&0xc0 != 0 || binary.BigEndian.Uint32(raw[4:8]) != 0x2112a442 {
 		return false

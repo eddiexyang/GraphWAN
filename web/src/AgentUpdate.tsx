@@ -41,7 +41,7 @@ export default function AgentUpdate({
       </dl>
       {current?.error && <ErrorBox>{current.error}</ErrorBox>}
       {!eligible && (
-        <ErrorBox>Agent must be online and installed with graphwan agent service.</ErrorBox>
+        <ErrorBox>Agent must be online and installed with graphnet agent service.</ErrorBox>
       )}
       <Field label="Download source">
         <select

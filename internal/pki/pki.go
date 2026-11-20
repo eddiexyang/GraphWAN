@@ -17,8 +17,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/store"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/store"
 )
 
 type Authority struct {
@@ -48,7 +48,7 @@ func LoadOrCreate(db *store.Store) (*Authority, error) {
 			return err
 		}
 		now := time.Now()
-		template := &x509.Certificate{SerialNumber: n, Subject: pkix.Name{CommonName: "GraphWAN Controller CA"}, NotBefore: now.Add(-5 * time.Minute), NotAfter: now.AddDate(10, 0, 0), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign}
+		template := &x509.Certificate{SerialNumber: n, Subject: pkix.Name{CommonName: "GraphNet Controller CA"}, NotBefore: now.Add(-5 * time.Minute), NotAfter: now.AddDate(10, 0, 0), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign}
 		cert, err := x509.CreateCertificate(rand.Reader, template, template, pub, key)
 		if err != nil {
 			return err
@@ -118,7 +118,7 @@ func (a *Authority) ServerTLS(hosts []string) (*tls.Config, error) {
 		return nil, err
 	}
 	now := time.Now()
-	template := &x509.Certificate{SerialNumber: n, Subject: pkix.Name{CommonName: "GraphWAN Server"}, NotBefore: now.Add(-5 * time.Minute), NotAfter: now.AddDate(1, 0, 0), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	template := &x509.Certificate{SerialNumber: n, Subject: pkix.Name{CommonName: "GraphNet Server"}, NotBefore: now.Add(-5 * time.Minute), NotAfter: now.AddDate(1, 0, 0), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
 	for _, host := range hosts {
 		if ip := net.ParseIP(host); ip != nil {
 			template.IPAddresses = append(template.IPAddresses, ip)

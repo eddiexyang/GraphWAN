@@ -63,7 +63,7 @@ export function setOverride(owner: EdgeOwner, base: Edge, edge: Edge): EdgeOverr
   return Object.keys(o).length > 2 ? [...others, o] : others
 }
 export const groupEdgeID = (group: string, a: string, b: string) =>
-  bytesToHex(sha256(utf8ToBytes(`graphwan/full-mesh/${group}/${[a, b].sort().join('/')}`))).slice(
+  bytesToHex(sha256(utf8ToBytes(`graphnet/full-mesh/${group}/${[a, b].sort().join('/')}`))).slice(
     0,
     32,
   )

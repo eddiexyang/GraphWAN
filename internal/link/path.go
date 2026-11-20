@@ -4,7 +4,7 @@ import (
 	"encoding/hex"
 	"net/netip"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 // Path identifies endpoint IPs as observed by the other end. Ports are excluded;

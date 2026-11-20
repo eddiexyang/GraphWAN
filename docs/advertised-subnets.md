@@ -1,12 +1,12 @@
 # Advertised subnets and gateways
 
-A Node can advertise external IP prefixes **within a particular GraphWAN Network**.
+A Node can advertise external IP prefixes **within a particular GraphNet Network**.
 In the network detail page, enter edit mode, select the Node, and add entries under
 **Advertised subnets**. Each entry has a prefix and an **Automatic gateway** mode:
 
-| Mode | GraphWAN behavior on the advertising Node |
+| Mode | GraphNet behavior on the advertising Node |
 |---|---|
-| Off | Admit and route the prefix inside GraphWAN; leave host forwarding, firewall and NAT configuration to the administrator. |
+| Off | Admit and route the prefix inside GraphNet; leave host forwarding, firewall and NAT configuration to the administrator. |
 | Routing | Enable host IP forwarding and install scoped allow rules. Preserve source addresses. |
 | SNAT (Linux) | Enable forwarding and scoped allow rules, and masquerade traffic entering the Network's TUN toward this prefix. |
 
@@ -19,17 +19,17 @@ are cross-compiled but have not been verified on native hosts.
 
 Advertising a prefix does **not** install operating-system routes to it on other
 Nodes. Administrators must direct the desired traffic into the appropriate
-GraphWAN TUN interface. The gateway's existing host routes determine how it reaches
-the external subnet. GraphWAN continues to manage its own TUN address and connected
+GraphNet TUN interface. The gateway's existing host routes determine how it reaches
+the external subnet. GraphNet continues to manage its own TUN address and connected
 overlay subnet route.
 
 For example, Network `10.42.0.0/24` contains A (`10.42.0.1`) and B (`10.42.0.2`).
 B advertises `192.168.10.0/24` and has a LAN address of `192.168.10.1`.
 
-On a Linux A, after identifying its GraphWAN interface:
+On a Linux A, after identifying its GraphNet interface:
 
 ```sh
-sudo ip route add 192.168.10.0/24 dev <A-GraphWAN-interface>
+sudo ip route add 192.168.10.0/24 dev <A-GraphNet-interface>
 ```
 
 In Routing mode, LAN devices or their upstream router need a route for
@@ -39,12 +39,12 @@ external devices see B's egress address, and connection tracking returns replies
 to A. Access policies on external devices remain under their administrators'
 control.
 
-Source prefixes behind other GraphWAN gateways are supported by the data plane,
+Source prefixes behind other GraphNet gateways are supported by the data plane,
 but site-to-site operation also needs administrator-managed routes on both sides.
 Windows/macOS automatic firewall rules cover traffic between the overlay prefix
 and the local advertised subnet; additional site-to-site firewall policy is manual.
 
-GraphWAN chooses the longest matching advertised prefix, then follows the existing
+GraphNet chooses the longest matching advertised prefix, then follows the existing
 weighted topology to its owner. Down-edge filtering still applies. If no gateway
 of that prefix is reachable, packets drop instead of falling back to a broader
 prefix. Both requests and replies must come from and go to a Node that advertises
@@ -103,12 +103,12 @@ older Agents do not implement prefix admission or gateway configuration.
 
 Automatic modes require administrative privileges. They do not configure DNS,
 default routes, remote LAN routers, or the destination devices' firewalls.
-Other firewall engines can still explicitly block forwarded traffic. GraphWAN
+Other firewall engines can still explicitly block forwarded traffic. GraphNet
 keeps their rules and global policies intact; administrators must resolve those
 conflicts when configuring a gateway.
 
-**Linux:** install `nft` and use a kernel supporting inet-family NAT. GraphWAN owns
-a dedicated `inet graphwan_<agent-id>` table and replaces its rules atomically.
+**Linux:** install `nft` and use a kernel supporting inet-family NAT. GraphNet owns
+a dedicated `inet graphnet_<agent-id>` table and replaces its rules atomically.
 When iptables/ip6tables compatibility tools are installed, it also owns a hashed
 `GW...` filter chain and inserts a scoped FORWARD jump, allowing its gateway
 traffic through a default DROP policy. It removes only its own jump/chain. Other
@@ -123,12 +123,12 @@ that obtain their underlay route through RA may need administrator-managed
 
 **Windows:** PowerShell enables forwarding on the Wintun interface and the
 interfaces selected by existing external routes. Owned Windows Firewall rules
-use the group `GraphWAN-Gateway-<agent-id>`. If an external route changes to a
+use the group `GraphNet-Gateway-<agent-id>`. If an external route changes to a
 different interface, restart the Agent to prepare that interface. An existing
 route must be available when applying the configuration.
 
-**macOS:** system IPv4/IPv6 forwarding is enabled. GraphWAN loads only its
-`com.apple/graphwan_<agent-id>` child anchor; when PF is enabled, the standard
+**macOS:** system IPv4/IPv6 forwarding is enabled. GraphNet loads only its
+`com.apple/graphnet_<agent-id>` child anchor; when PF is enabled, the standard
 `com.apple/*` filter anchor must be present. It does not replace the root PF
 configuration or enable a disabled PF. PF policy changes made independently
 require reapplying the gateway configuration or restarting the Agent.

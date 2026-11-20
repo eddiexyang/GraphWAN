@@ -1,6 +1,6 @@
 # Service management
 
-GraphWAN includes system service management for both Agent and Server:
+GraphNet includes system service management for both Agent and Server:
 
 - Linux: systemd, OpenRC, or OpenWrt procd + rc.common, running as root.
 - Windows: native Service Control Manager integration, running as LocalSystem.
@@ -13,28 +13,28 @@ been verified in the current Linux development environment.
 
 ## Register, install and start an Agent
 
-Keep the GraphWAN executable in a permanent, administrator-controlled location.
+Keep the GraphNet executable in a permanent, administrator-controlled location.
 On Windows, Agent startup and service installation automatically download a
 verified, architecture-matching Wintun DLL if it is missing beside the executable
 (see [Windows setup](windows-operation.md), including offline installation).
 Installation records the executable's resolved absolute path; it does not copy
-the GraphWAN binary.
+the GraphNet binary.
 
 First enroll using an invitation from the management panel:
 
 ```sh
-sudo /usr/local/bin/graphwan agent enroll --invitation-file invitation.txt --data-dir /var/lib/graphwan-agent
-sudo /usr/local/bin/graphwan agent service install --data-dir /var/lib/graphwan-agent
-sudo /usr/local/bin/graphwan agent service start
+sudo /usr/local/bin/graphnet agent enroll --invitation-file invitation.txt --data-dir /var/lib/graphnet-agent
+sudo /usr/local/bin/graphnet agent service install --data-dir /var/lib/graphnet-agent
+sudo /usr/local/bin/graphnet agent service start
 ```
 
-On macOS, the same commands apply; `/var/db/graphwan-agent` is another suitable data
+On macOS, the same commands apply; `/var/db/graphnet-agent` is another suitable data
 directory. In an elevated Windows PowerShell, for example:
 
 ```powershell
-& 'C:\Program Files\GraphWAN\graphwan.exe' agent enroll --invitation-file invitation.txt --data-dir 'C:\ProgramData\GraphWAN\agent'
-& 'C:\Program Files\GraphWAN\graphwan.exe' agent service install --data-dir 'C:\ProgramData\GraphWAN\agent'
-& 'C:\Program Files\GraphWAN\graphwan.exe' agent service start
+& 'C:\Program Files\GraphNet\graphnet.exe' agent enroll --invitation-file invitation.txt --data-dir 'C:\ProgramData\GraphNet\agent'
+& 'C:\Program Files\GraphNet\graphnet.exe' agent service install --data-dir 'C:\ProgramData\GraphNet\agent'
+& 'C:\Program Files\GraphNet\graphnet.exe' agent service start
 ```
 
 Protect the Windows executable and data directory with ACLs allowing modification
@@ -42,7 +42,7 @@ only by administrators and SYSTEM. Unix permission bits do not enforce Windows
 ACLs. The installer preserves existing data and permissions.
 
 Use the same data directory for enrollment and installation. The default remains
-`./graphwan-agent-data`, resolved relative to the install command's working
+`./graphnet-agent-data`, resolved relative to the install command's working
 directory and saved as an absolute path. Installation requires an existing
 `agent.db`; it does not register an Agent or copy an enrollment token into the
 service definition. Complete enrollment successfully before installing.
@@ -54,11 +54,11 @@ that data directory before starting the service.
 ## Manage a service
 
 ```sh
-graphwan agent service status
-sudo graphwan agent service stop
-sudo graphwan agent service start
-sudo graphwan agent service restart
-sudo graphwan agent service uninstall
+graphnet agent service status
+sudo graphnet agent service stop
+sudo graphnet agent service start
+sudo graphnet agent service restart
+sudo graphnet agent service uninstall
 ```
 
 Uninstall stops the service and removes its service registration, retaining the
@@ -67,7 +67,7 @@ not remove the Agent from the controller.
 
 Use `--service-name NAME` on **every** service command to manage a nondefault
 instance. Each Agent instance needs its own enrolled data directory.
-The default service names are `graphwan-agent` and `graphwan-server`.
+The default service names are `graphnet-agent` and `graphnet-server`.
 Services created by these commands must be managed from an administrative context
 on macOS so launchctl operates on the system domain.
 
@@ -78,13 +78,13 @@ The internal `service run` command is the supervisor entry point.
 
 ## Server
 
-Initialize a Server first with the normal `graphwan server` command and
-`GRAPHWAN_ADMIN_PASSWORD`, then stop it and install the service using that data:
+Initialize a Server first with the normal `graphnet server` command and
+`GRAPHNET_ADMIN_PASSWORD`, then stop it and install the service using that data:
 
 ```sh
-sudo graphwan server service install --data-dir /var/lib/graphwan-server --listen '[::]:8443' --tls-hosts server.example.com
-sudo graphwan server service start
-graphwan server service status
+sudo graphnet server service install --data-dir /var/lib/graphnet-server --listen '[::]:8443' --tls-hosts server.example.com
+sudo graphnet server service start
+graphnet server service status
 ```
 
 The other actions are identical to Agent commands. Installation requires an
@@ -102,13 +102,13 @@ Both run as root and restart unexpected exits after three seconds.
 
 OpenRC requires `openrc-run`, `supervise-daemon`, `start-stop-daemon`,
 `rc-service` and `rc-update`. OpenWrt uses its native procd/ubus facilities.
-Normal service shutdown allows 30 seconds for GraphWAN to release resources.
+Normal service shutdown allows 30 seconds for GraphNet to release resources.
 Managed Agent and Server updates use a separate, non-respawning helper; the
 helper is not enabled at boot and removes its registration when finished.
 CLI commands and panel update/download-source options are unchanged.
 
 On OpenWrt, use a writable persistent location for both the executable and data,
-such as `/root/graphwan` and `/root/graphwan-agent-data`. Avoid `/tmp` and
+such as `/root/graphnet` and `/root/graphnet-agent-data`. Avoid `/tmp` and
 `/var` for persistent data; they normally reside in RAM. Allow enough free space
 for the staged binary, updater helper and previous-version backup. Agents need
 TUN support (usually `kmod-tun`) and any tools required by their configured
@@ -116,9 +116,9 @@ gateway modes. Installing the service does not change firewall rules.
 
 ## Logs, shutdown and upgrades
 
-On systemd, logs are available through `journalctl -u graphwan-agent` (or the Server
+On systemd, logs are available through `journalctl -u graphnet-agent` (or the Server
 service name). OpenRC writes `/var/log/NAME.log` and `/var/log/NAME.err`;
-OpenWrt forwards logs to logd (`logread -e graphwan`). macOS writes `/var/log/NAME.out.log` and
+OpenWrt forwards logs to logd (`logread -e graphnet`). macOS writes `/var/log/NAME.out.log` and
 `/var/log/NAME.err.log`. Windows sends structured log text to the Application
 event log under the service name.
 
@@ -138,7 +138,7 @@ are also rejected; ordinary spaces are supported.
 
 ## Managed Agent updates
 
-Agents running under the built-in `graphwan agent service` supervisor can be
+Agents running under the built-in `graphnet agent service` supervisor can be
 updated from **Agents → Update**. Check the latest stable GitHub Release, choose
 **Agent downloads from GitHub** or **Server downloads and caches**, then select
 **Update and restart**. The panel shows the current version, target version and
@@ -149,15 +149,15 @@ started with an updater-capable binary; installation need not be repeated.
 The equivalent administrative command is:
 
 ```sh
-sudo graphwan agent update --data-dir /var/lib/graphwan-agent --source github
-sudo graphwan agent update --data-dir /var/lib/graphwan-agent --source server
+sudo graphnet agent update --data-dir /var/lib/graphnet-agent --source github
+sudo graphnet agent update --data-dir /var/lib/graphnet-agent --source server
 ```
 
 These are alternatives. The command queues one update for the running service;
 it is picked up when the Agent is connected to a controller. Inspect the panel
 or `update-state.json` in the data directory for completion. The service name and
 executable path come from the service receipt, so custom names need no extra flag.
-Both methods use the latest stable release of `eWloYW8/GraphWAN`, selecting the
+Both methods use the latest stable release of `eddiexyang/graphnet`, selecting the
 Agent's OS and architecture. Prereleases are excluded. Installed release versions
 cannot be downgraded; development Git revisions may be explicitly replaced with
 a release. There is no automatic periodic installation.
@@ -196,8 +196,8 @@ Windows/macOS are cross-compiled; native service-update validation is pending.
 **Servers → Update** checks the latest stable GitHub Release for the selected
 Server's OS/architecture. **Download and restart** queues an explicit update;
 there is no scheduled or automatic upgrade. Like Agent updates, the Server must
-run under the built-in `graphwan server service` command. Foreground or manually
-written services running `graphwan server` do not enable the update button.
+run under the built-in `graphnet server service` command. Foreground or manually
+written services running `graphnet server` do not enable the update button.
 Existing built-in installations gain this capability after starting a binary
 that includes Server updates.
 

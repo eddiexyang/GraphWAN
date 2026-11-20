@@ -9,7 +9,7 @@ import (
 	"net/netip"
 	"regexp"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
@@ -28,7 +28,7 @@ func (c Config) Validate() error {
 	if !c.Address.IsValid() || c.Address.Addr().IsUnspecified() || c.Address.Addr().IsMulticast() || c.Address.Addr().Is4In6() || c.Address.Bits() == 0 {
 		return errors.New("invalid TUN virtual address")
 	}
-	if c.MTU < model.DefaultMTU || c.MTU > model.MaxMTU {
+	if c.MTU < model.MinMTU || c.MTU > model.MaxMTU {
 		return errors.New("invalid TUN MTU")
 	}
 	return nil
@@ -37,7 +37,7 @@ func (c Config) withName() Config {
 	if c.Name == "" {
 		var raw [6]byte
 		rand.Read(raw[:])
-		c.Name = "gw" + hex.EncodeToString(raw[:])
+		c.Name = "gn" + hex.EncodeToString(raw[:])
 	}
 	return c
 }

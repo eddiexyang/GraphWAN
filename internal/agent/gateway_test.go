@@ -6,8 +6,8 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/eWloYW8/GraphWAN/internal/forwarding"
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/forwarding"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 func icmpTo(src, dst netip.Addr) []byte {

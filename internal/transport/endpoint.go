@@ -6,7 +6,7 @@ import (
 	"net/netip"
 	"net/url"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
+	"github.com/eddiexyang/graphnet/internal/model"
 )
 
 // EndpointDialAddress pins a DNS answer at the socket layer. Callers must keep

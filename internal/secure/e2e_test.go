@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/testutil"
 )
 
 func e2eConfigs(t *testing.T) (E2EConfig, E2EConfig) {

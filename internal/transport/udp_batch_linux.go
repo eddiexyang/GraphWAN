@@ -37,7 +37,7 @@ type udpBatchSocket struct {
 }
 
 func newUDPBatchSocket(socket *net.UDPConn) *udpBatchSocket {
-	_ = setUDPReadBuffer(socket, 4<<20)
+	_ = setUDPReadBuffer(socket, udpReceiveBuffer)
 	_ = socket.SetWriteBuffer(udpSendBuffer)
 	b := &udpBatchSocket{conn: ipv6.NewPacketConn(socket)}
 	if raw, err := socket.SyscallConn(); err == nil {
@@ -49,10 +49,9 @@ func newUDPBatchSocket(socket *net.UDPConn) *udpBatchSocket {
 	return b
 }
 
-// The shared QUIC wrapper deliberately hides SyscallConn. Preserve the receive
-// buffer tuning quic-go normally performs on a raw UDP socket, without exposing
-// a read path that could bypass native/STUN dispatch. CAP_NET_ADMIN is already
-// used by native TUN agents; unprivileged sockets keep the ordinary capped size.
+// setUDPReadBuffer forces the receive buffer past the sysctl cap where it can:
+// CAP_NET_ADMIN is already used by native TUN agents; unprivileged sockets keep
+// the ordinary capped size.
 func setUDPReadBuffer(socket *net.UDPConn, size int) error {
 	if err := socket.SetReadBuffer(size); err != nil {
 		return err
@@ -74,12 +73,12 @@ type udpBatchSend struct {
 	buffers    [384][]byte
 	controls   [128][128]byte
 	starts     [128]int
-	header     [udpHeaderSize]byte
+	token      [udpTokenSize]byte
 	remote     *net.UDPAddr
 	disableGSO bool // A route/device can reject GSO even when the kernel supports it.
 }
 
-// prepare preserves every original datagram, including its token. Scatter/gather
+// prepare preserves every original datagram and appends its token. Scatter/gather
 // avoids concatenating payloads in userspace. GSO allows only equal-size segments
 // followed by at most one smaller final segment, at most 32 per super-packet.
 func (b *udpBatchSend) prepare(payloads, tails [][]byte, reply []byte, gso bool) []ipv6.Message {
@@ -92,11 +91,11 @@ func (b *udpBatchSend) prepare(payloads, tails [][]byte, reply []byte, gso bool)
 	count, used := 0, 0
 	for start := 0; start < len(payloads); {
 		end := start + 1
-		size := udpHeaderSize + length(start)
+		size := length(start) + udpTokenSize
 		total := size
 		if gso {
 			for end < len(payloads) && end-start < maxUDPGSOSegments {
-				next := udpHeaderSize + length(end)
+				next := length(end) + udpTokenSize
 				if next > size || total+next > maxUDPSuperPacket {
 					break
 				}
@@ -109,12 +108,14 @@ func (b *udpBatchSend) prepare(payloads, tails [][]byte, reply []byte, gso bool)
 		}
 		first := used
 		for i := start; i < end; i++ {
-			b.buffers[used], b.buffers[used+1] = b.header[:], payloads[i]
-			used += 2
+			b.buffers[used] = payloads[i]
+			used++
 			if tails != nil && len(tails[i]) > 0 {
 				b.buffers[used] = tails[i]
 				used++
 			}
+			b.buffers[used] = b.token[:]
+			used++
 		}
 		control := reply
 		if end-start > 1 {
@@ -160,7 +161,7 @@ func (d *Datagram) SendBatchParts(ctx context.Context, payloads, tails [][]byte)
 		if tails != nil {
 			size += len(tails[i])
 		}
-		if size == 0 || size > MaxMessage {
+		if len(raw) == 0 || raw[0] < udpFirstKind || size > MaxMessage {
 			return errors.New("invalid UDP message size")
 		}
 	}
@@ -174,8 +175,7 @@ func (d *Datagram) SendBatchParts(ctx context.Context, payloads, tails [][]byte)
 	defer h.writeMu.Unlock()
 	if d.batchSend == nil {
 		d.batchSend = &udpBatchSend{remote: net.UDPAddrFromAddrPort(d.key.remote)}
-		copy(d.batchSend.header[:4], udpMagic[:])
-		copy(d.batchSend.header[4:], d.key.token[:])
+		d.batchSend.token = d.key.token
 	}
 	b := d.batchSend
 	defer func() { clear(b.buffers[:]); clear(b.messages[:]) }()
@@ -231,7 +231,7 @@ type udpPacketReader struct {
 
 func newUDPPacketReader(socket *net.UDPConn) *udpPacketReader {
 	r := &udpPacketReader{conn: ipv6.NewPacketConn(socket)}
-	size := MaxMessage + udpHeaderSize + 1
+	size := MaxMessage + udpTokenSize + 1
 	if raw, err := socket.SyscallConn(); err == nil {
 		_ = raw.Control(func(fd uintptr) {
 			// Readback support excludes older kernels with incomplete UDP GRO support.

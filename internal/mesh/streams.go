@@ -3,9 +3,9 @@ package mesh
 import (
 	"context"
 
-	"github.com/eWloYW8/GraphWAN/internal/link"
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/streamproxy"
+	"github.com/eddiexyang/graphnet/internal/link"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/streamproxy"
 )
 
 type StreamHandler func(context.Context, model.ID, model.ID, streamproxy.Conn)
@@ -39,7 +39,7 @@ func (m *Mesh) streamsEnabled() bool {
 
 // Streams need ordered, reliable delivery from the Link's transport.
 func streamTransport(t model.Transport) bool {
-	return t == model.TCP || t == model.WS || t == model.WSS || t == model.GRPC
+	return t == model.TCP || t == model.QUIC
 }
 
 // StreamsAvailable reports whether the Edge to remote can carry a new stream.
@@ -76,7 +76,7 @@ func (g *group) tcpBacked() bool {
 }
 
 // PacketsOnly reports whether the Edge to remote has a selected Link that
-// carries no streams, such as UDP or QUIC: TCP crosses it only as packets.
+// carries no streams, such as UDP: TCP crosses it only as packets.
 func (m *Mesh) PacketsOnly(network, remote model.ID) bool {
 	m.mu.Lock()
 	g := m.groups[key{network, remote}]

@@ -1,6 +1,8 @@
 package secure
 
 import (
+	"crypto/hkdf"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"runtime"
@@ -8,8 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/packet"
+	"github.com/eddiexyang/graphnet/internal/packet"
 	"github.com/flynn/noise"
+	"golang.org/x/crypto/chacha20"
 )
 
 const (
@@ -20,7 +23,13 @@ const (
 	// Plaintext includes a message type and, for data, a complete overlay
 	// frame, which a sealed packet's envelope precedes with two more bytes.
 	MaxPlaintext = packet.MaxFrame + 3
-	Overhead     = 8 + 16
+	// Overhead is a message's nonce, its sequence in 4 bytes, and its tag.
+	Overhead = NonceSize + 16
+	// NonceSize is the bytes of a message's sequence on the wire; a session
+	// never reaches MaxMessages, so they hold all of it.
+	NonceSize = 4
+	// MaskSample is the bytes of ciphertext that key a header's mask.
+	MaskSample = 16
 )
 
 var ErrReplay = errors.New("replayed or stale encrypted packet")
@@ -36,6 +45,8 @@ type Session struct {
 	receiveMu   sync.Mutex
 	send        noise.Cipher
 	receive     noise.Cipher
+	maskSend    [32]byte
+	maskReceive [32]byte
 	sequence    uint64
 	highest     uint64
 	seen        [ReplayWindow]uint64
@@ -44,8 +55,27 @@ type Session struct {
 	batchNonces [128]uint64
 }
 
-func newSession(id string, binding []byte, send, receive noise.Cipher) *Session {
-	return &Session{id: id, binding: binding, sendAD: append(append([]byte{}, binding...), make([]byte, 8)...), receiveAD: append(append([]byte{}, binding...), make([]byte, 8)...), created: time.Now(), send: send, receive: receive}
+func newSession(id string, binding []byte, send, receive noise.Cipher, maskSend, maskReceive [32]byte) *Session {
+	return &Session{id: id, binding: binding, sendAD: append(append([]byte{}, binding...), make([]byte, NonceSize)...), receiveAD: append(append([]byte{}, binding...), make([]byte, NonceSize)...), created: time.Now(), send: send, receive: receive, maskSend: maskSend, maskReceive: maskReceive}
+}
+
+// maskKey derives a direction's header protection key from its cipher key.
+func maskKey(state *noise.CipherState) (key [32]byte) {
+	raw := state.UnsafeKey()
+	derived, _ := hkdf.Key(sha256.New, raw[:], nil, "GraphNet header protection v1", len(key))
+	copy(key[:], derived)
+	return key
+}
+
+// MaskSend hides header from everyone but the peer: it XORs header with a
+// keystream that sample, MaskSample bytes of the ciphertext sent with it,
+// selects. MaskReceive, given the same sample, reveals it again.
+func (s *Session) MaskSend(header, sample []byte)    { mask(&s.maskSend, header, sample) }
+func (s *Session) MaskReceive(header, sample []byte) { mask(&s.maskReceive, header, sample) }
+
+func mask(key *[32]byte, header, sample []byte) {
+	stream, _ := chacha20.NewUnauthenticatedCipher(key[:], sample[:chacha20.NonceSize])
+	stream.XORKeyStream(header, header)
 }
 func (s *Session) ID() string         { return s.id }
 func (s *Session) Created() time.Time { return s.created }
@@ -74,8 +104,7 @@ func (s *Session) SealAppend(dst, plaintext []byte) ([]byte, error) {
 	}
 	s.sequence++
 	offset := len(dst)
-	dst = append(dst, make([]byte, 8)...)
-	binary.BigEndian.PutUint64(dst[offset:], s.sequence)
+	dst = binary.BigEndian.AppendUint32(dst, uint32(s.sequence))
 	copy(s.sendAD[len(s.binding):], dst[offset:])
 	return s.send.Encrypt(dst, s.sequence, s.sendAD, plaintext), nil
 }
@@ -104,16 +133,14 @@ func (s *Session) SealBatchAppend(dst, plaintexts [][]byte) error {
 	s.sequence += uint64(len(plaintexts))
 	seal := func(worker, start, end int) {
 		if s.sealAD[worker] == nil {
-			s.sealAD[worker] = make([]byte, len(s.binding)+8)
+			s.sealAD[worker] = make([]byte, len(s.binding)+NonceSize)
 			copy(s.sealAD[worker], s.binding)
 		}
 		ad := s.sealAD[worker]
 		for i := start; i < end; i++ {
 			nonce := first + uint64(i)
-			offset := len(dst[i])
-			out := append(dst[i], make([]byte, 8)...)
-			binary.BigEndian.PutUint64(out[offset:], nonce)
-			binary.BigEndian.PutUint64(ad[len(s.binding):], nonce)
+			out := binary.BigEndian.AppendUint32(dst[i], uint32(nonce))
+			binary.BigEndian.PutUint32(ad[len(s.binding):], uint32(nonce))
 			dst[i] = s.send.Encrypt(out, nonce, ad, plaintexts[i])
 		}
 	}
@@ -232,7 +259,7 @@ func (s *Session) OpenInPlace(frame []byte) ([]byte, error) {
 	if len(frame) <= Overhead {
 		return nil, errors.New("invalid encrypted frame size")
 	}
-	return s.open(frame[8:8], frame)
+	return s.open(frame[NonceSize:NonceSize], frame)
 }
 func (s *Session) open(dst, frame []byte) ([]byte, error) {
 	if len(frame) <= Overhead || len(frame) > MaxPlaintext+Overhead {
@@ -241,8 +268,8 @@ func (s *Session) open(dst, frame []byte) ([]byte, error) {
 	if time.Since(s.created) >= MaxSessionAge {
 		return nil, ErrRekey
 	}
-	nonce := binary.BigEndian.Uint64(frame[:8])
-	if nonce == 0 || nonce >= MaxMessages {
+	nonce := uint64(binary.BigEndian.Uint32(frame[:NonceSize]))
+	if nonce == 0 {
 		return nil, ErrReplay
 	}
 	s.receiveMu.Lock()
@@ -250,8 +277,8 @@ func (s *Session) open(dst, frame []byte) ([]byte, error) {
 	if s.seen[nonce%ReplayWindow] == nonce || s.highest >= ReplayWindow && nonce <= s.highest-ReplayWindow {
 		return nil, ErrReplay
 	}
-	copy(s.receiveAD[len(s.binding):], frame[:8])
-	plaintext, err := s.receive.Decrypt(dst, nonce, s.receiveAD, frame[8:])
+	copy(s.receiveAD[len(s.binding):], frame[:NonceSize])
+	plaintext, err := s.receive.Decrypt(dst, nonce, s.receiveAD, frame[NonceSize:])
 	if err != nil {
 		return nil, err
 	}
@@ -286,9 +313,9 @@ func (s *Session) OpenBatchInPlace(frames [][]byte) []error {
 			errs[i] = errors.New("invalid encrypted frame size")
 			continue
 		}
-		nonce := binary.BigEndian.Uint64(frame[:8])
+		nonce := uint64(binary.BigEndian.Uint32(frame[:NonceSize]))
 		s.batchNonces[i] = nonce
-		if nonce == 0 || nonce >= MaxMessages || s.seen[nonce%ReplayWindow] == nonce || s.highest >= ReplayWindow && nonce <= s.highest-ReplayWindow {
+		if nonce == 0 || s.seen[nonce%ReplayWindow] == nonce || s.highest >= ReplayWindow && nonce <= s.highest-ReplayWindow {
 			errs[i] = ErrReplay
 			continue
 		}
@@ -296,7 +323,7 @@ func (s *Session) OpenBatchInPlace(frames [][]byte) []error {
 	}
 	decrypt := func(worker, start, end int) {
 		if s.batchAD[worker] == nil {
-			s.batchAD[worker] = make([]byte, len(s.binding)+8)
+			s.batchAD[worker] = make([]byte, len(s.binding)+NonceSize)
 			copy(s.batchAD[worker], s.binding)
 		}
 		ad := s.batchAD[worker]
@@ -305,8 +332,8 @@ func (s *Session) OpenBatchInPlace(frames [][]byte) []error {
 				continue
 			}
 			frame := frames[i]
-			copy(ad[len(s.binding):], frame[:8])
-			frames[i], errs[i] = s.receive.Decrypt(frame[8:8], s.batchNonces[i], ad, frame[8:])
+			copy(ad[len(s.binding):], frame[:NonceSize])
+			frames[i], errs[i] = s.receive.Decrypt(frame[NonceSize:NonceSize], s.batchNonces[i], ad, frame[NonceSize:])
 		}
 	}
 	// ARM64 currently uses the generic Poly1305 path. Smaller batches there

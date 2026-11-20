@@ -4,53 +4,17 @@ import (
 	"bufio"
 	"context"
 	"crypto/ed25519"
-	"crypto/tls"
 	"net"
-	"net/http"
-	"net/url"
 	"sync"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/transport"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/transport"
 )
-
-// connIngress receives already-classified connections from the main
-// TCP listener. It has no independently bound port or unbounded accept queue.
-type connIngress struct {
-	address net.Addr
-	pending chan net.Conn
-	done    chan struct{}
-	once    sync.Once
-}
-
-func (l *connIngress) Addr() net.Addr { return l.address }
-func (l *connIngress) Close() error   { l.once.Do(func() { close(l.done) }); return nil }
-func (l *connIngress) Accept() (net.Conn, error) {
-	select {
-	case <-l.done:
-		return nil, net.ErrClosed
-	case conn := <-l.pending:
-		return conn, nil
-	}
-}
 
 type bufferedConn struct {
 	net.Conn
 	reader *bufio.Reader
-}
-
-// Release an admission slot exactly once. HTTP/1 holds a classifier slot until
-// request headers finish; HTTP/2 holds a separate slot until authentication or close.
-type ingressConn struct {
-	net.Conn
-	release func()
-}
-
-func (c *ingressConn) Close() error {
-	err := c.Conn.Close()
-	c.release()
-	return err
 }
 
 func (c *bufferedConn) Read(raw []byte) (int, error) { return c.reader.Read(raw) }
@@ -70,18 +34,6 @@ func (c *bufferedConn) WriteBuffers(parts net.Buffers) (int64, error) {
 	return parts.WriteTo(c.Conn)
 }
 
-func (m *Mesh) startHTTP() {
-	m.webListener = &connIngress{address: m.listener.Addr(), pending: make(chan net.Conn), done: make(chan struct{})}
-	m.webServer = &http.Server{Handler: http.HandlerFunc(m.acceptWebSocket), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 10 * time.Second, MaxHeaderBytes: 8192}
-	m.webServer.SetKeepAlivesEnabled(false)
-	m.webServer.ConnState = func(conn net.Conn, state http.ConnState) {
-		if state == http.StateActive || state == http.StateClosed || state == http.StateHijacked {
-			conn.(*ingressConn).release()
-		}
-	}
-	m.wg.Add(1)
-	go func() { defer m.wg.Done(); m.webServer.Serve(m.webListener) }()
-}
 func (m *Mesh) classify(conn net.Conn) {
 	m.mu.Lock()
 	if m.closed {
@@ -123,7 +75,7 @@ func (m *Mesh) classify(conn net.Conn) {
 		var current net.Conn = &bufferedConn{Conn: conn, reader: reader}
 		switch first[0] {
 		case 'H': // Mutually authenticated, multiplexed TCP hole-punch session.
-			session, err := transport.NewPunchMux(ctx, current, m.identity.Public().(ed25519.PublicKey), m.tls, m.allowsTCPPunch)
+			session, err := transport.NewPunchMux(ctx, current, m.identity.Public().(ed25519.PublicKey), m.tls, m.allowsTCPPunch, true)
 			if err != nil {
 				return
 			}
@@ -137,7 +89,7 @@ func (m *Mesh) classify(conn net.Conn) {
 			} else {
 				session.Close()
 			}
-		case 0: // A length-framed GraphWAN message is bounded to 16 KiB.
+		case 0: // A length-framed GraphNet message is bounded to 16 KiB.
 			conn.SetReadDeadline(time.Time{})
 			if !stop() {
 				return
@@ -145,72 +97,6 @@ func (m *Mesh) classify(conn net.Conn) {
 			transferred = true
 			release()
 			m.accept(transport.NewStream(current), model.TCP)
-		case 22: // TLS handshake record; ALPN distinguishes HTTP/2 from HTTP/1.1.
-			secured := tls.Server(current, m.tls)
-			if err := secured.HandshakeContext(ctx); err != nil {
-				return
-			}
-			current = secured
-			if secured.ConnectionState().NegotiatedProtocol == "h2" {
-				if !stop() {
-					return
-				}
-				transferred = m.handoffGRPC(ctx, current)
-				if transferred {
-					release()
-				}
-				return
-			}
-			fallthrough
-		case 'G':
-			conn.SetReadDeadline(time.Time{})
-			// Stop the classifier's cancellation callback before transferring ownership
-			// to net/http; m.Close also closes net/http's tracked connections.
-			if !stop() {
-				return
-			}
-			select {
-			case m.webListener.pending <- &ingressConn{Conn: current, release: release}:
-				transferred = true
-			case <-ctx.Done():
-			case <-m.webListener.done:
-			}
-		case 'P': // HTTP/2 prior knowledge from an explicit TLS-terminating proxy.
-			if !stop() {
-				return
-			}
-			transferred = m.handoffGRPC(ctx, current)
-			if transferred {
-				release()
-			}
 		}
 	}()
-}
-
-func (m *Mesh) allowsEndpoint(kind model.Transport, path string) bool {
-	allowed := false
-	m.mu.Lock()
-	if !m.closed {
-		for _, g := range m.groups {
-			for _, endpoint := range g.policy.Load().endpoints {
-				if endpoint.Source != model.Manual || endpoint.Transport != kind {
-					continue
-				}
-				parsed, _ := url.Parse(endpoint.URL)
-				actual := transport.WebSocketPath(parsed)
-				if kind == model.GRPC {
-					actual = transport.GRPCMethod(parsed)
-				}
-				if actual == path {
-					allowed = true
-					break
-				}
-			}
-			if allowed {
-				break
-			}
-		}
-	}
-	m.mu.Unlock()
-	return allowed
 }

@@ -8,11 +8,11 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/eWloYW8/GraphWAN/internal/model"
-	"github.com/eWloYW8/GraphWAN/internal/testutil"
+	"github.com/eddiexyang/graphnet/internal/model"
+	"github.com/eddiexyang/graphnet/internal/testutil"
 )
 
-func configs(t *testing.T) (Config, Config) {
+func configs(t testing.TB) (Config, Config) {
 	t.Helper()
 	apub, akey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -30,7 +30,7 @@ func configs(t *testing.T) (Config, Config) {
 	b.Initiator = false
 	return a, b
 }
-func establish(t *testing.T, a, b Config) (*Session, *Session) {
+func establish(t testing.TB, a, b Config) (*Session, *Session) {
 	t.Helper()
 	initiator, err := NewHandshake(a)
 	if err != nil {

@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-const RoutingSubprotocol = "graphwan.control.routes.v1"
+const RoutingSubprotocol = "graphnet.control.routes.v1"
 
 // RouteUpdate replaces only forwarding tables for one immutable configuration.
 // Peer admission and dialing remain enabled even when all routes are withdrawn.

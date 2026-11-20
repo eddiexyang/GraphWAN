@@ -147,7 +147,7 @@ func Open(config Config) (_ Device, resultError error) {
 	// Only a few /dev/tunN nodes exist by default. Create a private device node
 	// for the atomically allocated unit; /tmp can be mounted nodev. Remove the
 	// node and private directory after opening, without touching /dev/tunN.
-	directory := filepath.Join("/dev", "graphwan-"+lease.token)
+	directory := filepath.Join("/dev", "graphnet-"+lease.token)
 	if err := os.Mkdir(directory, 0700); err != nil {
 		return nil, err
 	}

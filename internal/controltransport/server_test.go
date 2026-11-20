@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eWloYW8/GraphWAN/internal/controltransport"
+	"github.com/eddiexyang/graphnet/internal/controltransport"
 )
 
 func TestPlainHTTPStaticAssets(t *testing.T) {
