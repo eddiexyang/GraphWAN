@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -184,16 +183,16 @@ func snapshotFrom(b *bolt.Bucket, key string) (*model.Snapshot, error) {
 	if len(raw) > maxSnapshotBytes {
 		return nil, errors.New("cached snapshot too large")
 	}
-	var snapshot model.Snapshot
-	if err := json.Unmarshal(raw, &snapshot); err != nil {
-		return nil, err
-	}
 	var reg Registration
 	if err := json.Unmarshal(b.Get([]byte("registration")), &reg); err != nil {
 		return nil, err
 	}
-	if err := snapshot.Validate(reg.AgentID); err != nil {
-		return nil, fmt.Errorf("cached %s: %w", key, err)
+	// A snapshot another version cached that this one cannot read is not
+	// restored: the Agent starts without it and the controller sends a
+	// current one.
+	var snapshot model.Snapshot
+	if json.Unmarshal(raw, &snapshot) != nil || snapshot.Validate(reg.AgentID) != nil {
+		return nil, nil
 	}
 	return &snapshot, nil
 }
