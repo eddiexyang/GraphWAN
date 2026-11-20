@@ -72,6 +72,8 @@ func (e *Edge) Add(link *Link) {
 		link.setActive(false)
 	}
 	e.links[link.ID()] = link
+	keep := func() bool { return e.keepOnFailure(link) }
+	link.keep.Store(&keep)
 	if e.selection != nil {
 		// Propose a new Link as soon as it is healthy, not on the next Tick.
 		up := e.Tick
@@ -81,6 +83,19 @@ func (e *Edge) Add(link *Link) {
 		}
 	}
 }
+
+// keepOnFailure keeps the selected Link until another Link has taken over.
+// During coordinated selection, either endpoint may still need the old
+// channel until the switch has been confirmed.
+func (e *Edge) keepOnFailure(l *Link) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.links[l.ID()] != l {
+		return false
+	}
+	return e.active == l.ID() || e.selection != nil && !e.selection.confirmed && l.Held()
+}
+
 func (e *Edge) Remove(id string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -132,7 +147,7 @@ func (e *Edge) sendLinkLocked() *Link {
 	selected := e.links[e.active]
 	if e.selection == nil {
 		selected = e.selectLocked(time.Now())
-	} else if selected != nil && !selected.healthy() {
+	} else if selected != nil && !selected.usable() {
 		selected = nil
 	}
 	return selected
@@ -142,13 +157,13 @@ func (e *Edge) sendLinkLocked() *Link {
 // not, without taking the Edge lock.
 func (e *Edge) ActiveTCPBacked() bool { return e.activeTCP.Load() }
 
-// Active returns the selected Link while it is healthy, or nil. Both ends of
-// a coordinated Edge select the same Link.
+// Active returns the selected Link while it is healthy or held as the Edge's
+// last path, or nil. Both ends of a coordinated Edge select the same Link.
 func (e *Edge) Active() *Link {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	l := e.links[e.active]
-	if l == nil || !l.healthy() {
+	if l == nil || !l.usable() {
 		return nil
 	}
 	return l
@@ -168,7 +183,7 @@ func (e *Edge) Report() []model.LinkStatus {
 	result := make([]model.LinkStatus, 0, len(e.links))
 	for _, link := range e.links {
 		stats := link.Stats()
-		stats.Active = link == active && stats.Healthy
+		stats.Active = link == active && (stats.Healthy || stats.Unhealthy)
 		result = append(result, stats)
 	}
 	slices.SortFunc(result, func(a, b model.LinkStatus) int { return cmp.Compare(a.LinkID, b.LinkID) })
@@ -178,12 +193,18 @@ func (e *Edge) selectLocked(now time.Time) *Link {
 	if e.selection != nil {
 		e.advanceLocked(now)
 		active := e.links[e.active]
-		if active != nil && active.healthy() {
+		if active != nil && active.usable() {
 			return active
 		}
 		return nil
 	}
 	selected := e.bestLocked(now)
+	if selected == nil {
+		// Nothing healthy: stay on a held Link rather than drop traffic.
+		if active := e.links[e.active]; active != nil && active.usable() {
+			return active
+		}
+	}
 	e.activateLocked(selected, now)
 	return selected
 }

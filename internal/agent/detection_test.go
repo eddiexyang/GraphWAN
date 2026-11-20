@@ -30,7 +30,27 @@ func failover(t *testing.T, detection uint32, limit time.Duration) (time.Duratio
 		s.Networks[0].FailureDetection = detection
 	})
 	b, d := state.Networks[0].Nodes[1].ID, state.Networks[0].Nodes[3].ID
-	waitFor(t, 10*time.Second, "a route to C through B", func() bool { return nextHopToC(agents[0], state) == b })
+	ab := state.Networks[0].Edges[0].ID
+	bc := state.Networks[0].Edges[1].ID
+	// The initial compiled route can point at B before link-state has heard
+	// from the endpoints. Inject the failure only after the path converges.
+	waitFor(t, 10*time.Second, "a converged route to C through B", func() bool {
+		if nextHopToC(agents[0], state) != b {
+			return false
+		}
+		view := agents[0].LinkState()
+		if len(view.Networks) != 1 {
+			return false
+		}
+		var abUp, bcUp bool
+		for _, edge := range view.Networks[0].Edges {
+			if edge.ReportA == "up" && edge.ReportB == "up" {
+				abUp = abUp || edge.ID == ab
+				bcUp = bcUp || edge.ID == bc
+			}
+		}
+		return abUp && bcUp
+	})
 	start := time.Now()
 	agents[1].Close()
 	for time.Since(start) < limit {

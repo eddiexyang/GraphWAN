@@ -42,6 +42,9 @@ type LSA struct {
 	Revision uint64     `json:"revision"`
 	Sequence uint64     `json:"sequence"`
 	Up       []model.ID `json:"up"`
+	// Fallback lists unhealthy edges: usable only to reach destinations that
+	// no Up edge reaches. Agents without it read them as down.
+	Fallback []model.ID `json:"fallback,omitempty"`
 	Sync     bool       `json:"sync,omitempty"`
 	AgeMS    int64      `json:"age_ms,omitempty"`
 }
@@ -49,27 +52,31 @@ type LSA struct {
 // Callbacks connect the engine to an Agent. Send is best effort: periodic
 // refresh repairs a lost advertisement.
 type Callbacks struct {
-	Send  func(network, peer model.ID, raw []byte)
-	Local func() map[model.ID]map[model.ID]bool // network -> edge -> usable here
+	Send func(network, peer model.ID, raw []byte)
+	// Local returns up and fallback edges from the same observation.
+	Local func() (up, fallback map[model.ID]map[model.ID]bool) // network -> edge
 	Apply func(model.RouteUpdate) error
 	Now   func() time.Time
 }
 
 type entry struct {
-	lsa     LSA
-	up      map[model.ID]bool
-	arrived time.Time
+	lsa      LSA
+	up       map[model.ID]bool
+	fallback map[model.ID]bool
+	arrived  time.Time
 }
 
 type network struct {
 	config      model.NetworkConfig
 	neighbors   map[model.ID]bool // peer node IDs
 	local       map[model.ID]bool
+	fallback    map[model.ID]bool
 	db          map[model.ID]entry
 	sequence    uint64
 	sent        time.Time
 	dirty       bool // local state changed since the last origination
 	lastUp      []model.ID
+	lastFall    []model.ID
 	self        *LSA
 	syncReady   bool
 	syncSent    time.Time
@@ -134,7 +141,7 @@ func (e *Engine) Configure(s model.Snapshot) *model.RouteUpdate {
 	for _, c := range clone.Networks {
 		n := e.networks[c.ID]
 		if n == nil {
-			n = &network{db: map[model.ID]entry{}, local: map[model.ID]bool{}, dirty: true}
+			n = &network{db: map[model.ID]entry{}, local: map[model.ID]bool{}, fallback: map[model.ID]bool{}, dirty: true}
 		}
 		neighbors := map[model.ID]bool{}
 		for _, p := range c.Peers {
@@ -247,10 +254,16 @@ func (e *Engine) Receive(networkID, peer model.ID, raw []byte) error {
 	for _, id := range lsa.Up {
 		up[id] = true
 	}
-	if old, ok := n.db[lsa.Origin]; !ok || !slices.Equal(old.lsa.Up, lsa.Up) {
+	fallback := map[model.ID]bool{}
+	for _, id := range lsa.Fallback {
+		if !up[id] {
+			fallback[id] = true
+		}
+	}
+	if old, ok := n.db[lsa.Origin]; !ok || !slices.Equal(old.lsa.Up, lsa.Up) || !slices.Equal(old.lsa.Fallback, lsa.Fallback) {
 		e.eventLocked("received", networkID, lsa.Origin, "", lsa.Sequence)
 	}
-	n.db[lsa.Origin] = entry{lsa: lsa, up: up, arrived: e.cb.Now().Add(-time.Duration(lsa.AgeMS) * time.Millisecond)}
+	n.db[lsa.Origin] = entry{lsa: lsa, up: up, fallback: fallback, arrived: e.cb.Now().Add(-time.Duration(lsa.AgeMS) * time.Millisecond)}
 	e.scheduleSPFLocked()
 	targets := n.floodTargets(peer)
 	e.mu.Unlock()
@@ -313,7 +326,7 @@ func (e *Engine) Run(ctx context.Context) {
 
 // Step performs one round of the engine's periodic work.
 func (e *Engine) Step() {
-	local := e.cb.Local()
+	local, fallback := e.cb.Local()
 	now := e.cb.Now()
 	type send struct {
 		network model.ID
@@ -326,19 +339,27 @@ func (e *Engine) Step() {
 	e.mu.Lock()
 	e.observed = true
 	for id, n := range e.networks {
-		if !maps(n.local, local[id]) {
+		if !maps(n.local, local[id]) || !maps(n.fallback, fallback[id]) {
 			lost := false
+			level := func(up, fall map[model.ID]bool, edge model.ID) int {
+				switch {
+				case up[edge]:
+					return 2
+				case fall[edge]:
+					return 1
+				}
+				return 0
+			}
 			for _, edge := range n.config.Topology {
-				if was, is := n.local[edge.ID], local[id][edge.ID]; was != is {
-					kind := "edge-down"
-					if is {
-						kind = "edge-up"
-					}
-					lost = lost || was
+				was, is := level(n.local, n.fallback, edge.ID), level(local[id], fallback[id], edge.ID)
+				if was != is {
+					kind := [...]string{"edge-down", "edge-fallback", "edge-up"}[is]
+					lost = lost || is < was
 					e.eventLocked(kind, id, "", edge.ID, 0)
 				}
 			}
 			n.local = copyMap(local[id])
+			n.fallback = copyMap(fallback[id])
 			n.dirty = true
 			// A failed edge of this Agent moves its routes in this step. A new
 			// one waits SPFDelay for the neighbour's database, so routes are
@@ -369,9 +390,9 @@ func (e *Engine) Step() {
 			if raw, err := json.Marshal(lsa); err == nil {
 				sends = append(sends, send{id, n.floodTargets(""), raw, false})
 			}
-			if !slices.Equal(n.lastUp, lsa.Up) {
+			if !slices.Equal(n.lastUp, lsa.Up) || !slices.Equal(n.lastFall, lsa.Fallback) {
 				e.eventLocked("originated", id, lsa.Origin, "", lsa.Sequence)
-				n.lastUp = lsa.Up
+				n.lastUp, n.lastFall = lsa.Up, lsa.Fallback
 			}
 			e.scheduleSPFLocked()
 		}
@@ -418,7 +439,14 @@ func (n *network) originate(revision uint64, now time.Time) LSA {
 		}
 	}
 	slices.Sort(up)
-	lsa := LSA{Network: n.config.ID, Origin: n.config.Self.ID, Revision: revision, Sequence: n.sequence, Up: up, Sync: true}
+	var fallback []model.ID
+	for id, ok := range n.fallback {
+		if ok && !n.local[id] {
+			fallback = append(fallback, id)
+		}
+	}
+	slices.Sort(fallback)
+	lsa := LSA{Network: n.config.ID, Origin: n.config.Self.ID, Revision: revision, Sequence: n.sequence, Up: up, Fallback: fallback, Sync: true}
 	n.self = &lsa
 	return lsa
 }
@@ -437,7 +465,7 @@ func (e *Engine) spfLocked() *model.RouteUpdate {
 	update := model.RouteUpdate{Revision: e.snapshot.Revision, Networks: []model.NetworkRoutes{}}
 	for _, c := range e.snapshot.Networks {
 		n := e.networks[c.ID]
-		update.Networks = append(update.Networks, model.NetworkRoutes{ID: c.ID, Routes: routing.LocalRoutes(c, n.usable)})
+		update.Networks = append(update.Networks, model.NetworkRoutes{ID: c.ID, Routes: routing.LocalRoutesFallback(c, n.usable, n.fallbackUsable)})
 	}
 	if update.Hash() == e.applied {
 		return nil
@@ -445,29 +473,25 @@ func (e *Engine) spfLocked() *model.RouteUpdate {
 	return &update
 }
 
-// usable applies the two-way check. An endpoint that has not advertised
-// (an Agent without link-state, or a WireGuard leaf) defers to the other end;
-// with no report from either end the edge keeps its configured state.
 func (n *network) usable(edge model.TopologyEdge) bool {
-	report := func(node model.ID) (known, up bool) {
+	return n.edgeUsable(edge, false)
+}
+
+func (n *network) fallbackUsable(edge model.TopologyEdge) bool {
+	return n.edgeUsable(edge, true)
+}
+
+// An endpoint that has not advertised defers to the other end. With no
+// report from either end, the edge keeps its configured state.
+func (n *network) edgeUsable(edge model.TopologyEdge, allowFallback bool) bool {
+	permits := func(node model.ID) bool {
 		if node == n.config.Self.ID {
-			return true, n.local[edge.ID]
+			return n.local[edge.ID] || allowFallback && n.fallback[edge.ID]
 		}
 		en, ok := n.db[node]
-		return ok, ok && en.up[edge.ID]
+		return !ok || en.up[edge.ID] || allowFallback && en.fallback[edge.ID]
 	}
-	aKnown, aUp := report(edge.A)
-	bKnown, bUp := report(edge.B)
-	switch {
-	case aKnown && bKnown:
-		return aUp && bUp
-	case aKnown:
-		return aUp
-	case bKnown:
-		return bUp
-	default:
-		return true
-	}
+	return permits(edge.A) && permits(edge.B)
 }
 
 func maps(a, b map[model.ID]bool) bool {

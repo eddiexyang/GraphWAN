@@ -10,7 +10,7 @@ import (
 type LinkStateHandler struct {
 	Ready   func(network, peer model.ID)
 	Receive func(network, peer model.ID, raw []byte)
-	// LinkFailed is called when any Link stops; it must not block.
+	// LinkFailed is called when a Link turns unhealthy or stops; it must not block.
 	LinkFailed func()
 }
 
@@ -49,8 +49,8 @@ func (g *group) ReceiveLinkState(_ *link.Link, raw []byte) {
 	}
 }
 
-// SendLinkState queues an advertisement on the healthiest Link to peer that
-// carries them. It reports false when none does.
+// SendLinkState queues an advertisement on the peer's best healthy Link or
+// its selected unhealthy Link. It reports false when neither carries LSAs.
 func (m *Mesh) SendLinkState(network, peer model.ID, raw []byte) bool {
 	m.mu.Lock()
 	g := m.groups[key{network, peer}]
@@ -66,6 +66,11 @@ func (m *Mesh) SendLinkState(network, peer model.ID, raw []byte) bool {
 		}
 		if best == nil || l.Stats().RTTMillis < best.Stats().RTTMillis {
 			best = l
+		}
+	}
+	if best == nil {
+		if active := g.edge.Active(); active != nil && active.LinkStateReady() {
+			best = active
 		}
 	}
 	g.mu.Unlock()

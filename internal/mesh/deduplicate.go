@@ -23,7 +23,8 @@ func (g *group) candidateConnectedLocked(candidate string) bool {
 			continue
 		default:
 		}
-		if l.Info().CandidateID == candidate && !l.RenewalDue() {
+		// A held Link is a last resort; keep dialing for a healthy one.
+		if l.Info().CandidateID == candidate && !l.RenewalDue() && !l.Held() {
 			return true
 		}
 	}

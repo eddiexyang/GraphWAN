@@ -130,8 +130,8 @@ type Options struct {
 	// answered; see sizeprobe.go. SizeProbeHello is set by the accepting side.
 	SizeProbe      bool
 	SizeProbeHello bool
-	// Failed is called after the Link stopped, so routes leave it without
-	// waiting to poll it. It must not block.
+	// Failed is called when the Link turns unhealthy or stops so routing can react
+	// without waiting for its next poll. It must not block.
 	Failed func()
 }
 
@@ -197,8 +197,12 @@ type Link struct {
 	loggedActive atomic.Bool
 	// loggedUp records that "link up" was logged: the Link became healthy.
 	// up, set by its Edge, then runs once.
-	loggedUp     atomic.Bool
-	up           atomic.Pointer[func()]
+	loggedUp atomic.Bool
+	up       atomic.Pointer[func()]
+	// keep, set by its Edge, lets a selected Link keep probing and carrying
+	// traffic after missed health checks until a replacement takes over.
+	keep         atomic.Pointer[func() bool]
+	held         bool
 	control      chan []byte
 	packets      chan []byte
 	ownedPackets *packetbuf.Queue
@@ -659,7 +663,35 @@ func (l *Link) timeoutLocked() time.Duration {
 	return max(l.options.Timeout, 2*l.rtt+tcpRTOMin+l.options.Heartbeat)
 }
 
+// Held reports a Link kept open after failing so it can still carry traffic.
+func (l *Link) Held() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.held && l.ctx.Err() == nil
+}
+
+// usable reports a Link that may carry traffic: healthy, or held as the
+// Edge's last path.
+func (l *Link) usable() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.healthyLocked(time.Now()) || l.unhealthyLocked()
+}
+
+func (l *Link) unhealthyLocked() bool {
+	// Keep the selected Link available between its deadline and the health
+	// worker recording the failure, too.
+	return l.ctx.Err() == nil && (l.held || l.keep.Load() != nil && l.loggedUp.Load() && l.loggedActive.Load())
+}
+
 func (l *Link) healthyLocked(now time.Time) bool {
+	if l.held || l.sizeFailed {
+		return false
+	}
+	return l.aliveLocked(now)
+}
+
+func (l *Link) aliveLocked(now time.Time) bool {
 	if l.ctx.Err() != nil || l.unverified {
 		return false
 	}
@@ -681,7 +713,7 @@ func (l *Link) Stats() model.LinkStatus {
 	if channel, ok := l.channel.(interface{ LocalAddr() net.Addr }); ok && channel.LocalAddr() != nil {
 		local = channel.LocalAddr().String()
 	}
-	return model.LinkStatus{NetworkID: l.info.NetworkID, EdgeID: l.info.EdgeID, LinkID: l.ID(), CandidateID: l.info.CandidateID, Transport: l.info.Transport, Local: local, ObservedLocal: l.observedLocal, Remote: l.channel.RemoteAddr().String(), Healthy: healthy, RTTMillis: float64(l.rtt) / float64(time.Millisecond), Loss: loss, RXBytes: l.rx.Load(), TXBytes: l.tx.Load(), Dropped: l.dropped.Load(), TCPPackets: l.tcpPackets.Load()}
+	return model.LinkStatus{NetworkID: l.info.NetworkID, EdgeID: l.info.EdgeID, LinkID: l.ID(), CandidateID: l.info.CandidateID, Transport: l.info.Transport, Local: local, ObservedLocal: l.observedLocal, Remote: l.channel.RemoteAddr().String(), Healthy: healthy, Unhealthy: !healthy && l.unhealthyLocked(), RTTMillis: float64(l.rtt) / float64(time.Millisecond), Loss: loss, RXBytes: l.rx.Load(), TXBytes: l.tx.Load(), Dropped: l.dropped.Load(), TCPPackets: l.tcpPackets.Load()}
 }
 func (l *Link) readLoop() {
 	owned, owning := l.channel.(interface {
@@ -1058,9 +1090,8 @@ func (l *Link) pullStreams(dst [][]byte, owners []*packetbuf.Buffer) int {
 	return count
 }
 
-// healthLoop also wakes at the health deadline, so a Link closes as soon as it
-// stops being healthy. Waiting for the next heartbeat let a late reply revive a
-// Link that selection had already dropped.
+// healthLoop also wakes at the health deadline so a missed probe is reflected
+// in selection without waiting for the next heartbeat.
 func (l *Link) healthLoop() {
 	defer l.wg.Done()
 	defer l.failed()
@@ -1071,7 +1102,14 @@ func (l *Link) healthLoop() {
 	defer timer.Stop()
 	for {
 		if !l.heartbeat(now) {
-			l.logDown(l.failureReason())
+			if !l.hold() {
+				l.logDown(l.failureReason())
+				return
+			}
+			// Routes move off a held Link when anything else reaches the peer.
+			l.failed()
+		} else if l.Held() && !l.keepOnFailure() {
+			l.logDown("replaced")
 			return
 		}
 		if l.channel.NeedsRekey() {
@@ -1105,6 +1143,9 @@ func (l *Link) healthLoop() {
 // zero when no response is awaited.
 func (l *Link) deadlineLocked() time.Time {
 	var deadline time.Time
+	if l.held {
+		return deadline
+	}
 	earliest := func(t time.Time) {
 		if deadline.IsZero() || t.Before(deadline) {
 			deadline = t
@@ -1152,12 +1193,19 @@ func (l *Link) receivePing(nonce, confirmed uint64, now time.Time) bool {
 		l.confirmed, l.peerHeard = confirmed, now
 	}
 	first := l.options.Accepted && l.peerPing.IsZero() && !l.unverified
+	recovered := false
 	if l.options.Accepted {
 		l.peerPing = now
+		// Both directions work again: the peer's pings arrive and confirm
+		// this side's pongs.
+		recovered = l.recoverLocked(now)
 	}
 	l.mu.Unlock()
 	if first {
 		l.logUp()
+	}
+	if recovered {
+		slog.Info("link recovered", l.logAttrs()...)
 	}
 	return true
 }
@@ -1179,7 +1227,11 @@ func (l *Link) recordPong(nonce uint64, now time.Time) {
 	}
 	l.lastPong, l.probeSince = now, time.Time{}
 	delete(l.pending, nonce)
+	recovered := l.recoverLocked(now)
 	l.mu.Unlock()
+	if recovered {
+		slog.Info("link recovered", l.logAttrs("rtt_ms", sample.Milliseconds())...)
+	}
 	// Log outside the lock so probing and selection are not delayed.
 	if first {
 		l.logUp("rtt_ms", sample.Milliseconds())
@@ -1220,6 +1272,42 @@ func (l *Link) recentlyActive(now time.Time) bool {
 	return !l.lastTraffic.IsZero() && now.Sub(l.lastTraffic) < 5*time.Second
 }
 
+func (l *Link) keepOnFailure() bool {
+	keep := l.keep.Load()
+	return keep != nil && (*keep)()
+}
+
+// hold keeps a failed Link open while its Edge needs the channel for forwarding.
+func (l *Link) hold() bool {
+	if !l.loggedUp.Load() || l.ctx.Err() != nil || !l.keepOnFailure() {
+		return false
+	}
+	l.mu.Lock()
+	reason := "timeout"
+	if l.sizeFailed {
+		reason = "probe"
+	}
+	l.held = true
+	if l.sizeFailed {
+		l.sizeSent = time.Time{} // retry the full-size probe
+	}
+	l.mu.Unlock()
+	slog.Info("link unhealthy", l.logAttrs("reason", reason)...)
+	return true
+}
+
+// recoverLocked clears held once liveness and any failed size probe recover.
+func (l *Link) recoverLocked(now time.Time) bool {
+	if !l.held || l.sizeFailed || !l.aliveLocked(now) {
+		return false
+	}
+	if !l.probeSince.IsZero() && now.Sub(l.movedLocked(l.probeSince)) >= l.timeoutLocked() {
+		return false
+	}
+	l.held = false
+	return true
+}
+
 // Only the health worker calls heartbeat. Sampling existing user-byte counters
 // avoids adding clocks or synchronization to the packet forwarding hot path.
 func (l *Link) heartbeat(now time.Time) bool {
@@ -1236,24 +1324,36 @@ func (l *Link) heartbeat(now time.Time) bool {
 			l.lost++
 		}
 	}
-	if !l.probeSince.IsZero() && now.Sub(l.movedLocked(l.probeSince)) >= timeout {
-		return false
-	}
-	if !l.sizeProbeLocked(now) {
-		return false
-	}
 	interval := l.options.Heartbeat
 	if l.options.Accepted {
-		heard := l.started
-		if l.peerPing.After(heard) {
-			heard = l.peerPing
+		interval = acceptedProbe
+	}
+	if l.held {
+		// Keep probing without deadlines; an unanswered size probe is
+		// resent rather than failing the Link again.
+		if l.sizeMode == sizeProbeOn && !l.sizeSent.IsZero() && now.Sub(l.movedLocked(l.sizeSent)) >= timeout {
+			l.sizeFailed = true
+			l.sizeSent = time.Time{}
 		}
-		// Both directions must work: the dialer's pings arrive, and they
-		// confirm that this side's pongs arrive too.
-		if now.Sub(l.movedLocked(heard)) >= timeout || now.Sub(l.movedLocked(l.heardLocked())) >= timeout {
+		l.sizeProbeLocked(now)
+	} else {
+		if !l.probeSince.IsZero() && now.Sub(l.movedLocked(l.probeSince)) >= timeout {
 			return false
 		}
-		interval = acceptedProbe
+		if !l.sizeProbeLocked(now) {
+			return false
+		}
+		if l.options.Accepted {
+			heard := l.started
+			if l.peerPing.After(heard) {
+				heard = l.peerPing
+			}
+			// Both directions must work: the dialer's pings arrive, and they
+			// confirm that this side's pongs arrive too.
+			if now.Sub(l.movedLocked(heard)) >= timeout || now.Sub(l.movedLocked(l.heardLocked())) >= timeout {
+				return false
+			}
+		}
 	}
 	// Keeps lastTraffic current for selection hysteresis (recentlyActive).
 	l.sampleTrafficLocked(now)

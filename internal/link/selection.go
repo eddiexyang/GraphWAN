@@ -61,7 +61,8 @@ func (l *Link) sendSelection(kind byte, term [16]byte, sequence uint64) {
 
 func (e *Edge) advanceLocked(now time.Time) {
 	s := e.selection
-	if active := e.links[e.active]; active != nil && !active.healthy() {
+	// A held Link stays selected until a healthy one replaces it.
+	if active := e.links[e.active]; active != nil && !active.usable() {
 		e.activateLocked(nil, now)
 	}
 	// A confirmed target that failed and recovered resumes at either end

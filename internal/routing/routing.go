@@ -114,17 +114,48 @@ func ClientNodes(n model.Network) map[model.ID]bool {
 // LocalRoutes computes an Agent's forwarding table over the edges usable
 // reports, with the same metric and tie breaking as the controller.
 func LocalRoutes(config model.NetworkConfig, usable func(model.TopologyEdge) bool) []model.Route {
+	return LocalRoutesFallback(config, usable, nil)
+}
+
+// LocalRoutesFallback keeps routes over usable edges and uses fallback edges
+// to reach destinations that are otherwise unreachable. On a converged graph,
+// a fallback next hop either has a usable path to the destination or is closer
+// to it in the graph including fallback edges.
+func LocalRoutesFallback(config model.NetworkConfig, usable, fallback func(model.TopologyEdge) bool) []model.Route {
 	var n model.Network
+	var fallbackEdges []model.Edge
 	for _, e := range config.Topology {
+		edge := model.Edge{ID: e.ID, A: e.A, B: e.B, Weight: e.Weight, Enabled: true}
 		if usable(e) {
-			n.Edges = append(n.Edges, model.Edge{ID: e.ID, A: e.A, B: e.B, Weight: e.Weight, Enabled: true})
+			n.Edges = append(n.Edges, edge)
+		} else if fallback != nil && fallback(e) {
+			fallbackEdges = append(fallbackEdges, edge)
 		}
 	}
 	clients := map[model.ID]bool{}
 	for _, d := range config.Directory {
 		clients[d.NodeID] = d.Client
 	}
-	return shortest(n, config.Self.ID, nil, clients)
+	routes := shortest(n, config.Self.ID, nil, clients)
+	if len(fallbackEdges) == 0 {
+		return routes
+	}
+	reached := map[model.ID]bool{}
+	for _, r := range routes {
+		reached[r.Destination] = true
+	}
+	added := false
+	n.Edges = append(n.Edges, fallbackEdges...)
+	for _, r := range shortest(n, config.Self.ID, nil, clients) {
+		if !reached[r.Destination] {
+			routes = append(routes, r)
+			added = true
+		}
+	}
+	if added {
+		slices.SortFunc(routes, func(a, b model.Route) int { return cmp.Compare(a.Destination, b.Destination) })
+	}
+	return routes
 }
 
 func Compile(state model.State, agentID model.ID) (model.Snapshot, error) {

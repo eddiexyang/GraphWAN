@@ -16,11 +16,14 @@ type LinkStatus struct {
 	ObservedLocal      string    `json:"observed_local,omitempty"`
 	Remote             string    `json:"remote"`
 	Healthy            bool      `json:"healthy"`
-	Active             bool      `json:"active"`
-	RTTMillis          float64   `json:"rtt_ms"`
-	Loss               float64   `json:"loss"`
-	RXBytes            uint64    `json:"rx_bytes"`
-	TXBytes            uint64    `json:"tx_bytes"`
+	// Unhealthy marks a Link that failed but stays open as its Edge's only
+	// path. It carries traffic only while nothing healthy is available.
+	Unhealthy bool    `json:"unhealthy,omitempty"`
+	Active    bool    `json:"active"`
+	RTTMillis float64 `json:"rtt_ms"`
+	Loss      float64 `json:"loss"`
+	RXBytes   uint64  `json:"rx_bytes"`
+	TXBytes   uint64  `json:"tx_bytes"`
 	// Dropped counts packets a full send queue discarded. TCPPackets counts TCP
 	// packets a TCP-backed Link refused to carry; a route sent TCP that was not
 	// in a stream toward it. StreamSessions counts the Edge's streams, on its

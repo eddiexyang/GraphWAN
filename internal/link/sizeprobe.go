@@ -2,6 +2,7 @@ package link
 
 import (
 	"encoding/binary"
+	"log/slog"
 	"time"
 )
 
@@ -108,7 +109,12 @@ func (l *Link) receiveSizeProbeReply(raw []byte, now time.Time) bool {
 	first := l.unverified && !alive.IsZero()
 	rtt := l.rtt
 	l.unverified, l.sizeSent, l.sizeVerified = false, time.Time{}, now
+	l.sizeFailed = false
+	recovered := l.recoverLocked(now)
 	l.mu.Unlock()
+	if recovered {
+		slog.Info("link recovered", l.logAttrs("probe_bytes", sizeProbeBytes)...)
+	}
 	if first {
 		l.logUp("rtt_ms", rtt.Milliseconds(), "probe_bytes", sizeProbeBytes)
 	}

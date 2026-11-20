@@ -21,14 +21,15 @@ type message struct {
 // lab runs one engine per Agent of the test topology over an in-memory,
 // lossless network with a shared fake clock.
 type lab struct {
-	t       *testing.T
-	state   model.State
-	now     time.Time
-	engines map[model.ID]*Engine // node ID -> engine
-	routes  map[model.ID]model.RouteUpdate
-	down    map[model.ID]bool // edge ID -> failed
-	queue   []message
-	legacyD bool
+	t        *testing.T
+	state    model.State
+	now      time.Time
+	engines  map[model.ID]*Engine // node ID -> engine
+	routes   map[model.ID]model.RouteUpdate
+	down     map[model.ID]bool // edge ID -> failed
+	fallback map[model.ID]bool // failed edge still carrying traffic
+	queue    []message
+	legacyD  bool
 	// apply, when set, can fail route installs before they reach the table.
 	apply     func(node model.ID, u model.RouteUpdate) error
 	snapshots map[model.ID]model.Snapshot
@@ -43,7 +44,7 @@ func (l *lab) configure(node model.ID, e *Engine, s model.Snapshot) {
 }
 
 func newLab(t *testing.T, without ...model.ID) *lab {
-	l := &lab{t: t, state: testutil.Topology(), now: time.Unix(1_800_000_000, 0), engines: map[model.ID]*Engine{}, routes: map[model.ID]model.RouteUpdate{}, down: map[model.ID]bool{}, snapshots: map[model.ID]model.Snapshot{}}
+	l := &lab{t: t, state: testutil.Topology(), now: time.Unix(1_800_000_000, 0), engines: map[model.ID]*Engine{}, routes: map[model.ID]model.RouteUpdate{}, down: map[model.ID]bool{}, fallback: map[model.ID]bool{}, snapshots: map[model.ID]model.Snapshot{}}
 	skip := map[model.ID]bool{}
 	for _, id := range without {
 		skip[id] = true
@@ -68,15 +69,21 @@ func (l *lab) start(node model.Node) {
 		Send: func(network, peer model.ID, raw []byte) {
 			l.queue = append(l.queue, message{network, self, peer, append([]byte(nil), raw...)})
 		},
-		Local: func() map[model.ID]map[model.ID]bool {
+		Local: func() (map[model.ID]map[model.ID]bool, map[model.ID]map[model.ID]bool) {
 			up := map[model.ID]bool{}
+			fallback := map[model.ID]bool{}
 			for _, p := range snapshot.Networks[0].Peers {
 				// A link is healthy only if both Agents run and the edge works.
-				if _, running := l.engines[p.Node.ID]; !l.down[p.Edge.ID] && (running || l.legacy(p.Node.ID)) {
-					up[p.Edge.ID] = true
+				if _, running := l.engines[p.Node.ID]; running || l.legacy(p.Node.ID) {
+					if !l.down[p.Edge.ID] {
+						up[p.Edge.ID] = true
+					} else if l.fallback[p.Edge.ID] {
+						fallback[p.Edge.ID] = true
+					}
 				}
 			}
-			return map[model.ID]map[model.ID]bool{snapshot.Networks[0].ID: up}
+			id := snapshot.Networks[0].ID
+			return map[model.ID]map[model.ID]bool{id: up}, map[model.ID]map[model.ID]bool{id: fallback}
 		},
 		Apply: func(u model.RouteUpdate) error {
 			if l.apply != nil {
@@ -114,7 +121,8 @@ func (l *lab) run(d time.Duration) {
 		for len(l.queue) > 0 {
 			m := l.queue[0]
 			l.queue = l.queue[1:]
-			if dst := l.engines[m.to]; dst != nil && !l.down[l.edge(m.from, m.to)] {
+			edge := l.edge(m.from, m.to)
+			if dst := l.engines[m.to]; dst != nil && (!l.down[edge] || l.fallback[edge]) {
 				dst.Receive(m.network, m.from, m.raw)
 			}
 		}
@@ -174,6 +182,31 @@ func TestLinkFailureReroutesWithoutController(t *testing.T) {
 	l.run(time.Second)
 	if r := l.route(nodeA, nodeC); r.NextHop != nodeB {
 		t.Fatalf("A->C after recovery %+v", r)
+	}
+}
+
+func TestFallbackEdgeKeepsOnlyRoute(t *testing.T) {
+	l := newLab(t)
+	l.run(time.Second)
+	l.down[edgeAB], l.fallback[edgeAB] = true, true
+	l.run(time.Second)
+	if r := l.route(nodeA, nodeC); r.NextHop != nodeD || r.Cost != 31 {
+		t.Fatalf("A->C with healthy alternative: %+v", r)
+	}
+
+	l.down[l.edge(nodeD, nodeC)] = true
+	l.run(time.Second)
+	if r := l.route(nodeD, nodeC); r.NextHop != nodeA || r.Cost != 21 {
+		t.Fatalf("D->C with only an unhealthy path: %+v", r)
+	}
+	if r := l.route(nodeB, nodeD); r.NextHop != nodeA || r.Cost != 11 {
+		t.Fatalf("B->D without another link-state adjacency: %+v", r)
+	}
+
+	delete(l.fallback, edgeAB)
+	l.run(time.Second)
+	if r := l.route(nodeD, nodeC); r.NextHop != "" {
+		t.Fatalf("D->C after the fallback closes: %+v", r)
 	}
 }
 
@@ -352,7 +385,7 @@ func TestFirstConfigurationKeepsCompiledRoutesUntilObserved(t *testing.T) {
 	}
 	e := New(Callbacks{
 		Send:  func(model.ID, model.ID, []byte) {},
-		Local: func() map[model.ID]map[model.ID]bool { return nil },
+		Local: func() (map[model.ID]map[model.ID]bool, map[model.ID]map[model.ID]bool) { return nil, nil },
 		Apply: func(model.RouteUpdate) error { return nil },
 	})
 	if u := e.Configure(snapshot); u != nil {

@@ -1,9 +1,11 @@
 package link
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -224,6 +226,68 @@ func TestLinkClosesAtHealthDeadline(t *testing.T) {
 	if elapsed := time.Since(since); elapsed > options.Timeout+options.Heartbeat/2 {
 		t.Fatalf("link closed %v after its first unanswered probe, want about %v", elapsed, options.Timeout)
 	}
+}
+
+func TestOnlySelectedLinkForwardsWhenHeartbeatsTimeOut(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	a, b := pipePair()
+	var mute atomic.Bool
+	received := make(chan []byte, 1)
+	go func() {
+		for {
+			raw, err := b.Receive(ctx)
+			if err != nil {
+				return
+			}
+			switch raw[0] {
+			case pingMessage:
+				if !mute.Load() {
+					reply := append([]byte{pongMessage}, raw[1:9]...)
+					if b.Send(ctx, reply) != nil {
+						return
+					}
+				}
+			case dataMessage:
+				received <- raw[1:]
+			}
+		}
+	}()
+	l := newCompactTestLink(t, a, Options{Heartbeat: 50 * time.Millisecond, Timeout: 250 * time.Millisecond})
+	e := newEdge("")
+	e.Add(l)
+	waitFor := func(condition func() bool, what string) {
+		t.Helper()
+		timer := time.NewTicker(5 * time.Millisecond)
+		defer timer.Stop()
+		for !condition() {
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				t.Fatalf("timed out waiting for %s", what)
+			}
+		}
+	}
+	waitFor(func() bool {
+		e.Report() // select the healthy Link
+		return e.Active() == l && l.Healthy()
+	}, "initial link selection")
+	mute.Store(true)
+	waitFor(l.Held, "heartbeat timeout")
+	frame := compactTestFrame(t, []byte{0x45, 1, 2})
+	if err := e.Send(ctx, frame); err != nil {
+		t.Fatalf("send over the only Link after its timeout: %v", err)
+	}
+	select {
+	case got := <-received:
+		if !bytes.Equal(got, frame) {
+			t.Fatalf("received frame %x, want %x", got, frame)
+		}
+	case <-ctx.Done():
+		t.Fatal("held Link did not forward the frame")
+	}
+	mute.Store(false)
+	waitFor(l.Healthy, "link recovery")
 }
 
 // A dialer and an accepted Link over one channel keep each other healthy for

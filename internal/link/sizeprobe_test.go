@@ -84,6 +84,32 @@ func TestSizeProbeGatesHealth(t *testing.T) {
 	}
 }
 
+func TestHeldLinkRequiresFullSizedReplyAfterSizeProbeFailure(t *testing.T) {
+	now := time.Now()
+	o := (Options{}).defaults()
+	l := &Link{
+		ctx: context.Background(), options: o, held: true, sizeFailed: true,
+		lastPong: now, sizeMode: sizeProbeOn, sizeVerified: now.Add(-sizeProbeInterval),
+		control: make(chan []byte, 8), pending: map[uint64]time.Time{},
+	}
+	if !l.heartbeat(now) {
+		t.Fatal("held link stopped probing")
+	}
+	probe := takeKind(l, sizeProbeMessage)
+	if len(probe) != sizeProbeBytes {
+		t.Fatal("held link did not retry the failed size probe")
+	}
+	l.recordPong(l.nextPing, now.Add(time.Millisecond))
+	if !l.Held() || l.Healthy() {
+		t.Fatal("a small pong cleared the size-probe failure")
+	}
+
+	probe[0] = sizeProbeReplyMessage
+	if !l.receiveSizeProbeReply(probe, now.Add(2*time.Millisecond)) || l.Held() || !l.Healthy() {
+		t.Fatal("a valid size probe reply did not restore the link")
+	}
+}
+
 func TestSizeProbeDialerNegotiation(t *testing.T) {
 	o := (Options{SizeProbe: true}).defaults()
 	newLink := func() *Link {

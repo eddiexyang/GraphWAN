@@ -18,8 +18,8 @@ type Stats struct {
 	Sent, Received, Duplicate, Rejected, Expired, SPFRuns, Superseded, ApplyErrors atomic.Uint64
 }
 
-// Event records changes for diagnosis: local edge-up/edge-down, advertisements
-// whose edge set changed (originated, received), expiry, and route installs.
+// Event records local edge transitions, advertisements whose edge set changed
+// (originated, received), expiry, and route installs.
 // Value is the sequence for LSA events, the apply duration in microseconds for
 // routes and the revision for route-error.
 type Event struct {
@@ -72,10 +72,11 @@ type OriginView struct {
 	Revision uint64     `json:"revision"`
 	AgeMS    int64      `json:"age_ms"`
 	Up       []model.ID `json:"up"`
+	Fallback []model.ID `json:"fallback,omitempty"`
 }
 
-// EdgeView shows each end's report ("up", "down" or "none") and the outcome
-// of the two-way check.
+// EdgeView shows each end's report ("up", "fallback", "down" or "none").
+// Usable is the outcome of the two-way check for the primary SPF pass.
 type EdgeView struct {
 	ID      model.ID `json:"id"`
 	A       model.ID `json:"a"`
@@ -105,13 +106,13 @@ func (e *Engine) View() View {
 		}
 		slices.Sort(nv.Local)
 		for origin, en := range n.db {
-			nv.Database = append(nv.Database, OriginView{Origin: origin, Sequence: en.lsa.Sequence, Revision: en.lsa.Revision, AgeMS: now.Sub(en.arrived).Milliseconds(), Up: en.lsa.Up})
+			nv.Database = append(nv.Database, OriginView{Origin: origin, Sequence: en.lsa.Sequence, Revision: en.lsa.Revision, AgeMS: now.Sub(en.arrived).Milliseconds(), Up: en.lsa.Up, Fallback: en.lsa.Fallback})
 		}
 		slices.SortFunc(nv.Database, func(a, b OriginView) int { return compare(a.Origin, b.Origin) })
 		for _, edge := range c.Topology {
 			nv.Edges = append(nv.Edges, EdgeView{ID: edge.ID, A: edge.A, B: edge.B, ReportA: n.reportString(edge.A, edge.ID), ReportB: n.reportString(edge.B, edge.ID), Usable: n.usable(edge)})
 		}
-		nv.Routes = routing.LocalRoutes(c, n.usable)
+		nv.Routes = routing.LocalRoutesFallback(c, n.usable, n.fallbackUsable)
 		v.Networks = append(v.Networks, nv)
 	}
 	return v
@@ -122,6 +123,9 @@ func (n *network) reportString(node, edge model.ID) string {
 		if n.local[edge] {
 			return "up"
 		}
+		if n.fallback[edge] {
+			return "fallback"
+		}
 		return "down"
 	}
 	en, ok := n.db[node]
@@ -130,6 +134,8 @@ func (n *network) reportString(node, edge model.ID) string {
 		return "none"
 	case en.up[edge]:
 		return "up"
+	case en.fallback[edge]:
+		return "fallback"
 	default:
 		return "down"
 	}

@@ -101,3 +101,57 @@ func TestSelectedLinkResumesAfterRecovering(t *testing.T) {
 		}
 	}
 }
+
+func TestSelectedLinkStaysUsableThroughFailureAndReplacement(t *testing.T) {
+	now := time.Now()
+	makeLink := func(id string) *Link {
+		return &Link{
+			channel: selectionTestChannel{id: id, created: now}, ctx: context.Background(),
+			options: (Options{}).defaults(), lastPong: now,
+			control: make(chan []byte, 8), pending: map[uint64]time.Time{},
+		}
+	}
+	e := NewCoordinatedEdge("a", "b", "")
+	current := makeLink("current")
+	e.Add(current)
+	e.activateLocked(current, now)
+	s := e.selection
+	s.target, s.accepted, s.confirmed = current.ID(), true, true
+	current.loggedUp.Store(true)
+	current.probeSince = now.Add(-current.options.Timeout)
+
+	e.Tick()
+	if e.Active() != current {
+		t.Fatal("link selection dropped the only path at the health deadline")
+	}
+	if !current.hold() {
+		t.Fatal("selected link did not stay open after a timeout")
+	}
+	if statuses := e.Report(); len(statuses) != 1 || statuses[0].Healthy || !statuses[0].Active || !statuses[0].Unhealthy {
+		t.Fatalf("held link status: %+v", statuses)
+	}
+	current.pending[1] = now
+	current.recordPong(1, now.Add(time.Millisecond))
+	if !current.Healthy() || current.Held() {
+		t.Fatal("selected link did not recover after a valid probe reply")
+	}
+
+	current.probeSince = now.Add(-current.options.Timeout)
+	if !current.hold() {
+		t.Fatal("link did not stay open after a second timeout")
+	}
+	replacement := makeLink("replacement")
+	e.Add(replacement)
+	e.Tick()
+	if e.Active() != current || !current.keepOnFailure() {
+		t.Fatal("old link was released before accepting its replacement")
+	}
+	e.HandleSelection(replacement, Selection{kind: acceptMessage, term: s.term, sequence: s.sequence})
+	if e.Active() != replacement || !current.keepOnFailure() {
+		t.Fatal("old link was released before confirming the replacement")
+	}
+	e.HandleSelection(replacement, Selection{kind: confirmMessage, term: s.term, sequence: s.sequence})
+	if e.Active() != replacement || current.keepOnFailure() {
+		t.Fatal("old link could not be released after the replacement was confirmed")
+	}
+}

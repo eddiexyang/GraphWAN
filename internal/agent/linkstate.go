@@ -20,24 +20,48 @@ func (r *DataPlane) newLinkState() *linkstate.Engine {
 		},
 		// An edge is usable here while it has a healthy Link, the condition
 		// the Agent also reports to the controller, unless damping holds it.
-		Local: func() map[model.ID]map[model.ID]bool {
+		Local: func() (map[model.ID]map[model.ID]bool, map[model.ID]map[model.ID]bool) {
 			up := map[model.ID]map[model.ID]bool{}
-			for _, s := range r.Report() {
-				if !s.Healthy {
-					continue
+			// An edge whose only Link failed but is held open, or which
+			// damping keeps down, is a fallback: used only where no up
+			// edge reaches.
+			fall := map[model.ID]map[model.ID]bool{}
+			mark := func(m map[model.ID]map[model.ID]bool, network, edge model.ID) {
+				if m[network] == nil {
+					m[network] = map[model.ID]bool{}
 				}
-				if up[s.NetworkID] == nil {
-					up[s.NetworkID] = map[model.ID]bool{}
-				}
-				up[s.NetworkID][s.EdgeID] = true
+				m[network][edge] = true
 			}
 			grace := map[model.ID]time.Duration{}
 			if state := r.state.Load(); state != nil {
+				for _, s := range state.mesh.Report() {
+					switch {
+					case s.Healthy:
+						mark(up, s.NetworkID, s.EdgeID)
+					case s.Active && s.Unhealthy:
+						mark(fall, s.NetworkID, s.EdgeID)
+					}
+				}
 				for _, n := range state.snapshot.Networks {
 					grace[n.ID] = model.FailureDetectionTime(n.FailureDetection)
 				}
 			}
-			return r.damper.filter(up, grace, time.Now())
+			reported := r.damper.filter(up, grace, time.Now())
+			for network, edges := range up {
+				for edge := range edges {
+					if !reported[network][edge] {
+						mark(fall, network, edge)
+					}
+				}
+			}
+			for network, edges := range fall {
+				for edge := range edges {
+					if reported[network][edge] {
+						delete(edges, edge)
+					}
+				}
+			}
+			return reported, fall
 		},
 		Apply: r.ApplyRoutes,
 	})
