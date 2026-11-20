@@ -1,4 +1,4 @@
-import { individualConnection } from './groups'
+import { connectionConflicts, individualConnection } from './groups'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Network as NetworkIcon,
@@ -16,7 +16,7 @@ import {
 } from 'lucide-react'
 import { request, APIError, errorText } from './api'
 import { saveConfiguration } from './saveConfiguration'
-import { Badge, Field, Modal, ErrorBox } from './components'
+import { Badge, Field, Modal, ErrorBox, NumberInput, useConfirm } from './components'
 import {
   type State,
   type Network,
@@ -127,11 +127,25 @@ export default function App() {
   const [view, setView] = useState('networks')
   const [networkID, setNetworkID] = useState('')
   const [draft, setDraft] = useState<Draft>()
+  const [draftInvalid, setDraftInvalid] = useState(false)
   const [selection, setSelection] = useState<Selection>(null)
   const [modal, setModal] = useState<'network' | 'node' | 'edge' | 'enroll' | null>(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  useEffect(() => {
+    if (!notice) return
+    const timer = setTimeout(() => setNotice(''), 5000)
+    return () => clearTimeout(timer)
+  }, [notice])
   const [busy, setBusy] = useState(false)
+  const confirm = useConfirm()
+  const discardDraft = () =>
+    confirm({
+      title: 'Discard changes?',
+      message: 'Discard your unsaved topology changes?',
+      confirmLabel: 'Discard',
+      danger: true,
+    })
   const dirty = !!draft && !equal(draft.network, draft.base)
   const loadState = useCallback((incoming: State) => {
     setState((current) => (!current || incoming.revision >= current.revision ? incoming : current))
@@ -210,8 +224,8 @@ export default function App() {
     window.addEventListener('beforeunload', warn)
     return () => window.removeEventListener('beforeunload', warn)
   }, [dirty])
-  const navigate = (next: string, id = '') => {
-    if (dirty && !confirm('Discard your unsaved topology changes?')) return
+  const navigate = async (next: string, id = '') => {
+    if (dirty && !(await discardDraft())) return
     setDraft(undefined)
     setSelection(null)
     setView(next)
@@ -219,8 +233,8 @@ export default function App() {
     setError('')
     setNotice('')
   }
-  const beginNetwork = () => {
-    if (dirty && !confirm('Discard your unsaved topology changes?')) return
+  const beginNetwork = async () => {
+    if (dirty && !(await discardDraft())) return
     setDraft(undefined)
     setModal('network')
   }
@@ -231,6 +245,7 @@ export default function App() {
   const edit = () => {
     if (current && state)
       setDraft({ network: structuredClone(current), base: current, revision: state.revision })
+    setDraftInvalid(false)
     setNotice('')
   }
   const mutate = async (
@@ -309,7 +324,16 @@ export default function App() {
         className="icon"
         aria-label="Sign out"
         onClick={async () => {
-          if (dirty && !confirm('Discard unsaved changes and sign out?')) return
+          if (
+            dirty &&
+            !(await confirm({
+              title: 'Sign out?',
+              message: 'Discard unsaved changes and sign out?',
+              confirmLabel: 'Sign out',
+              danger: true,
+            }))
+          )
+            return
           try {
             await request('/logout', { method: 'POST', csrf })
             forgetWireGuardKeys()
@@ -455,9 +479,8 @@ export default function App() {
                 <div className="segmented" role="group" aria-label="Topology mode">
                   <button
                     className={!draft ? 'active' : ''}
-                    onClick={() => {
-                      if (!dirty || confirm('Discard your unsaved topology changes?'))
-                        setDraft(undefined)
+                    onClick={async () => {
+                      if (!dirty || (await discardDraft())) setDraft(undefined)
                     }}
                   >
                     <Eye size={15} />
@@ -472,9 +495,29 @@ export default function App() {
                   {draft ? (
                     <>
                       <button
+                        onClick={async () => {
+                          if (
+                            await confirm({
+                              title: 'Delete network?',
+                              message: `Delete ${network.name}, including all its nodes and edges?`,
+                              confirmLabel: 'Delete network',
+                              danger: true,
+                            })
+                          )
+                            void mutate(`/networks/${network.id}`, 'DELETE')
+                              .then(() => navigate('networks'))
+                              .catch(() => {})
+                        }}
+                        className="icon danger"
+                        aria-label="Delete network"
+                        title="Delete network"
+                      >
+                        <Trash2 size={17} />
+                      </button>
+                      <button
                         disabled={busy}
-                        onClick={() => {
-                          if (!dirty || confirm('Discard your unsaved topology changes?')) {
+                        onClick={async () => {
+                          if (!dirty || (await discardDraft())) {
                             setDraft(undefined)
                             setSelection(null)
                           }
@@ -484,7 +527,10 @@ export default function App() {
                       </button>
                       <button
                         className="primary"
-                        disabled={!dirty || busy || conflict}
+                        disabled={!dirty || busy || conflict || draftInvalid}
+                        title={
+                          draftInvalid ? 'Fix the highlighted fields before saving.' : undefined
+                        }
                         onClick={async () => {
                           try {
                             await mutate(
@@ -507,24 +553,7 @@ export default function App() {
                         {busy ? 'Saving…' : 'Save changes'}
                       </button>
                     </>
-                  ) : (
-                    <button
-                      onClick={() => {
-                        if (
-                          confirm(
-                            `Delete network ${network.name}, including all its nodes and edges?`,
-                          )
-                        )
-                          void mutate(`/networks/${network.id}`, 'DELETE')
-                            .then(() => navigate('networks'))
-                            .catch(() => {})
-                      }}
-                      className="icon danger"
-                      aria-label="Delete network"
-                    >
-                      <Trash2 size={17} />
-                    </button>
-                  )}
+                  ) : null}
                   {sessionControls}
                 </div>
               </div>
@@ -541,6 +570,7 @@ export default function App() {
                 change={change}
                 addNode={() => setModal('node')}
                 addEdge={() => setModal('edge')}
+                onInvalidChange={setDraftInvalid}
               />
             </>
           ) : (
@@ -666,6 +696,7 @@ function CreateNetwork({
   const [name, setName] = useState('')
   const [cidr, setCIDR] = useState('10.42.0.0/24')
   const [mtu, setMTU] = useState(1280)
+  const [mtuInvalid, setMtuInvalid] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   return (
@@ -673,6 +704,7 @@ function CreateNetwork({
       <form
         onSubmit={async (e) => {
           e.preventDefault()
+          if (mtuInvalid) return
           setBusy(true)
           setError('')
           try {
@@ -707,17 +739,19 @@ function CreateNetwork({
           <input required value={cidr} onChange={(e) => setCIDR(e.target.value)} />
         </Field>
         <Field label="TUN MTU">
-          <input
-            type="number"
+          <NumberInput
             required
             min={1280}
             max={9000}
             value={mtu}
-            onChange={(e) => setMTU(Number(e.target.value))}
+            onChange={(next) => {
+              if (next !== undefined) setMTU(next)
+            }}
+            onInvalid={setMtuInvalid}
           />
         </Field>
 
-        <button className="primary wide" disabled={busy}>
+        <button className="primary wide" disabled={busy || mtuInvalid}>
           {busy ? 'Creating…' : 'Create network'}
         </button>
       </form>
@@ -876,15 +910,30 @@ function AddEdge({
   save: (n: Network) => void
   close: () => void
 }) {
+  const confirm = useConfirm()
   const [a, setA] = useState(network.nodes[0]?.id ?? '')
   const [b, setB] = useState(network.nodes[1]?.id ?? '')
   const [error, setError] = useState('')
   return (
     <Modal title="Add edge" close={close}>
       <form
-        onSubmit={(e) => {
+        onSubmit={async (e) => {
           e.preventDefault()
-          const updated = individualConnection(network, a, b)
+          const conflicts = connectionConflicts(network, a, b)
+          if (
+            conflicts.length &&
+            !(await confirm({
+              title: 'Replace group link?',
+              message:
+                'Replace the conflicting group link(s) and all their child edges with this individual edge?',
+              confirmLabel: 'Replace',
+              danger: true,
+            }))
+          ) {
+            setError('This pair is managed by a full mesh group, or replacement was cancelled.')
+            return
+          }
+          const updated = individualConnection(network, a, b, true)
           if (!updated) {
             setError('This pair is managed by a full mesh group, or replacement was cancelled.')
             return

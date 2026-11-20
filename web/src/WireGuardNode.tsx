@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import QRCode from 'qrcode'
-import { Field, Badge } from './components'
+import { Field, Badge, NumberInput } from './components'
 import {
   clientPrivateKey,
   clientPublicKey,
@@ -41,6 +41,7 @@ export default function WireGuardNode({
   const [secret, setSecret] = useState(clientPrivateKey(node.id))
   const [external, setExternal] = useState(false)
   const [keepalive, setKeepalive] = useState(25)
+  const [keepaliveInvalid, setKeepaliveInvalid] = useState(false)
   const [show, setShow] = useState(false)
   const [qr, setQR] = useState('')
   const [qrError, setQRError] = useState('')
@@ -213,14 +214,15 @@ export default function WireGuardNode({
         Include advertised subnets
       </label>
       <Field label="Persistent keepalive (seconds)">
-        <input
-          type="number"
+        <NumberInput
+          required
           min={0}
           max={65535}
           value={keepalive}
-          onChange={(e) =>
-            setKeepalive(Math.max(0, Math.min(65535, Math.floor(Number(e.target.value)))))
-          }
+          onChange={(next) => {
+            if (next !== undefined) setKeepalive(next)
+          }}
+          onInvalid={setKeepaliveInvalid}
         />
       </Field>
       {error && (
@@ -229,10 +231,10 @@ export default function WireGuardNode({
         </p>
       )}
       <div className="actions">
-        <button disabled={!!error} onClick={download}>
+        <button disabled={!!error || keepaliveInvalid} onClick={download}>
           {secret ? 'Download configuration' : 'Download template'}
         </button>
-        <button disabled={!!error || !secret} onClick={() => setShow(!show)}>
+        <button disabled={!!error || !secret || keepaliveInvalid} onClick={() => setShow(!show)}>
           {show ? 'Hide QR code' : 'Show QR code'}
         </button>
       </div>

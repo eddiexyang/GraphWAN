@@ -4,7 +4,7 @@ import { Plus, Copy, Trash2, Server } from 'lucide-react'
 import { ResourceSummary } from './Resources'
 import { request, errorText } from './api'
 import { saveConfiguration } from './saveConfiguration'
-import { Badge, Field, Modal, ErrorBox } from './components'
+import { Badge, Field, Modal, ErrorBox, NumberInput, useConfirm } from './components'
 import {
   type Agent,
   type AgentStatus,
@@ -111,6 +111,7 @@ function AgentEditor({
 }) {
   const [name, setName] = useState(agent.name)
   const [port, setPort] = useState(agent.listen_port)
+  const [portInvalid, setPortInvalid] = useState(false)
   const [stunServers, setSTUNServers] = useState((agent.stun_servers ?? []).join('\n'))
   const [excludeContainers, setExcludeContainers] = useState(agent.exclude_container_ips ?? false)
   const [revoked, setRevoked] = useState(agent.revoked)
@@ -119,6 +120,7 @@ function AgentEditor({
   )
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const confirm = useConfirm()
   const editable = (a: Agent | undefined) =>
     a && {
       name: a.name,
@@ -173,6 +175,7 @@ function AgentEditor({
       <form
         onSubmit={(e) => {
           e.preventDefault()
+          if (portInvalid) return
           void mutate('PATCH', {
             name,
             listen_port: port,
@@ -196,13 +199,15 @@ function AgentEditor({
             />
           </Field>
           <Field label="Listen port">
-            <input
+            <NumberInput
               required
-              type="number"
               min={1}
               max={65535}
               value={port}
-              onChange={(e) => setPort(Number(e.target.value))}
+              onChange={(next) => {
+                if (next !== undefined) setPort(next)
+              }}
+              onInvalid={setPortInvalid}
             />
           </Field>
           <label className="check">
@@ -296,18 +301,21 @@ function AgentEditor({
             <button
               type="button"
               className="danger"
-              onClick={() => {
+              onClick={async () => {
                 if (
-                  confirm(
-                    `Delete ${agent.name}? This also removes its nodes and incident edges from all networks.`,
-                  )
+                  await confirm({
+                    title: 'Delete agent?',
+                    message: `Delete ${agent.name}? This also removes its nodes and incident edges from all networks.`,
+                    confirmLabel: 'Delete agent',
+                    danger: true,
+                  })
                 )
                   void mutate('DELETE')
               }}
             >
               Delete agent
             </button>
-            <button type="submit" className="primary" disabled={originalChanged}>
+            <button type="submit" className="primary" disabled={originalChanged || portInvalid}>
               {busy ? 'Saving…' : 'Save agent'}
             </button>
           </div>

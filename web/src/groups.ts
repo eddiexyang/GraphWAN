@@ -232,18 +232,23 @@ export function topologyError(network: Network): string | undefined {
   }
 }
 
-// Switching an aggregate to individual edges removes the aggregate as a whole.
-export function individualConnection(network: Network, a: string, b: string): Network | undefined {
-  if (network.groups?.some((g) => g.members.includes(a) && g.members.includes(b))) return undefined
-  const conflicts = (network.group_links ?? []).filter((l) =>
+// Group links that would create an edge between a and b.
+export function connectionConflicts(network: Network, a: string, b: string): GroupLink[] {
+  return (network.group_links ?? []).filter((l) =>
     childEdges(network, l).some((e) => (e.a === a && e.b === b) || (e.a === b && e.b === a)),
   )
+}
+// Switching an aggregate to individual edges removes the aggregate as a whole
+// once the caller has confirmed replacing it.
+export function individualConnection(
+  network: Network,
+  a: string,
+  b: string,
+  replace = false,
+): Network | undefined {
+  if (network.groups?.some((g) => g.members.includes(a) && g.members.includes(b))) return undefined
+  const conflicts = connectionConflicts(network, a, b)
   if (!conflicts.length) return network
-  if (
-    !window.confirm(
-      'Replace the conflicting group link(s) and all their child edges with this individual edge?',
-    )
-  )
-    return undefined
+  if (!replace) return undefined
   return { ...network, group_links: network.group_links?.filter((l) => !conflicts.includes(l)) }
 }

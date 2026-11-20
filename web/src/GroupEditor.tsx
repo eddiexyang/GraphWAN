@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Modal, Field, ErrorBox } from './components'
+import { Modal, Field, ErrorBox, NumberInput, useConfirm } from './components'
 import { newID, transports, type Edge, type Network } from './model'
 import {
   coveredEdges,
@@ -111,8 +111,11 @@ export default function GroupEditor({
       },
   )
   const [error, setError] = useState('')
+  const [invalidWeight, setInvalidWeight] = useState(false)
+  const confirm = useConfirm()
   const value = target.kind === 'group' ? group : link
-  const submit = () => {
+  const submit = async () => {
+    if (invalidWeight) return
     if (
       !value.transports.length ||
       !Object.entries(value.methods).some(([k, v]) => k !== 'hole_punch_extension' && v)
@@ -163,9 +166,12 @@ export default function GroupEditor({
     }
     if (
       conflicts.length &&
-      !window.confirm(
-        `Replace ${conflicts.length} existing individual edge(s) with these shared connection settings?`,
-      )
+      !(await confirm({
+        title: 'Replace individual edges?',
+        message: `Replace ${conflicts.length} existing individual edge(s) with these shared connection settings?`,
+        confirmLabel: 'Replace',
+        danger: true,
+      }))
     )
       return
     save(updated)
@@ -185,7 +191,7 @@ export default function GroupEditor({
       <form
         onSubmit={(e) => {
           e.preventDefault()
-          submit()
+          void submit()
         }}
       >
         {error && <ErrorBox>{error}</ErrorBox>}
@@ -200,14 +206,13 @@ export default function GroupEditor({
               />
             </Field>
             <Field label="Routing weight">
-              <input
-                type="number"
+              <NumberInput
+                required
                 min={1}
                 max={4294967295}
-                step={1}
-                required
                 value={group.weight ?? 1}
-                onChange={(e) => setGroup({ ...group, weight: Number(e.target.value) })}
+                onChange={(weight) => setGroup({ ...group, weight })}
+                onInvalid={setInvalidWeight}
               />
             </Field>
             <h4>Members · {group.members.length}</h4>
@@ -304,13 +309,15 @@ export default function GroupEditor({
               </select>
             </Field>
             <Field label="Routing weight">
-              <input
-                type="number"
+              <NumberInput
+                required
                 min={1}
                 max={4294967295}
-                required
                 value={link.weight}
-                onChange={(e) => setLink({ ...link, weight: Number(e.target.value) })}
+                onChange={(weight) => {
+                  if (weight !== undefined) setLink({ ...link, weight })
+                }}
+                onInvalid={setInvalidWeight}
               />
             </Field>
             <label className="check">
@@ -335,7 +342,7 @@ export default function GroupEditor({
           <button type="button" onClick={close}>
             Cancel
           </button>
-          <button className="primary" type="submit">
+          <button className="primary" type="submit" disabled={invalidWeight}>
             Apply to draft
           </button>
         </footer>

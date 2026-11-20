@@ -8,6 +8,7 @@ import {
   setOverride,
   type EdgeOwner,
   aggregate,
+  connectionConflicts,
   individualConnection,
 } from './groups'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -44,7 +45,7 @@ import { activePath } from './activePath'
 import WireGuardNode from './WireGuardNode'
 import { wireGuardNodeState } from './wireguard'
 import { ResourceDetails } from './Resources'
-import { Badge, Field } from './components'
+import { Badge, Field, NumberInput, useConfirm } from './components'
 import { connectionViews, endpointParts } from './connections'
 import {
   type State,
@@ -172,6 +173,7 @@ export default function Topology({
   change,
   addNode,
   addEdge,
+  onInvalidChange,
 }: {
   state: State
   network: Network
@@ -184,7 +186,26 @@ export default function Topology({
   change: (network: Network) => void
   addNode: () => void
   addEdge: () => void
+  onInvalidChange?: (invalid: boolean) => void
 }) {
+  const confirm = useConfirm()
+  // Numeric fields report their validity here so Save stays disabled while a
+  // box holds an empty or malformed value.
+  const [invalidFields, setInvalidFields] = useState<Record<string, boolean>>({})
+  const markInvalid = useCallback((key: string, bad: boolean) => {
+    setInvalidFields((previous) => {
+      if (!!previous[key] === bad) return previous
+      const next = { ...previous }
+      if (bad) next[key] = true
+      else delete next[key]
+      return next
+    })
+  }, [])
+  const invalid = Object.keys(invalidFields).length > 0
+  useEffect(() => {
+    onInvalidChange?.(invalid)
+  }, [invalid, onInvalidChange])
+  useEffect(() => () => onInvalidChange?.(false), [onInvalidChange])
   const [fullscreen, setFullscreen] = useState(false)
   const [labelSizes, setLabelSizes] = useState(new Map<string, { width: number; height: number }>())
   const onLabelSize = useCallback((id: string, size: { width: number; height: number }) => {
@@ -295,7 +316,7 @@ export default function Topology({
   useEffect(() => {
     setConnecting(false)
   }, [editing, network.id])
-  const connect = (source: string, target: string) => {
+  const connect = async (source: string, target: string) => {
     if (!editing) return
     const groups = network.groups?.filter((g) => g.id === source || g.id === target) ?? []
     if (groups.length === 2) {
@@ -309,7 +330,19 @@ export default function Topology({
         setGroupEditor({ kind: 'link', node, group: group.id })
       return
     }
-    const updated = individualConnection(network, source, target)
+    const conflicts = connectionConflicts(network, source, target)
+    if (
+      conflicts.length &&
+      !(await confirm({
+        title: 'Replace group link?',
+        message:
+          'Replace the conflicting group link(s) and all their child edges with this individual edge?',
+        confirmLabel: 'Replace',
+        danger: true,
+      }))
+    )
+      return
+    const updated = individualConnection(network, source, target, true)
     if (!updated) return
     const edge = createEdge(updated, source, target)
     if (edge) {
@@ -908,13 +941,18 @@ export default function Topology({
                 </button>
                 <button
                   className="danger"
-                  onClick={() => {
+                  onClick={async () => {
                     if (
-                      !window.confirm(
-                        scope.kind === 'group'
-                          ? 'Dissolve this group and remove its internal edges and aggregate links?'
-                          : 'Remove this aggregate link and all its child edges?',
-                      )
+                      !(await confirm({
+                        title:
+                          scope.kind === 'group' ? 'Dissolve group?' : 'Remove aggregate link?',
+                        message:
+                          scope.kind === 'group'
+                            ? 'Dissolve this group and remove its internal edges and aggregate links?'
+                            : 'Remove this aggregate link and all its child edges?',
+                        confirmLabel: scope.kind === 'group' ? 'Dissolve group' : 'Remove link',
+                        danger: true,
+                      }))
                     )
                       return
                     change(
@@ -1147,13 +1185,13 @@ export default function Topology({
                       </select>
                     </Field>
                     <Field label="Metric">
-                      <input
-                        aria-label={`Advertised subnet ${index + 1} metric`}
-                        type="number"
+                      <NumberInput
+                        key={`${node.id}:${index}:${editing}`}
+                        ariaLabel={`Advertised subnet ${index + 1} metric`}
                         min={0}
                         max={4294967295}
-                        value={subnet.metric ?? 0}
-                        onChange={(e) =>
+                        value={subnet.metric}
+                        onChange={(metric) =>
                           change({
                             ...network,
                             nodes: network.nodes.map((n) =>
@@ -1161,15 +1199,14 @@ export default function Topology({
                                 ? {
                                     ...n,
                                     advertised_subnets: (n.advertised_subnets || []).map((s, i) =>
-                                      i === index
-                                        ? { ...s, metric: Number(e.target.value) || undefined }
-                                        : s,
+                                      i === index ? { ...s, metric } : s,
                                     ),
                                   }
                                 : n,
                             ),
                           })
                         }
+                        onInvalid={(bad) => markInvalid(`metric:${node.id}:${index}`, bad)}
                       />
                     </Field>
                     {editing && (
@@ -1365,12 +1402,16 @@ export default function Topology({
                 Enable edge
               </label>
               <Field label="Routing weight">
-                <input
-                  type="number"
+                <NumberInput
+                  key={`${edge.id}:${editing}`}
+                  required
                   min={1}
                   max={4294967295}
                   value={edge.weight}
-                  onChange={(e) => updateEdge({ weight: Number(e.target.value) })}
+                  onChange={(weight) => {
+                    if (weight !== undefined) updateEdge({ weight })
+                  }}
+                  onInvalid={(bad) => markInvalid(`edge:${edge.id}:weight`, bad)}
                 />
               </Field>
               {!edge.transports.includes('wireguard') && (
@@ -1530,12 +1571,16 @@ export default function Topology({
                 />
               </Field>
               <Field label="TUN MTU">
-                <input
-                  type="number"
+                <NumberInput
+                  key={`${network.id}:mtu:${editing}`}
+                  required
                   min={1280}
                   max={9000}
                   value={network.mtu}
-                  onChange={(e) => change({ ...network, mtu: Number(e.target.value) })}
+                  onChange={(mtu) => {
+                    if (mtu !== undefined) change({ ...network, mtu })
+                  }}
+                  onInvalid={(bad) => markInvalid('network:mtu', bad)}
                 />
               </Field>
               <Field label="Encryption">
@@ -1564,18 +1609,14 @@ export default function Topology({
                 </select>
               </Field>
               <Field label="Failover time (ms)">
-                <input
-                  type="number"
+                <NumberInput
+                  key={`${network.id}:failure:${editing}`}
                   min={1000}
                   max={120000}
                   placeholder="6000"
-                  value={network.failure_detection_ms ?? ''}
-                  onChange={(e) =>
-                    change({
-                      ...network,
-                      failure_detection_ms: Number(e.target.value) || undefined,
-                    })
-                  }
+                  value={network.failure_detection_ms}
+                  onChange={(failure_detection_ms) => change({ ...network, failure_detection_ms })}
+                  onInvalid={(bad) => markInvalid('network:failure', bad)}
                 />
               </Field>
             </fieldset>
