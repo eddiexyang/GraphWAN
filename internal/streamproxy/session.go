@@ -637,6 +637,12 @@ func (e *End) failLocked(hop Hop) {
 	if e.done || hop != e.hop {
 		return
 	}
+	// The write side may discover a session reset after the local read
+	// direction reached EOF. Release retained bytes instead of replaying.
+	if hop.Aborted() {
+		e.finishLocked(errAborted)
+		return
+	}
 	e.counters.HopFailures.Add(1)
 	hop.Abort()
 	e.hop = nil
