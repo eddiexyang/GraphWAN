@@ -289,6 +289,21 @@ export default function Topology({
       /* Browsing without storage remains supported. */
     }
   }
+  const [showWeights, setShowWeights] = useState(() => {
+    try {
+      return localStorage.getItem('graphwan:show-weights') === 'true'
+    } catch {
+      return false
+    }
+  })
+  const chooseShowWeights = (show: boolean) => {
+    setShowWeights(show)
+    try {
+      localStorage.setItem('graphwan:show-weights', String(show))
+    } catch {
+      /* Browsing without storage remains supported. */
+    }
+  }
   const [viewStyle, setViewStyle] = useState<LineStyle | 'globe'>(() => {
     try {
       const saved = localStorage.getItem('graphwan:line-style')
@@ -555,12 +570,14 @@ export default function Topology({
       },
       zIndex: focused ? 100 : dimmed ? -1 : 0,
       label: summary
-        ? summary.label
+        ? `${summary.label}${showWeights ? ` · Weight ${e.weight}` : ''}`
         : editing
           ? `Weight ${e.weight}`
           : view.state === 'Connected'
-            ? `${view.active!.transport.toUpperCase()} · ${latencyLabel(view.active)}${showSpeeds ? ` · ↑ ${rate(view.tx)} ↓ ${rate(view.rx)}` : ''}`
-            : view.state,
+            ? `${view.active!.transport.toUpperCase()} · ${latencyLabel(view.active)}${showSpeeds ? ` · ↑ ${rate(view.tx)} ↓ ${rate(view.rx)}` : ''}${showWeights ? ` · Weight ${e.weight}` : ''}`
+            : showWeights
+              ? `${view.state} · Weight ${e.weight}`
+              : view.state,
       style: {
         stroke: focused ? '#087b66' : view.state === 'Connected' ? '#278f79' : '#91a3a0',
         strokeWidth: focused ? 3.5 : 1.8,
@@ -695,6 +712,11 @@ export default function Topology({
             {viewStyle !== 'globe' && (
               <button aria-pressed={showSpeeds} onClick={() => chooseShowSpeeds(!showSpeeds)}>
                 Show speeds
+              </button>
+            )}
+            {viewStyle !== 'globe' && (
+              <button aria-pressed={showWeights} onClick={() => chooseShowWeights(!showWeights)}>
+                Show weights
               </button>
             )}
             <button
