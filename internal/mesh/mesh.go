@@ -517,6 +517,8 @@ func linkTiming(detection time.Duration, caps linkCaps) (heartbeat, timeout time
 }
 
 func (g *group) register(channel *peer.Channel, candidate link.Candidate, pathExchange bool, caps linkCaps) {
+	// Mesh.Apply holds the mesh lock while updating groups.
+	compact := g.mesh.compactor()
 	g.mu.Lock()
 	if g.ctx.Err() != nil {
 		g.mu.Unlock()
@@ -542,7 +544,7 @@ func (g *group) register(channel *peer.Channel, candidate link.Candidate, pathEx
 	if caps.linkState {
 		options.LinkState, options.LinkStateHello = g, caps.linkStateHello
 	}
-	options.Compact = g.mesh.compactor()
+	options.Compact = compact
 	options.SizeProbe, options.SizeProbeHello = caps.sizeProbe, caps.sizeProbeHello
 	options.Resume = caps.resume
 	options.Windows = caps.windows
