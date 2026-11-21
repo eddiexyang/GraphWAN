@@ -287,6 +287,9 @@ func (q *QUICHub) DialAt(ctx context.Context, endpoint model.Endpoint, family in
 		return nil, errors.New("invalid QUIC candidate")
 	}
 	u, _ := url.Parse(endpoint.URL)
+	if !target.IsValid() {
+		target, _ = netip.ParseAddr(u.Hostname())
+	}
 	if _, err := EndpointDialAddress(endpoint, family, target); err != nil {
 		return nil, err
 	}

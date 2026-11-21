@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/netip"
 	"sync"
-	"sync/atomic"
 
 	"github.com/eddiexyang/graphnet/internal/tunnel"
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -29,7 +28,7 @@ import (
 type netstack struct {
 	config tunnel.Config
 	stack  *stack.Stack
-	link   *netstackLink
+	link   *channel.Endpoint
 	ctx    context.Context
 	cancel context.CancelFunc
 	once   sync.Once
@@ -37,35 +36,12 @@ type netstack struct {
 
 const netstackQueue = 1024
 
-// gVisor reads checksum capabilities at NIC ingress. Serialize injection so
-// only packets submitted by the local TCP offload path can skip verification.
-type netstackLink struct {
-	*channel.Endpoint
-	mu       sync.Mutex
-	verified atomic.Bool
-}
-
-func (l *netstackLink) Capabilities() stack.LinkEndpointCapabilities {
-	caps := l.Endpoint.Capabilities()
-	if l.verified.Load() {
-		caps |= stack.CapabilityRXChecksumOffload
-	}
-	return caps
-}
-
-func (l *netstackLink) inject(protocol tcpip.NetworkProtocolNumber, packet *stack.PacketBuffer, verified bool) {
-	l.mu.Lock()
-	l.verified.Store(verified)
-	l.Endpoint.InjectInbound(protocol, packet)
-	l.verified.Store(false)
-	l.mu.Unlock()
-}
-
 func newNetstack(config tunnel.Config) (*netstack, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &netstack{config: config, ctx: ctx, cancel: cancel}
 	n.stack = stack.New(stack.Options{NetworkProtocols: []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol}, TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol}})
-	n.link = &netstackLink{Endpoint: channel.New(netstackQueue, uint32(config.MTU), "")}
+	n.link = channel.New(netstackQueue, uint32(config.MTU), "")
+	n.link.SupportedGSOKind = stack.HostGSOSupported
 	if err := n.stack.CreateNIC(1, n.link); err != nil {
 		n.Close()
 		return nil, errors.New(err.String())
@@ -154,12 +130,54 @@ func (n *netstack) Read(p []byte) (int, error) {
 		return 0, net.ErrClosed
 	}
 	defer packet.DecRef()
-	view := packet.ToView()
-	defer view.Release()
-	if view.Size() > len(p) {
+	return copyPacketViews(p, packet)
+}
+
+func copyPacketViews(dst []byte, packet *stack.PacketBuffer) (int, error) {
+	if len(dst) < packet.Size() {
 		return 0, io.ErrShortBuffer
 	}
-	return copy(p, view.AsSlice()), nil
+	views, offset := packet.AsViewList()
+	var copied int
+	for view := views.Front(); view != nil; view = view.Next() {
+		chunk := view.AsSlice()
+		if offset >= len(chunk) {
+			offset -= len(chunk)
+			continue
+		}
+		copied += copy(dst[copied:], chunk[offset:])
+		offset = 0
+	}
+	return copied, nil
+}
+
+// ReadOwnedOffloadBatch hands the access stack the original TCP payload.
+// The byte view is for admission and for routes that still forward IP packets.
+func (n *netstack) ReadOwnedOffloadBatch(buffers [][]byte, sizes, segmentSizes []int, owners []*stack.PacketBuffer) (int, error) {
+	packet := n.link.ReadContext(n.ctx)
+	if packet == nil {
+		return 0, net.ErrClosed
+	}
+	defer packet.DecRef()
+
+	size, err := copyPacketViews(buffers[0], packet)
+	if err != nil {
+		return 0, err
+	}
+	sizes[0], segmentSizes[0], owners[0] = size, 0, nil
+
+	gso := packet.GSOOptions
+	if gso.Type == stack.GSOTCPv4 || gso.Type == stack.GSOTCPv6 {
+		if gso.MSS > 0 && packet.Data().Size() > int(gso.MSS) {
+			segmentSizes[0] = packet.HeaderSize() + int(gso.MSS)
+		}
+		inbound := packet.CloneToInbound()
+		inbound.NetworkProtocolNumber = packet.NetworkProtocolNumber
+		// The metadata comes from the local TCP stack, not the wire.
+		inbound.RXChecksumValidated = gso.NeedsCsum
+		owners[0] = inbound
+	}
+	return 1, nil
 }
 
 // Write delivers a packet from the data plane to the stack.
@@ -175,23 +193,9 @@ func (n *netstack) Write(p []byte) (int, error) {
 		protocol = ipv6.ProtocolNumber
 	}
 	packet := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(p)})
-	n.link.inject(protocol, packet, false)
+	n.link.InjectInbound(protocol, packet)
 	packet.DecRef()
 	return len(p), nil
-}
-
-// WriteTCPPacket delivers the local access stack's TCP output without
-// flattening its packet buffer or splitting a coalesced segment.
-func (n *netstack) WriteTCPPacket(packet *stack.PacketBuffer) error {
-	if n.ctx.Err() != nil {
-		return tunnel.ErrUnavailable
-	}
-	inbound := packet.CloneToInbound()
-	defer inbound.DecRef()
-	// Host GSO output carries a partial checksum. This is a trusted,
-	// in-process handoff from the access stack with no wire hop.
-	n.link.inject(packet.NetworkProtocolNumber, inbound, packet.GSOOptions.NeedsCsum)
-	return nil
 }
 
 func (n *netstack) Close() error {

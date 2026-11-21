@@ -385,6 +385,10 @@ func (r *DataPlane) readTunnel(network model.ID, device *runtimeTunnel) {
 		r.readTunnelBatch(network, device, batch)
 		return
 	}
+	if owned, ok := device.Device.(tunnel.OwnedOffloadReader); ok {
+		r.readTunnelPackets(network, device, 1, 65535, owned.ReadOwnedOffloadBatch)
+		return
+	}
 	buffer := make([]byte, packet.MaxPayload+1)
 	for {
 		n, err := device.Read(buffer)
@@ -464,12 +468,32 @@ func (r *DataPlane) deliver(ctx context.Context, network model.ID, raw []byte) e
 	return err
 }
 
+type tunnelPacketReader func(buffers [][]byte, sizes, segmentSizes []int, owners []*stack.PacketBuffer) (int, error)
+
 func (r *DataPlane) readTunnelBatch(network model.ID, device *runtimeTunnel, batch tunnel.BatchDevice) {
-	buffers := make([][]byte, batch.BatchSize())
-	sizes := make([]int, len(buffers))
-	segmentSizes := make([]int, len(buffers))
-	packets := make([][]byte, len(buffers))
-	owners := make([]*stack.PacketBuffer, len(buffers))
+	if owned, ok := batch.(tunnel.OwnedOffloadReader); ok {
+		r.readTunnelPackets(network, device, batch.BatchSize(), 65535, owned.ReadOwnedOffloadBatch)
+		return
+	}
+	if offload, ok := batch.(tunnel.OffloadReader); ok {
+		r.readTunnelPackets(network, device, batch.BatchSize(), 65535,
+			func(buffers [][]byte, sizes, segmentSizes []int, _ []*stack.PacketBuffer) (int, error) {
+				return offload.ReadOffloadBatch(buffers, sizes, segmentSizes)
+			})
+		return
+	}
+	r.readTunnelPackets(network, device, batch.BatchSize(), packet.MaxPayload+1,
+		func(buffers [][]byte, sizes, _ []int, _ []*stack.PacketBuffer) (int, error) {
+			return batch.ReadBatch(buffers, sizes)
+		})
+}
+
+func (r *DataPlane) readTunnelPackets(network model.ID, device *runtimeTunnel, batchSize, firstBufferSize int, read tunnelPacketReader) {
+	buffers := make([][]byte, batchSize)
+	sizes := make([]int, batchSize)
+	segmentSizes := make([]int, batchSize)
+	packets := make([][]byte, batchSize)
+	owners := make([]*stack.PacketBuffer, batchSize)
 	releaseOwners := func() {
 		for i, owner := range owners {
 			if owner != nil {
@@ -479,21 +503,14 @@ func (r *DataPlane) readTunnelBatch(network model.ID, device *runtimeTunnel, bat
 		}
 	}
 	defer releaseOwners()
-	read := func() (int, error) { return batch.ReadBatch(buffers, sizes) }
-	for i := range buffers {
+	// TCP offload may return one coalesced packet. Other slots are MTU sized.
+	buffers[0] = make([]byte, firstBufferSize)
+	for i := 1; i < batchSize; i++ {
 		buffers[i] = make([]byte, packet.MaxPayload+1)
 	}
-	if offload, ok := device.Device.(tunnel.OffloadReader); ok {
-		// A single kernel TCP GSO packet can hold up to 64 KiB. UDP still
-		// fills the ordinary MTU-sized buffers with independent segments.
-		buffers[0] = make([]byte, 65535)
-		read = func() (int, error) { return offload.ReadOffloadBatch(buffers, sizes, segmentSizes) }
-	}
-	if owned, ok := device.Device.(tunnel.OwnedOffloadReader); ok {
-		read = func() (int, error) { return owned.ReadOwnedOffloadBatch(buffers, sizes, segmentSizes, owners) }
-	}
+
 	for {
-		n, err := read()
+		n, err := read(buffers, sizes, segmentSizes, owners)
 		if err == nil && n == 0 {
 			err = io.ErrNoProgress
 		}

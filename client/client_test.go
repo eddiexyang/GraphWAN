@@ -160,7 +160,7 @@ func (cn *clientNetwork) serveEcho(t *testing.T, node int, port uint16) {
 // D is a client node attached to A and C, registered by public key: it gets
 // its configuration from a real controller and reaches services on B and C.
 func TestClientReachesServicesThroughTheNetwork(t *testing.T) {
-	for _, carrier := range []model.Transport{model.TCP, model.UDP} {
+	for _, carrier := range []model.Transport{model.TCP, model.UDP, model.QUIC} {
 		t.Run(string(carrier), func(t *testing.T) { testClientReachesServices(t, carrier) })
 	}
 }
