@@ -5,6 +5,7 @@ package tunnel
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 
 	"github.com/eddiexyang/graphnet/internal/packet"
@@ -14,6 +15,8 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
 
+var errInvalidOffloadFrame = errors.New("invalid TUN offload frame")
+
 // decodeOffloadRead keeps TCP in the large segments already produced by Linux.
 // gVisor validates complete checksums, so finish CHECKSUM_PARTIAL once for the
 // whole packet rather than splitting, copying and checksumming every MSS first.
@@ -21,7 +24,7 @@ import (
 // datagram's length, IPv4 ID and checksum before it enters graph forwarding.
 func decodeOffloadRead(input []byte, buffers [][]byte, sizes, segmentSizes []int, borrowTCP ...bool) (int, error) {
 	if len(input) < 10 {
-		return 0, errors.New("invalid TUN offload input")
+		return 0, fmt.Errorf("%w: truncated virtio header", errInvalidOffloadFrame)
 	}
 	return decodeOffloadPacket(input[:10], input[10:], buffers, sizes, segmentSizes, len(borrowTCP) > 0 && borrowTCP[0], false)
 }
@@ -37,12 +40,12 @@ func decodeOffloadPacket(virtio, raw []byte, buffers [][]byte, sizes, segmentSiz
 	offset := int(binary.LittleEndian.Uint16(virtio[8:10]))
 	info, err := packet.InspectAddresses(raw)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("%w: %w", errInvalidOffloadFrame, err)
 	}
 	if kind == unix.VIRTIO_NET_HDR_GSO_NONE {
 		if flags&unix.VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 && !(checksumOffload && kernelTCPChecksumOffload(virtio, raw)) {
 			if start+offset+2 > len(raw) {
-				return 0, errors.New("invalid TUN checksum offset")
+				return 0, fmt.Errorf("%w: invalid checksum offset", errInvalidOffloadFrame)
 			}
 			// Linux stores the pseudo-header seed in the checksum field.
 			initial := binary.BigEndian.Uint16(raw[start+offset:])
@@ -60,31 +63,31 @@ func decodeOffloadPacket(virtio, raw []byte, buffers [][]byte, sizes, segmentSiz
 		return 1, nil
 	}
 	if mss == 0 || start < 20 || start > len(raw) || info.Source.Is6() && start < 40 {
-		return 0, errors.New("invalid TUN segmentation metadata")
+		return 0, fmt.Errorf("%w: invalid segmentation metadata", errInvalidOffloadFrame)
 	}
 	transportStart, transportProtocol := offloadTransport(raw)
 	if transportStart != start {
-		return 0, errors.New("TUN checksum start disagrees with IP headers")
+		return 0, fmt.Errorf("%w: checksum start disagrees with IP headers", errInvalidOffloadFrame)
 	}
 	var protocol tcpip.TransportProtocolNumber
 	var headerSize int
 	switch kind {
 	case unix.VIRTIO_NET_HDR_GSO_TCPV4, unix.VIRTIO_NET_HDR_GSO_TCPV6:
 		if transportProtocol != unix.IPPROTO_TCP || (kind == unix.VIRTIO_NET_HDR_GSO_TCPV4) != info.Source.Is4() || offset != 16 || start+20 > len(raw) {
-			return 0, errors.New("invalid TUN TCP offload")
+			return 0, fmt.Errorf("%w: invalid TCP offload", errInvalidOffloadFrame)
 		}
 		headerSize = start + int(raw[start+12]>>4)*4
 		if headerSize < start+20 || headerSize > start+60 || headerSize >= len(raw) {
-			return 0, errors.New("invalid TUN TCP header")
+			return 0, fmt.Errorf("%w: invalid TCP header", errInvalidOffloadFrame)
 		}
 		protocol = unix.IPPROTO_TCP
 	case unix.VIRTIO_NET_HDR_GSO_UDP_L4:
 		if transportProtocol != unix.IPPROTO_UDP || offset != 6 || start+8 >= len(raw) {
-			return 0, errors.New("invalid TUN UDP offload")
+			return 0, fmt.Errorf("%w: invalid UDP offload", errInvalidOffloadFrame)
 		}
 		headerSize, protocol = start+8, unix.IPPROTO_UDP
 	default:
-		return 0, errors.New("unsupported TUN offload type")
+		return 0, fmt.Errorf("%w: unsupported GSO type", errInvalidOffloadFrame)
 	}
 	finishChecksum := func(out []byte) {
 		var source, destination tcpip.Address

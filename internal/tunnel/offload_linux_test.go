@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eddiexyang/graphnet/internal/packetbuf"
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -112,6 +113,61 @@ func TestOwnedOffloadReadBatchesQueuedDatagrams(t *testing.T) {
 	}
 }
 
+func TestOffloadReadersSkipMalformedFrames(t *testing.T) {
+	for _, mode := range []string{"borrowed", "owned"} {
+		t.Run(mode, func(t *testing.T) {
+			device, write := datagramReadFixture(t)
+			if err := device.file.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			first := ordinaryUDPReadFixture()
+			second := bytes.Clone(first)
+			second[len(second)-1] ^= 1
+			badIP := bytes.Clone(first)
+			badIP[10] &= 0x0f
+			badChecksum := bytes.Clone(first)
+			binary.LittleEndian.PutUint16(badChecksum[8:10], 0xffff)
+
+			write(badIP)
+			write(first)
+			write(first[:9])
+			write(badChecksum)
+			write(second)
+
+			buffers := [][]byte{make([]byte, 65535), make([]byte, 9001)}
+			sizes, segments := make([]int, 2), make([]int, 2)
+			owners := make([]*stack.PacketBuffer, 2)
+			checkPacket := func(i int, want []byte) {
+				t.Helper()
+				if sizes[i] != len(want)-10 || segments[i] != 0 || owners[i] != nil {
+					t.Fatal("unexpected datagram metadata", i, sizes[i], segments[i], owners[i])
+				}
+				got := buffers[i][:sizes[i]]
+				if got[len(got)-1] != want[len(want)-1] {
+					t.Fatal("datagrams arrived out of order", i)
+				}
+				verifyOffloadChecksum(t, got, true)
+			}
+			if mode == "owned" {
+				n, err := device.ReadOwnedOffloadBatch(buffers, sizes, segments, owners)
+				if n != 2 || err != nil {
+					t.Fatal("malformed frames interrupted the valid batch", n, err)
+				}
+				checkPacket(0, first)
+				checkPacket(1, second)
+				return
+			}
+			for _, want := range [][]byte{first, second} {
+				n, err := device.ReadOffloadBatch(buffers, sizes, segments)
+				if n != 1 || err != nil {
+					t.Fatal("malformed frames interrupted the read", n, err)
+				}
+				checkPacket(0, want)
+			}
+		})
+	}
+}
+
 func TestOwnedOffloadReadWaitsForFirstPacketAndClose(t *testing.T) {
 	device, write := datagramReadFixture(t)
 	buffers := [][]byte{make([]byte, 65535), make([]byte, 9001)}
@@ -125,6 +181,10 @@ func TestOwnedOffloadReadWaitsForFirstPacketAndClose(t *testing.T) {
 	read := func() {
 		n, err := device.ReadOwnedOffloadBatch(buffers, sizes, segments, owners)
 		done <- result{n, err}
+	}
+	// Exercise the boundary between consecutive read bursts with no valid packets.
+	for range packetbuf.BatchSize {
+		write([]byte{1})
 	}
 	go read()
 	select {
@@ -142,6 +202,7 @@ func TestOwnedOffloadReadWaitsForFirstPacketAndClose(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("read did not return its available packet")
 	}
+	write([]byte{1})
 	go read()
 	select {
 	case got := <-done:

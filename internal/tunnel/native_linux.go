@@ -155,11 +155,16 @@ func (d *native) ReadOffloadBatch(buffers [][]byte, sizes, segmentSizes []int) (
 	if len(buffers) > 0 {
 		buffers[0] = d.offloadScratch
 	}
-	n, err := d.file.Read(d.offloadReadBuffer[:])
-	if err != nil {
-		return 0, err
+	for {
+		n, err := d.file.Read(d.offloadReadBuffer[:])
+		if err != nil {
+			return 0, err
+		}
+		count, err := decodeOffloadRead(d.offloadReadBuffer[:n], buffers, sizes, segmentSizes, true)
+		if !errors.Is(err, errInvalidOffloadFrame) {
+			return count, err
+		}
 	}
-	return decodeOffloadRead(d.offloadReadBuffer[:n], buffers, sizes, segmentSizes, true)
 }
 
 func (d *native) ReadOwnedOffloadBatch(buffers [][]byte, sizes, segmentSizes []int, owners []*stack.PacketBuffer) (int, error) {
@@ -191,8 +196,10 @@ func (d *native) ReadOwnedOffloadBatch(buffers [][]byte, sizes, segmentSizes []i
 	// Keep the poll-descriptor reference, callback and virtio storage for the
 	// whole bounded burst. Waiting is permitted only before its first packet;
 	// later EAGAIN returns the packets already available without another wait.
-	err = raw.Read(func(fd uintptr) bool {
-		for count < len(buffers) {
+	readBurst := func(fd uintptr) bool {
+		// Release the poll descriptor even if the input queue keeps filling
+		// with malformed frames that never consume an output slot.
+		for dropped := 0; count < len(buffers) && dropped < packetbuf.BatchSize; {
 			if d.ingressView == nil {
 				d.ingressView = buffer.NewViewSize(65535)
 			}
@@ -218,11 +225,19 @@ func (d *native) ReadOwnedOffloadBatch(buffers [][]byte, sizes, segmentSizes []i
 					return true
 				}
 			}
-			if n < len(virtio) {
+			if n == 0 {
 				readErr = io.ErrUnexpectedEOF
 				return true
 			}
+			if n < len(virtio) {
+				dropped++
+				continue
+			}
 			decoded, decodeErr := d.decodeOwnedOffload(virtio[:], view, n-len(virtio), buffers[count:], sizes[count:], segmentSizes[count:], owners[count:])
+			if errors.Is(decodeErr, errInvalidOffloadFrame) {
+				dropped++
+				continue
+			}
 			if errors.Is(decodeErr, io.ErrShortBuffer) && count > 0 {
 				// A UDP GSO packet can expand beyond this batch's remaining
 				// slots. Keep its owned read view for the next complete batch.
@@ -240,11 +255,16 @@ func (d *native) ReadOwnedOffloadBatch(buffers [][]byte, sizes, segmentSizes []i
 			}
 		}
 		return true
-	})
-	if err != nil {
-		return count, err
 	}
-	return count, readErr
+	for {
+		if err := raw.Read(readBurst); err != nil {
+			return count, err
+		}
+		if count > 0 || readErr != nil {
+			return count, readErr
+		}
+		// A burst containing only dropped frames must wait for another frame.
+	}
 }
 
 func (d *native) decodeOwnedOffload(virtio []byte, view *buffer.View, size int, buffers [][]byte, sizes, segmentSizes []int, owners []*stack.PacketBuffer) (int, error) {
